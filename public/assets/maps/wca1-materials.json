@@ -1,0 +1,338 @@
+{
+  "source": "Warsow official warsow-assets repository",
+  "sourceUrl": "https://github.com/Warsow/warsow-assets",
+  "license": "CC-BY-SA-4.0 / CC-BY-ND-4.0; see upstream README and exceptions ledger",
+  "generatedBy": "scripts/import-wca1-materials.mjs",
+  "materials": {
+    "textures/cha0s_ws/glass": {
+      "source": "textures/cha0s_ws/chrome4.tga",
+      "map": "/assets/maps/wca1-materials/textures-cha0s-ws-glass-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/01bluel_1000": {
+      "source": "textures/lights/01bluel.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-01bluel-1000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_city1/concrete1": {
+      "source": "textures/wsw_city1/concrete1.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-city1-concrete1-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_metalSupp01_blue": {
+      "source": "textures/exwsw/eX_metalSupp01_blue.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-metalsupp01-blue-albedo.webp",
+      "normalMap": "/assets/maps/wca1-materials/textures-exwsw-ex-metalsupp01-blue-normal.webp",
+      "roughnessMap": null
+    },
+    "textures/wsw_city1/tubes1": {
+      "source": "textures/wsw_city1/tubes1.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-city1-tubes1-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_wall_01_big": {
+      "source": "textures/exwsw/eX_wall_01_big.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-wall-01-big-albedo.ktx",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_support_03_thin": {
+      "source": "textures/exwsw/eX_trim_support_03_thin.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-support-03-thin-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_vert_01": {
+      "source": "textures/exwsw/eX_trim_vert_01.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-vert-01-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_psimple_07_blue": {
+      "source": "textures/exwsw/eX_trim_psimple_07_blue.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-07-blue-albedo.webp",
+      "normalMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-07-blue-normal.webp",
+      "roughnessMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-07-blue-roughness.webp"
+    },
+    "textures/HazelH/verticalborder": {
+      "source": "textures/HazelH/verticalborder.tga",
+      "map": "/assets/maps/wca1-materials/textures-hazelh-verticalborder-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/cleansurface/pantone432c": {
+      "source": "textures/cleansurface/pantone432c.tga",
+      "map": "/assets/maps/wca1-materials/textures-cleansurface-pantone432c-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_baseboard_blue_concrete": {
+      "source": "textures/exwsw/eX_trim_baseboard_blue_concrete.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-baseboard-blue-concrete-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_psimple_05_straight_red": {
+      "source": "textures/exwsw/eX_trim_psimple_05_straight_red.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-05-straight-red-albedo.ktx",
+      "normalMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-05-straight-red-normal.webp",
+      "roughnessMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-05-straight-red-roughness.webp"
+    },
+    "textures/exwsw/eX_trim_psimple_07_red": {
+      "source": "textures/exwsw/eX_trim_psimple_07_red.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-07-red-albedo.ktx",
+      "normalMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-07-blue-normal.webp",
+      "roughnessMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-07-blue-roughness.webp"
+    },
+    "textures/exwsw/eX_trim_psimple_05_straight_blue": {
+      "source": "textures/exwsw/eX_trim_psimple_05_straight_blue.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-05-straight-blue-albedo.ktx",
+      "normalMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-05-straight-red-normal.webp",
+      "roughnessMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-05-straight-red-roughness.webp"
+    },
+    "textures/factory/factory_metal_floor2": {
+      "source": "textures/metal/treadplate0015g.tga",
+      "map": "/assets/maps/wca1-materials/textures-factory-factory-metal-floor2-albedo.webp",
+      "normalMap": "/assets/maps/wca1-materials/textures-factory-factory-metal-floor2-normal.webp",
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_wall_b01": {
+      "source": "textures/exwsw/eX_wall_b01.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-wall-b01-albedo.ktx",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_baseboard_02": {
+      "source": "textures/exwsw/eX_trim_baseboard_02.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-baseboard-02-albedo.ktx",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/01bluel_200": {
+      "source": "textures/lights/01bluel.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-01bluel-1000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_baseboard_blue": {
+      "source": "textures/exwsw/eX_trim_baseboard_blue.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-baseboard-blue-albedo.webp",
+      "normalMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-baseboard-blue-normal.webp",
+      "roughnessMap": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-baseboard-blue-roughness.webp"
+    },
+    "textures/exwsw/eX_trim_psimple_06": {
+      "source": "textures/exwsw/eX_trim_psimple_06.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-psimple-06-albedo.ktx",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_rplates_01": {
+      "source": "textures/exwsw/eX_rplates_01.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-rplates-01-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_city1/tech_concrete_tiles_mate": {
+      "source": "textures/wsw_city1/tech_concrete_tiles.ktx",
+      "map": "/assets/maps/wca1-materials/textures-wsw-city1-tech-concrete-tiles-mate-albedo.ktx",
+      "normalMap": "/assets/maps/wca1-materials/textures-wsw-city1-tech-concrete-tiles-mate-normal.webp",
+      "roughnessMap": null
+    },
+    "textures/wsw_city1/stepup01": {
+      "source": "textures/cleansurface/pantone425c.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-city1-stepup01-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "models/mapobjects/vic_statue/viciious": {
+      "source": "models/mapobjects/vic_Statue/viciious.tga",
+      "map": "/assets/maps/wca1-materials/models-mapobjects-vic-statue-viciious-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_flareshalos/small_light_halo_blue": {
+      "source": "textures/wsw_flareshalos/small_light_halo_blue.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-flareshalos-small-light-halo-blue-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/plastic_vertex/vertex_grey75": {
+      "source": "textures/plastic/grey75.tga",
+      "map": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey75-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey75-roughness.webp"
+    },
+    "textures/plastic_vertex/vertex_grey65": {
+      "source": "textures/plastic/grey65.tga",
+      "map": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey65-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey65-roughness.webp"
+    },
+    "textures/wsw_flareshalos/small_light_halo": {
+      "source": "textures/wsw_flareshalos/small_light_halo.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-flareshalos-small-light-halo-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_flareshalos/glow_halo_white": {
+      "source": "textures/wsw_flareshalos/glow_halo_white.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-flareshalos-glow-halo-white-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/plastic_vertex/vertex_grey85": {
+      "source": "textures/plastic/grey85.tga",
+      "map": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey85-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey85-roughness.webp"
+    },
+    "textures/blx_wtest3_vertex/vertex_blx_wt3_pillar3": {
+      "source": "textures/blx_wtest3/blx_wt3_pillar3.tga",
+      "map": "/assets/maps/wca1-materials/textures-blx-wtest3-vertex-vertex-blx-wt3-pillar3-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/blx_wtest3_vertex/vertex_blx_wt3_pillar2": {
+      "source": "textures/blx_wtest3/blx_wt3_pillar2.tga",
+      "map": "/assets/maps/wca1-materials/textures-blx-wtest3-vertex-vertex-blx-wt3-pillar2-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_flareshalos/glow_cone_cyan": {
+      "source": "textures/wsw_flareshalos/glow_cone_cyan.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-flareshalos-glow-cone-cyan-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_flareshalos/flare_sphere_white_front": {
+      "source": "textures/wsw_flareshalos/flare_sphere_white.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-flareshalos-flare-sphere-white-front-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_cave1/light_sphere1": {
+      "source": "textures/lights/oc3.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-cave1-light-sphere1-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/plastic_vertex/vertex_red": {
+      "source": "textures/plastic/red.tga",
+      "map": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-red-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey65-roughness.webp"
+    },
+    "textures/plastic_vertex/vertex_grey50": {
+      "source": "textures/plastic/grey50.tga",
+      "map": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey50-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey50-roughness.webp"
+    },
+    "textures/blx_wtest3/blx_wt3_pillar3": {
+      "source": "textures/blx_wtest3/blx_wt3_pillar3.tga",
+      "map": "/assets/maps/wca1-materials/textures-blx-wtest3-vertex-vertex-blx-wt3-pillar3-albedo.webp",
+      "normalMap": "/assets/maps/wca1-materials/textures-blx-wtest3-blx-wt3-pillar3-normal.webp",
+      "roughnessMap": "/assets/maps/wca1-materials/textures-blx-wtest3-blx-wt3-pillar3-roughness.webp"
+    },
+    "textures/exwsw/eX_metalwall02": {
+      "source": "textures/exwsw/eX_metalwall02.ktx",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-metalwall02-albedo.ktx",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/blx_wtest3/blx_wt3_pillar": {
+      "source": "textures/blx_wtest3/blx_wt3_pillar.tga",
+      "map": "/assets/maps/wca1-materials/textures-blx-wtest3-blx-wt3-pillar-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_city1/stepside01": {
+      "source": "textures/wsw_city1/stepside01.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-city1-stepside01-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/exwsw/eX_trim_support_03": {
+      "source": "textures/exwsw/eX_trim_support_03.tga",
+      "map": "/assets/maps/wca1-materials/textures-exwsw-ex-trim-support-03-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/wsw_city1/cables2": {
+      "source": "textures/wsw_city1/cables2.tga",
+      "map": "/assets/maps/wca1-materials/textures-wsw-city1-cables2-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/plastic_vertex/vertex_grey35": {
+      "source": "textures/plastic/grey35.tga",
+      "map": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey35-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": "/assets/maps/wca1-materials/textures-plastic-vertex-vertex-grey35-roughness.webp"
+    },
+    "textures/plastic/pvc_grey": {
+      "source": "textures/plastic/pvc_grey.tga",
+      "map": "/assets/maps/wca1-materials/textures-plastic-pvc-grey-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": "/assets/maps/wca1-materials/textures-plastic-pvc-grey-roughness.webp"
+    },
+    "textures/lights/bright2_10000": {
+      "source": "textures/lights/bright2.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-bright2-10000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/bright2_2500": {
+      "source": "textures/lights/bright2.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-bright2-10000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/panel1_500": {
+      "source": "textures/lights/panel1.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-panel1-500-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/square_light_tile_2000": {
+      "source": "textures/lights/square_light_tile.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-square-light-tile-2000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/01blues_5000": {
+      "source": "textures/lights/01blues.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-01blues-5000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/01blues_1000": {
+      "source": "textures/lights/01blues.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-01blues-5000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/lights/01bluel": {
+      "source": "textures/lights/01bluel.tga",
+      "map": "/assets/maps/wca1-materials/textures-lights-01bluel-1000-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/blx/blx_ecel_bounce": {
+      "source": "textures/blx/blx_ecel_bounce.tga",
+      "map": "/assets/maps/wca1-materials/textures-blx-blx-ecel-bounce-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    },
+    "textures/billboard/terebi": {
+      "source": "textures/billboard/terebi.jpg",
+      "map": "/assets/maps/wca1-materials/textures-billboard-terebi-albedo.webp",
+      "normalMap": null,
+      "roughnessMap": null
+    }
+  }
+}

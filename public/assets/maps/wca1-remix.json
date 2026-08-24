@@ -1,0 +1,519 @@
+{
+  "source": "Warsow wca1 / Funpark",
+  "sourceUrl": "https://github.com/Warsow/warsow-assets/blob/master/maps/wca1.bsp",
+  "license": "CC-BY-SA-4.0",
+  "scale": 0.017857142857142856,
+  "origin": [
+    -528,
+    80,
+    64
+  ],
+  "collision": {
+    "source": "Qfusion BSP world brushes plus collidable Bezier patches",
+    "brushCount": 986,
+    "vertexCount": 172845,
+    "patchVertexCount": 139950,
+    "positionOffset": 5787024,
+    "brushRecordOffset": 7861164,
+    "brushRecordStride": 8,
+    "brushPlaneOffset": 7892716,
+    "brushPlaneCount": 7195
+  },
+  "groups": [
+    {
+      "name": "glass",
+      "shader": "textures/cha0s_ws/glass",
+      "vertexCount": 11238,
+      "positionOffset": 0,
+      "normalOffset": 134856,
+      "uvOffset": 269712,
+      "colorOffset": 359616
+    },
+    {
+      "name": "blue",
+      "shader": "textures/lights/01bluel_1000",
+      "vertexCount": 9915,
+      "positionOffset": 393332,
+      "normalOffset": 512312,
+      "uvOffset": 631292,
+      "colorOffset": 710612
+    },
+    {
+      "name": "concrete",
+      "shader": "textures/wsw_city1/concrete1",
+      "vertexCount": 14712,
+      "positionOffset": 740360,
+      "normalOffset": 916904,
+      "uvOffset": 1093448,
+      "colorOffset": 1211144
+    },
+    {
+      "name": "blue",
+      "shader": "textures/exwsw/eX_metalSupp01_blue",
+      "vertexCount": 39792,
+      "positionOffset": 1255280,
+      "normalOffset": 1732784,
+      "uvOffset": 2210288,
+      "colorOffset": 2528624
+    },
+    {
+      "name": "metal",
+      "shader": "textures/wsw_city1/tubes1",
+      "vertexCount": 1800,
+      "positionOffset": 2648000,
+      "normalOffset": 2669600,
+      "uvOffset": 2691200,
+      "colorOffset": 2705600
+    },
+    {
+      "name": "wall",
+      "shader": "textures/exwsw/eX_wall_01_big",
+      "vertexCount": 5502,
+      "positionOffset": 2711000,
+      "normalOffset": 2777024,
+      "uvOffset": 2843048,
+      "colorOffset": 2887064
+    },
+    {
+      "name": "trim",
+      "shader": "textures/exwsw/eX_trim_support_03_thin",
+      "vertexCount": 9873,
+      "positionOffset": 2903572,
+      "normalOffset": 3022048,
+      "uvOffset": 3140524,
+      "colorOffset": 3219508
+    },
+    {
+      "name": "trim",
+      "shader": "textures/exwsw/eX_trim_vert_01",
+      "vertexCount": 2808,
+      "positionOffset": 3249128,
+      "normalOffset": 3282824,
+      "uvOffset": 3316520,
+      "colorOffset": 3338984
+    },
+    {
+      "name": "blue",
+      "shader": "textures/exwsw/eX_trim_psimple_07_blue",
+      "vertexCount": 1719,
+      "positionOffset": 3347408,
+      "normalOffset": 3368036,
+      "uvOffset": 3388664,
+      "colorOffset": 3402416
+    },
+    {
+      "name": "trim",
+      "shader": "textures/HazelH/verticalborder",
+      "vertexCount": 180,
+      "positionOffset": 3407576,
+      "normalOffset": 3409736,
+      "uvOffset": 3411896,
+      "colorOffset": 3413336
+    },
+    {
+      "name": "wall",
+      "shader": "textures/cleansurface/pantone432c",
+      "vertexCount": 27936,
+      "positionOffset": 3413876,
+      "normalOffset": 3749108,
+      "uvOffset": 4084340,
+      "colorOffset": 4307828
+    },
+    {
+      "name": "blue",
+      "shader": "textures/exwsw/eX_trim_baseboard_blue_concrete",
+      "vertexCount": 2280,
+      "positionOffset": 4391636,
+      "normalOffset": 4418996,
+      "uvOffset": 4446356,
+      "colorOffset": 4464596
+    },
+    {
+      "name": "red",
+      "shader": "textures/exwsw/eX_trim_psimple_05_straight_red",
+      "vertexCount": 1437,
+      "positionOffset": 4471436,
+      "normalOffset": 4488680,
+      "uvOffset": 4505924,
+      "colorOffset": 4517420
+    },
+    {
+      "name": "red",
+      "shader": "textures/exwsw/eX_trim_psimple_07_red",
+      "vertexCount": 531,
+      "positionOffset": 4521732,
+      "normalOffset": 4528104,
+      "uvOffset": 4534476,
+      "colorOffset": 4538724
+    },
+    {
+      "name": "blue",
+      "shader": "textures/exwsw/eX_trim_psimple_05_straight_blue",
+      "vertexCount": 1755,
+      "positionOffset": 4540320,
+      "normalOffset": 4561380,
+      "uvOffset": 4582440,
+      "colorOffset": 4596480
+    },
+    {
+      "name": "floor",
+      "shader": "textures/factory/factory_metal_floor2",
+      "vertexCount": 3261,
+      "positionOffset": 4601748,
+      "normalOffset": 4640880,
+      "uvOffset": 4680012,
+      "colorOffset": 4706100
+    },
+    {
+      "name": "wall",
+      "shader": "textures/exwsw/eX_wall_b01",
+      "vertexCount": 600,
+      "positionOffset": 4715884,
+      "normalOffset": 4723084,
+      "uvOffset": 4730284,
+      "colorOffset": 4735084
+    },
+    {
+      "name": "trim",
+      "shader": "textures/exwsw/eX_trim_baseboard_02",
+      "vertexCount": 486,
+      "positionOffset": 4736884,
+      "normalOffset": 4742716,
+      "uvOffset": 4748548,
+      "colorOffset": 4752436
+    },
+    {
+      "name": "blue",
+      "shader": "textures/lights/01bluel_200",
+      "vertexCount": 3024,
+      "positionOffset": 4753896,
+      "normalOffset": 4790184,
+      "uvOffset": 4826472,
+      "colorOffset": 4850664
+    },
+    {
+      "name": "blue",
+      "shader": "textures/exwsw/eX_trim_baseboard_blue",
+      "vertexCount": 300,
+      "positionOffset": 4859736,
+      "normalOffset": 4863336,
+      "uvOffset": 4866936,
+      "colorOffset": 4869336
+    },
+    {
+      "name": "trim",
+      "shader": "textures/exwsw/eX_trim_psimple_06",
+      "vertexCount": 1806,
+      "positionOffset": 4870236,
+      "normalOffset": 4891908,
+      "uvOffset": 4913580,
+      "colorOffset": 4928028
+    },
+    {
+      "name": "floor",
+      "shader": "textures/exwsw/eX_rplates_01",
+      "vertexCount": 159,
+      "positionOffset": 4933448,
+      "normalOffset": 4935356,
+      "uvOffset": 4937264,
+      "colorOffset": 4938536
+    },
+    {
+      "name": "floor",
+      "shader": "textures/wsw_city1/tech_concrete_tiles_mate",
+      "vertexCount": 1365,
+      "positionOffset": 4939016,
+      "normalOffset": 4955396,
+      "uvOffset": 4971776,
+      "colorOffset": 4982696
+    },
+    {
+      "name": "floor",
+      "shader": "textures/wsw_city1/stepup01",
+      "vertexCount": 4527,
+      "positionOffset": 4986792,
+      "normalOffset": 5041116,
+      "uvOffset": 5095440,
+      "colorOffset": 5131656
+    },
+    {
+      "name": "concrete",
+      "shader": "models/mapobjects/vic_statue/viciious",
+      "vertexCount": 2229,
+      "positionOffset": 5145240,
+      "normalOffset": 5171988,
+      "uvOffset": 5198736,
+      "colorOffset": 5216568
+    },
+    {
+      "name": "blue",
+      "shader": "textures/wsw_flareshalos/small_light_halo_blue",
+      "vertexCount": 84,
+      "positionOffset": 5223256,
+      "normalOffset": 5224264,
+      "uvOffset": 5225272,
+      "colorOffset": 5225944
+    },
+    {
+      "name": "wall",
+      "shader": "textures/plastic_vertex/vertex_grey75",
+      "vertexCount": 5811,
+      "positionOffset": 5226196,
+      "normalOffset": 5295928,
+      "uvOffset": 5365660,
+      "colorOffset": 5412148
+    },
+    {
+      "name": "wall",
+      "shader": "textures/plastic_vertex/vertex_grey65",
+      "vertexCount": 828,
+      "positionOffset": 5429584,
+      "normalOffset": 5439520,
+      "uvOffset": 5449456,
+      "colorOffset": 5456080
+    },
+    {
+      "name": "light",
+      "shader": "textures/wsw_flareshalos/small_light_halo",
+      "vertexCount": 18,
+      "positionOffset": 5458564,
+      "normalOffset": 5458780,
+      "uvOffset": 5458996,
+      "colorOffset": 5459140
+    },
+    {
+      "name": "light",
+      "shader": "textures/wsw_flareshalos/glow_halo_white",
+      "vertexCount": 48,
+      "positionOffset": 5459196,
+      "normalOffset": 5459772,
+      "uvOffset": 5460348,
+      "colorOffset": 5460732
+    },
+    {
+      "name": "wall",
+      "shader": "textures/plastic_vertex/vertex_grey85",
+      "vertexCount": 960,
+      "positionOffset": 5460876,
+      "normalOffset": 5472396,
+      "uvOffset": 5483916,
+      "colorOffset": 5491596
+    },
+    {
+      "name": "trim",
+      "shader": "textures/blx_wtest3_vertex/vertex_blx_wt3_pillar3",
+      "vertexCount": 384,
+      "positionOffset": 5494476,
+      "normalOffset": 5499084,
+      "uvOffset": 5503692,
+      "colorOffset": 5506764
+    },
+    {
+      "name": "trim",
+      "shader": "textures/blx_wtest3_vertex/vertex_blx_wt3_pillar2",
+      "vertexCount": 3696,
+      "positionOffset": 5507916,
+      "normalOffset": 5552268,
+      "uvOffset": 5596620,
+      "colorOffset": 5626188
+    },
+    {
+      "name": "light",
+      "shader": "textures/wsw_flareshalos/glow_cone_cyan",
+      "vertexCount": 18,
+      "positionOffset": 5637276,
+      "normalOffset": 5637492,
+      "uvOffset": 5637708,
+      "colorOffset": 5637852
+    },
+    {
+      "name": "light",
+      "shader": "textures/wsw_flareshalos/flare_sphere_white_front",
+      "vertexCount": 18,
+      "positionOffset": 5637908,
+      "normalOffset": 5638124,
+      "uvOffset": 5638340,
+      "colorOffset": 5638484
+    },
+    {
+      "name": "light",
+      "shader": "textures/wsw_cave1/light_sphere1",
+      "vertexCount": 108,
+      "positionOffset": 5638540,
+      "normalOffset": 5639836,
+      "uvOffset": 5641132,
+      "colorOffset": 5641996
+    },
+    {
+      "name": "red",
+      "shader": "textures/plastic_vertex/vertex_red",
+      "vertexCount": 576,
+      "positionOffset": 5642320,
+      "normalOffset": 5649232,
+      "uvOffset": 5656144,
+      "colorOffset": 5660752
+    },
+    {
+      "name": "wall",
+      "shader": "textures/plastic_vertex/vertex_grey50",
+      "vertexCount": 828,
+      "positionOffset": 5662480,
+      "normalOffset": 5672416,
+      "uvOffset": 5682352,
+      "colorOffset": 5688976
+    },
+    {
+      "name": "trim",
+      "shader": "textures/blx_wtest3/blx_wt3_pillar3",
+      "vertexCount": 192,
+      "positionOffset": 5691460,
+      "normalOffset": 5693764,
+      "uvOffset": 5696068,
+      "colorOffset": 5697604
+    },
+    {
+      "name": "metal",
+      "shader": "textures/exwsw/eX_metalwall02",
+      "vertexCount": 6,
+      "positionOffset": 5698180,
+      "normalOffset": 5698252,
+      "uvOffset": 5698324,
+      "colorOffset": 5698372
+    },
+    {
+      "name": "trim",
+      "shader": "textures/blx_wtest3/blx_wt3_pillar",
+      "vertexCount": 48,
+      "positionOffset": 5698392,
+      "normalOffset": 5698968,
+      "uvOffset": 5699544,
+      "colorOffset": 5699928
+    },
+    {
+      "name": "floor",
+      "shader": "textures/wsw_city1/stepside01",
+      "vertexCount": 1827,
+      "positionOffset": 5700072,
+      "normalOffset": 5721996,
+      "uvOffset": 5743920,
+      "colorOffset": 5758536
+    },
+    {
+      "name": "trim",
+      "shader": "textures/exwsw/eX_trim_support_03",
+      "vertexCount": 36,
+      "positionOffset": 5764020,
+      "normalOffset": 5764452,
+      "uvOffset": 5764884,
+      "colorOffset": 5765172
+    },
+    {
+      "name": "metal",
+      "shader": "textures/wsw_city1/cables2",
+      "vertexCount": 9,
+      "positionOffset": 5765280,
+      "normalOffset": 5765388,
+      "uvOffset": 5765496,
+      "colorOffset": 5765568
+    },
+    {
+      "name": "wall",
+      "shader": "textures/plastic_vertex/vertex_grey35",
+      "vertexCount": 90,
+      "positionOffset": 5765596,
+      "normalOffset": 5766676,
+      "uvOffset": 5767756,
+      "colorOffset": 5768476
+    },
+    {
+      "name": "wall",
+      "shader": "textures/plastic/pvc_grey",
+      "vertexCount": 30,
+      "positionOffset": 5768748,
+      "normalOffset": 5769108,
+      "uvOffset": 5769468,
+      "colorOffset": 5769708
+    },
+    {
+      "name": "light",
+      "shader": "textures/lights/bright2_10000",
+      "vertexCount": 72,
+      "positionOffset": 5769800,
+      "normalOffset": 5770664,
+      "uvOffset": 5771528,
+      "colorOffset": 5772104
+    },
+    {
+      "name": "light",
+      "shader": "textures/lights/bright2_2500",
+      "vertexCount": 36,
+      "positionOffset": 5772320,
+      "normalOffset": 5772752,
+      "uvOffset": 5773184,
+      "colorOffset": 5773472
+    },
+    {
+      "name": "light",
+      "shader": "textures/lights/panel1_500",
+      "vertexCount": 192,
+      "positionOffset": 5773580,
+      "normalOffset": 5775884,
+      "uvOffset": 5778188,
+      "colorOffset": 5779724
+    },
+    {
+      "name": "light",
+      "shader": "textures/lights/square_light_tile_2000",
+      "vertexCount": 24,
+      "positionOffset": 5780300,
+      "normalOffset": 5780588,
+      "uvOffset": 5780876,
+      "colorOffset": 5781068
+    },
+    {
+      "name": "blue",
+      "shader": "textures/lights/01blues_5000",
+      "vertexCount": 90,
+      "positionOffset": 5781140,
+      "normalOffset": 5782220,
+      "uvOffset": 5783300,
+      "colorOffset": 5784020
+    },
+    {
+      "name": "blue",
+      "shader": "textures/lights/01blues_1000",
+      "vertexCount": 12,
+      "positionOffset": 5784292,
+      "normalOffset": 5784436,
+      "uvOffset": 5784580,
+      "colorOffset": 5784676
+    },
+    {
+      "name": "blue",
+      "shader": "textures/lights/01bluel",
+      "vertexCount": 24,
+      "positionOffset": 5784712,
+      "normalOffset": 5785000,
+      "uvOffset": 5785288,
+      "colorOffset": 5785480
+    },
+    {
+      "name": "concrete",
+      "shader": "textures/blx/blx_ecel_bounce",
+      "vertexCount": 36,
+      "positionOffset": 5785552,
+      "normalOffset": 5785984,
+      "uvOffset": 5786416,
+      "colorOffset": 5786704
+    },
+    {
+      "name": "screen",
+      "shader": "textures/billboard/terebi",
+      "vertexCount": 6,
+      "positionOffset": 5786812,
+      "normalOffset": 5786884,
+      "uvOffset": 5786956,
+      "colorOffset": 5787004
+    }
+  ]
+}
