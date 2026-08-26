@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#070b15" />
     <meta name="color-scheme" content="dark" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <link rel="stylesheet" href="/src/gameplay-polish.css" />
+    <link rel="stylesheet" href="/src/visor-hud.css" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%2343e8ff' d='M32 3 58 18v28L32 61 6 46V18z'/%3E%3Cpath fill='%23070b15' d='m32 14 15 9v18l-15 9-15-9V23z'/%3E%3C/svg%3E" />
     <title>Rift</title>
   </head>
@@ -38,16 +41,75 @@
           </div>
         </header>
 
+        <section class="standings-strip" aria-label="Combatant standings">
+          <div class="standings-heading" aria-hidden="true">
+            <span>Combatants</span>
+            <strong>Live standings</strong>
+          </div>
+          <ol id="standings-list">
+            <li class="standing-row is-player is-leader" data-standing-slot="0">
+              <span class="standing-rank">01</span>
+              <strong class="standing-callsign">RIFT-01</strong>
+              <span class="standing-state">YOU · LEAD</span>
+              <output class="standing-score">00</output>
+            </li>
+            <li class="standing-row" data-standing-slot="1">
+              <span class="standing-rank">02</span>
+              <strong class="standing-callsign">RIVAL-01</strong>
+              <span class="standing-state">RIVAL</span>
+              <output class="standing-score">00</output>
+            </li>
+            <li class="standing-row" data-standing-slot="2">
+              <span class="standing-rank">03</span>
+              <strong class="standing-callsign">RIVAL-02</strong>
+              <span class="standing-state">RIVAL</span>
+              <output class="standing-score">00</output>
+            </li>
+            <li class="standing-row" data-standing-slot="3">
+              <span class="standing-rank">04</span>
+              <strong class="standing-callsign">RIVAL-03</strong>
+              <span class="standing-state">RIVAL</span>
+              <output class="standing-score">00</output>
+            </li>
+          </ol>
+        </section>
+
         <section class="objective-cluster" aria-label="Flux Core objective">
           <div class="objective-heading">
             <span class="objective-mark" aria-hidden="true"></span>
-            <span id="core-status">CORE CHARGING</span>
-            <strong id="rail-timer">RAIL 45s</strong>
+            <div class="objective-ident">
+              <span>Flux Core</span>
+              <strong id="core-location">RIFT NEXUS</strong>
+            </div>
+            <time id="objective-event" aria-label="Next objective event">CORE ONLINE 00:30</time>
           </div>
-          <div class="core-track" aria-hidden="true">
+          <div class="objective-state" role="status" aria-live="polite" aria-atomic="true">
+            <span id="core-phase">CHARGING</span>
+            <strong id="core-status">CORE CHARGING</strong>
+          </div>
+          <div class="core-track" role="progressbar" aria-label="Flux Core capture progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0 percent">
             <span id="core-fill"></span>
           </div>
+          <div class="objective-footer">
+            <span id="core-progress-label">000%</span>
+            <strong id="rail-timer">RAIL 45s</strong>
+          </div>
           <div id="powerup-list">NO ACTIVE BOOST</div>
+        </section>
+
+        <section id="arena-context" class="arena-context" aria-label="Arena conditions and style feedback" hidden>
+          <div id="style-slot" class="context-slot context-slot--style" role="status" aria-live="polite" hidden>
+            <span>Style</span>
+            <strong id="style-medal">FLOW</strong>
+            <div id="style-meter" class="context-meter" role="progressbar" aria-label="Style meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <i id="style-meter-fill"></i>
+            </div>
+          </div>
+          <div id="weather-slot" class="context-slot context-slot--weather" role="status" aria-live="polite" hidden>
+            <span>Weather</span>
+            <strong id="weather-phase">CLEAR</strong>
+            <small id="weather-detail">WINDS CALM</small>
+          </div>
         </section>
 
         <section class="vitals-cluster" aria-label="Player vitals">
@@ -80,6 +142,7 @@
           <div class="weapon-copy">
             <span>Equipped</span>
             <strong id="weapon-name">MACHINE GUN</strong>
+            <small id="weapon-secondary">RMB // STABILIZED FIRE</small>
           </div>
           <div class="ammo-lockup">
             <strong id="ammo-value">120</strong>
@@ -91,12 +154,41 @@
         <div id="fps-value" aria-label="Frame rate">60 FPS</div>
       </section>
 
+      <div id="helmet-visor" aria-hidden="true">
+        <div class="visor-lens"></div>
+        <div class="visor-brow"></div>
+        <div class="visor-temple visor-temple--left"><i></i></div>
+        <div class="visor-temple visor-temple--right"><i></i></div>
+        <div class="visor-chin"></div>
+        <span class="visor-glint visor-glint--primary"></span>
+        <span class="visor-glint visor-glint--secondary"></span>
+      </div>
+
       <div id="crosshair" aria-hidden="true">
         <span></span><span></span><span></span><span></span><i></i>
         <b class="hit-tick hit-tick--nw"></b>
         <b class="hit-tick hit-tick--ne"></b>
         <b class="hit-tick hit-tick--sw"></b>
         <b class="hit-tick hit-tick--se"></b>
+      </div>
+      <div id="scope-overlay" aria-hidden="true">
+        <div class="scope-glass">
+          <span class="scope-axis scope-axis--horizontal"></span>
+          <span class="scope-axis scope-axis--vertical"></span>
+          <span class="scope-center-dot"></span>
+          <span class="scope-bracket scope-bracket--nw"></span>
+          <span class="scope-bracket scope-bracket--ne"></span>
+          <span class="scope-bracket scope-bracket--sw"></span>
+          <span class="scope-bracket scope-bracket--se"></span>
+          <span class="scope-tick scope-tick--left"></span>
+          <span class="scope-tick scope-tick--right"></span>
+        </div>
+        <div class="scope-readout scope-readout--top">
+          <span>LONGSHOT // OPTIC</span><strong id="scope-zoom">1.0×</strong>
+        </div>
+        <div class="scope-readout scope-readout--bottom">
+          <span>RANGE</span><strong id="scope-range">---</strong><small>STABILIZED</small>
+        </div>
       </div>
       <div id="damage-vignette" aria-hidden="true"></div>
 
@@ -119,30 +211,177 @@
           <p id="overlay-kicker" class="modal-kicker">Arena FPS // Live combat</p>
           <h1 id="game-title"><img src="/assets/ui/rift-logo.png" alt="Rift" /></h1>
           <p id="overlay-tagline" class="arena-callout">WCA1 // Rift Sector <strong>· First to 20</strong></p>
+          <nav class="menu-tabs" aria-label="Start menu sections">
+            <button id="play-tab" class="menu-tab active" type="button" aria-selected="true">Play</button>
+            <button id="intel-tab" class="menu-tab" type="button" aria-selected="false">Intel</button>
+            <button id="options-tab" class="menu-tab" type="button" aria-selected="false">Options</button>
+          </nav>
+          <div id="play-menu" class="menu-view active">
+          <section id="match-report" class="match-report" aria-live="polite" hidden>
+            <strong id="match-report-title">MATCH REPORT</strong>
+            <div id="match-report-stats"></div>
+          </section>
           <div class="deploy-meta" aria-label="Arena deployment details">
             <span><small>Arena</small>WCA1 // Rift Sector</span>
             <span><small>Protocol</small>20 Frag Limit</span>
             <span><small>Frame</small>Light Assault</span>
           </div>
+          <div class="map-picker" aria-label="Choose arena map">
+            <span class="map-picker-label">Arena map</span>
+            <div class="map-picker-options">
+              <button class="map-choice" type="button" data-map-choice="monsoon">Monsoon Divide</button>
+              <button class="map-choice" type="button" data-map-choice="quicksense">QuickSense</button>
+            </div>
+          </div>
           <div class="briefing-grid" aria-label="Controls">
             <div><kbd>WASD</kbd><span>Move</span></div>
             <div><kbd>MOUSE</kbd><span>Aim</span></div>
             <div><kbd>LMB</kbd><span>Fire</span></div>
+            <div><kbd>RMB / C</kbd><span>Weapon ability</span></div>
             <div><kbd>SHIFT</kbd><span>Ski</span></div>
-            <div><kbd>SPACE</kbd><span>Momentum jump</span></div>
-            <div><kbd>G / E</kbd><span>Hold to grapple · E also dashes</span></div>
-            <div><kbd>1—7</kbd><span>Weapons</span></div>
-            <div><kbd>G</kbd><span>Grapple / release</span></div>
+            <div><kbd>SPACE</kbd><span>Jump · hold for jetpack</span></div>
+            <div><kbd>G</kbd><span>Hold to grapple</span></div>
+            <div><kbd>CAPS / E</kbd><span>Dash</span></div>
+            <div><kbd>1—8</kbd><span>Weapons</span></div>
             <div><kbd>Q</kbd><span>Throw grenade</span></div>
           </div>
           <div class="loadout-strip" aria-hidden="true">
-            <span>7 weapon channels</span><i></i><span>mobility online</span><i></i><span>flux core live</span>
+            <span>8 weapon channels</span><i></i><span>mobility online</span><i></i><span>flux core live</span>
           </div>
           <button id="start-button" type="button">
             <span>Enter the rift</span>
             <i aria-hidden="true">›</i>
           </button>
           <p id="overlay-footnote" class="modal-footnote">Six minute arena match · mouse captures on deploy</p>
+          </div>
+          <div id="intel-menu" class="menu-view dossier-view" aria-hidden="true">
+            <section id="dossier-shell" class="dossier-shell" aria-labelledby="dossier-title" data-role="hunter">
+              <header class="dossier-header">
+                <div class="dossier-heading">
+                  <span>Riftline Arena // Pre-match intel</span>
+                  <h2 id="dossier-title">Tactical Visor Dossier</h2>
+                  <p>Bot archetype intelligence // deterministic profiles</p>
+                </div>
+                <img class="dossier-logo" src="/assets/ui/rift-logo.png" alt="Rift" />
+                <div class="dossier-calibration" aria-label="Visor calibration status">
+                  <span>Visor calibration</span>
+                  <strong>Optic alignment: 98.7%</strong>
+                  <small>Signal lock: stable</small>
+                </div>
+              </header>
+
+              <div class="dossier-content">
+                <aside class="dossier-role-rail" aria-label="Bot archetypes">
+                  <button class="dossier-role" type="button" data-role="hunter" aria-pressed="true">
+                    <img src="/assets/ui/dossier/hunter.webp" alt="" />
+                    <span><small>01</small><strong>Hunter</strong><em>Pressure hunter</em></span>
+                  </button>
+                  <button class="dossier-role" type="button" data-role="anchor" aria-pressed="false">
+                    <img src="/assets/ui/dossier/anchor.webp" alt="" />
+                    <span><small>02</small><strong>Anchor</strong><em>Core anchor</em></span>
+                  </button>
+                  <button class="dossier-role" type="button" data-role="runner" aria-pressed="false">
+                    <img src="/assets/ui/dossier/runner.webp" alt="" />
+                    <span><small>03</small><strong>Runner</strong><em>Route runner</em></span>
+                  </button>
+                  <button class="dossier-role" type="button" data-role="thief" aria-pressed="false">
+                    <img src="/assets/ui/dossier/thief.webp" alt="" />
+                    <span><small>04</small><strong>Thief</strong><em>Powerup thief</em></span>
+                  </button>
+                </aside>
+
+                <article class="dossier-hero" aria-live="polite">
+                  <img id="dossier-hero-image" src="/assets/ui/dossier/hunter.webp" alt="Pressure Hunter combat frame" />
+                  <div class="dossier-identity">
+                    <span id="dossier-index">01 // Hunter</span>
+                    <h3 id="dossier-hero-title" tabindex="-1">Pressure<br />Hunter</h3>
+                    <small>Behavior label</small>
+                    <strong id="dossier-behavior">Relentless aggressor</strong>
+                    <p id="dossier-description">Seeks direct engagements and sustains pressure. Prioritizes targets that open space and break defensive setups.</p>
+                    <div class="dossier-weapons">
+                      <span>Weapon affinities</span>
+                      <p id="dossier-weapon-list">Shotgun · Rocket · Machine</p>
+                    </div>
+                  </div>
+                </article>
+
+                <section class="dossier-tactics" aria-label="Selected archetype tactics">
+                  <div class="dossier-priority">
+                    <h3>Target priority route</h3>
+                    <ol id="dossier-priority-list">
+                      <li><b>1</b><span>Player</span></li>
+                      <li><b>2</b><span>Core</span></li>
+                      <li><b>3</b><span>Powerup</span></li>
+                      <li><b>4</b><span>Route</span></li>
+                    </ol>
+                    <p id="dossier-tactic-note">Follows route sequence. Re-acquires if interrupted.</p>
+                  </div>
+
+                  <div class="dossier-lower">
+                    <dl class="dossier-metrics">
+                      <div><dt>Aggression</dt><dd id="dossier-aggression">78%</dd></div>
+                      <div><dt>Preferred range</dt><dd id="dossier-range">6–24m</dd></div>
+                      <div><dt>Objective commitment</dt><dd id="dossier-objective">38%</dd></div>
+                      <div><dt>Pickup greed</dt><dd id="dossier-pickup">28%</dd></div>
+                    </dl>
+                    <figure class="dossier-map">
+                      <figcaption>Flux Core arena</figcaption>
+                      <img src="/assets/ui/dossier/arena-map.webp" alt="Tactical arena map with central Flux Core and four approach routes" />
+                    </figure>
+                  </div>
+                </section>
+              </div>
+
+              <footer class="dossier-footer">
+                <fieldset class="dossier-difficulty">
+                  <legend>Deterministic difficulty profiles</legend>
+                  <button type="button" data-difficulty="easy" aria-pressed="true">
+                    <strong>Easy</strong><span>Training pace</span><small>Reaction ×1.30 · Aim ×1.30 · Aggro ×0.86</small>
+                  </button>
+                  <button type="button" data-difficulty="normal" aria-pressed="false">
+                    <strong>Normal</strong><span>Arena standard</span><small>Reaction ×1.00 · Aim ×1.00 · Aggro ×1.00</small>
+                  </button>
+                  <button type="button" data-difficulty="hard" aria-pressed="false">
+                    <strong>Hard</strong><span>Pressure test</span><small>Reaction ×0.82 · Aim ×0.78 · Aggro ×1.10</small>
+                  </button>
+                  <button type="button" data-difficulty="expert" aria-pressed="false">
+                    <strong>Expert</strong><span>Elite pressure</span><small>Reaction ×0.68 · Aim ×0.62 · Aggro ×1.18</small>
+                  </button>
+                </fieldset>
+                <div class="dossier-footer-actions">
+                  <p>All profiles are pure, stateless, and repeatable.</p>
+                  <button id="intel-back" type="button">Back to deployment</button>
+                </div>
+              </footer>
+            </section>
+          </div>
+          <div id="options-menu" class="menu-view" aria-hidden="true">
+            <div class="options-heading">
+              <span>Combat configuration</span>
+              <strong>OPTIONS</strong>
+            </div>
+            <label class="option-row" for="sensitivity-option">
+              <span><strong>Mouse sensitivity</strong><small>Aim response</small></span>
+              <span class="option-control range-control">
+                <input id="sensitivity-option" type="range" min="0.5" max="2" step="0.1" value="1" />
+                <output id="sensitivity-value" for="sensitivity-option">1.0×</output>
+              </span>
+            </label>
+            <div class="option-row">
+              <span><strong>Master audio</strong><small>Menu music and combat effects</small></span>
+              <button id="audio-option" class="option-toggle" type="button" aria-pressed="true">On</button>
+            </div>
+            <div class="option-row">
+              <span><strong>Reduced motion</strong><small>Camera shake and weapon sway</small></span>
+              <button id="motion-option" class="option-toggle" type="button" aria-pressed="false">Off</button>
+            </div>
+            <div class="option-row">
+              <span><strong>Fullscreen</strong><small>Immersive arena display</small></span>
+              <button id="fullscreen-option" class="option-toggle" type="button" aria-pressed="false">Enter</button>
+            </div>
+            <button id="options-back" class="secondary-menu-button" type="button">Back to deployment</button>
+            <p class="modal-footnote">Settings save automatically on this device</p>
+          </div>
         </div>
       </section>
 
@@ -167,11 +406,16 @@
           <button id="jump-button" class="touch-button touch-button--jump" type="button"><span>Jump</span></button>
           <button id="ski-button" class="touch-button touch-button--ski" type="button" data-held="false"><span>Ski</span></button>
           <button id="grapple-button" class="touch-button touch-button--grapple" type="button"><span>Hook</span></button>
+          <button id="dash-button" class="touch-button touch-button--dash" type="button"><span>Dash</span></button>
           <button id="grenade-button" class="touch-button touch-button--grenade" type="button"><span>Frag</span></button>
+          <button id="weapon-button" class="touch-button touch-button--weapon" type="button"><span>Swap</span></button>
+          <button id="zoom-button" class="touch-button touch-button--zoom" type="button" data-held="false"><span>Alt</span></button>
           <button id="fire-button" class="touch-button touch-button--fire" type="button"><span>Fire</span></button>
         </div>
       </section>
     </main>
+    <script type="module" src="/src/menu.ts"></script>
+    <script type="module" src="/src/dossier.ts"></script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -1,72 +1,98 @@
 import { expect, test } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import {
+  MONSOON_DIVIDE,
+  buildMonsoonTerrainGeometry,
+  sampleMonsoonHeight,
+  sampleMonsoonMasks,
+  sampleMonsoonNormal,
+} from '../src/game/maps/MonsoonDivide';
 
-type MapGroup = {
-  vertexCount: number;
-  positionOffset: number;
-  normalOffset: number;
-};
+test('Monsoon Divide is deterministic, bounded, and low-poly', () => {
+  const canonical = buildMonsoonTerrainGeometry(MONSOON_DIVIDE.seed);
+  const repeated = buildMonsoonTerrainGeometry(MONSOON_DIVIDE.seed);
+  const alternate = buildMonsoonTerrainGeometry(450_600);
+  const positions = canonical.geometry.getAttribute('position');
 
-type MapManifest = {
-  groups: MapGroup[];
-};
+  expect(canonical.triangleCount).toBe(24_000);
+  expect(positions.count).toBe(72_000);
+  expect(canonical.topologyHash).toBe(repeated.topologyHash);
+  expect(alternate.topologyHash).not.toBe(canonical.topologyHash);
+  expect(canonical.altitudeRange.min).toBeLessThan(MONSOON_DIVIDE.waterY - 7);
+  expect(canonical.altitudeRange.max).toBeGreaterThan(80);
 
-test('WCA1 render faces use Three.js winding and retain floors and ceilings', async () => {
-  const manifest = JSON.parse(
-    await readFile(resolve('public/assets/maps/wca1-remix.json'), 'utf8'),
-  ) as MapManifest;
-  const binary = await readFile(resolve('public/assets/maps/wca1-remix.bin'));
-  let alignedNormalDot = 0;
-  let validTriangles = 0;
-  let upwardFaces = 0;
-  let downwardFaces = 0;
+  canonical.geometry.computeBoundingBox();
+  expect(canonical.geometry.boundingBox?.min.x).toBeCloseTo(-MONSOON_DIVIDE.width / 2, 4);
+  expect(canonical.geometry.boundingBox?.max.x).toBeCloseTo(MONSOON_DIVIDE.width / 2, 4);
+  expect(canonical.geometry.boundingBox?.min.z).toBeCloseTo(-MONSOON_DIVIDE.depth / 2, 4);
+  expect(canonical.geometry.boundingBox?.max.z).toBeCloseTo(MONSOON_DIVIDE.depth / 2, 4);
 
-  for (const group of manifest.groups) {
-    const positions = new Float32Array(
-      binary.buffer,
-      binary.byteOffset + group.positionOffset,
-      group.vertexCount * 3,
+  let invalidCoordinates = 0;
+  let minimumArea = Number.POSITIVE_INFINITY;
+  for (let vertex = 0; vertex < positions.count; vertex += 3) {
+    const ax = positions.getX(vertex);
+    const ay = positions.getY(vertex);
+    const az = positions.getZ(vertex);
+    const abx = positions.getX(vertex + 1) - ax;
+    const aby = positions.getY(vertex + 1) - ay;
+    const abz = positions.getZ(vertex + 1) - az;
+    const acx = positions.getX(vertex + 2) - ax;
+    const acy = positions.getY(vertex + 2) - ay;
+    const acz = positions.getZ(vertex + 2) - az;
+    const area2 = Math.hypot(
+      aby * acz - abz * acy,
+      abz * acx - abx * acz,
+      abx * acy - aby * acx,
     );
-    const normals = new Float32Array(
-      binary.buffer,
-      binary.byteOffset + group.normalOffset,
-      group.vertexCount * 3,
-    );
+    if (!Number.isFinite(ax + ay + az)) invalidCoordinates += 1;
+    minimumArea = Math.min(minimumArea, area2);
+  }
+  expect(invalidCoordinates).toBe(0);
+  expect(minimumArea).toBeGreaterThan(0.01);
 
-    for (let vertex = 0; vertex < group.vertexCount; vertex += 3) {
-      const a = vertex * 3;
-      const b = (vertex + 1) * 3;
-      const c = (vertex + 2) * 3;
-      const abx = positions[b] - positions[a];
-      const aby = positions[b + 1] - positions[a + 1];
-      const abz = positions[b + 2] - positions[a + 2];
-      const acx = positions[c] - positions[a];
-      const acy = positions[c + 1] - positions[a + 1];
-      const acz = positions[c + 2] - positions[a + 2];
-      let faceX = aby * acz - abz * acy;
-      let faceY = abz * acx - abx * acz;
-      let faceZ = abx * acy - aby * acx;
-      const faceLength = Math.hypot(faceX, faceY, faceZ);
-      if (faceLength < 1e-6) continue;
-      faceX /= faceLength;
-      faceY /= faceLength;
-      faceZ /= faceLength;
+  canonical.geometry.dispose();
+  repeated.geometry.dispose();
+  alternate.geometry.dispose();
+});
 
-      const normalX = normals[a] + normals[b] + normals[c];
-      const normalY = normals[a + 1] + normals[b + 1] + normals[c + 1];
-      const normalZ = normals[a + 2] + normals[b + 2] + normals[c + 2];
-      const normalLength = Math.hypot(normalX, normalY, normalZ) || 1;
-      alignedNormalDot += (faceX * normalX + faceY * normalY + faceZ * normalZ) / normalLength;
-      validTriangles += 1;
-      if (faceY > 0.75) upwardFaces += 1;
-      if (faceY < -0.75) downwardFaces += 1;
-    }
+test('Monsoon Divide has layered mountain descents, recovery bowls, broad ski routes, and walkable dry land', () => {
+  const center = sampleMonsoonHeight(0, 0);
+  const mountainRuns = [
+    [[-148, 76], [-119, 58], [-88, 39]],
+    [[150, 65], [116, 45], [88, 42]],
+    [[-150, -100], [-118, -82], [-78, -58]],
+    [[150, -108], [103, -77], [76, -61]],
+  ].map((run) => run.map(([x, z]) => sampleMonsoonHeight(x, z)));
+  const peaks = [
+    ...mountainRuns.map((run) => run[0]),
+    sampleMonsoonHeight(-43, 148),
+    sampleMonsoonHeight(47, -146),
+  ];
+  expect(Math.min(...peaks) - center, 'every mountain range needs meaningful relief above the central bowl').toBeGreaterThan(19);
+  expect(Math.max(...peaks) - Math.min(...peaks), 'massifs should remain asymmetric rather than cloned cones').toBeGreaterThan(14);
+  for (const [peak, shoulder, recovery] of mountainRuns) {
+    expect(peak, 'the outer crown must stand above its secondary shoulder').toBeGreaterThan(shoulder + 5);
+    expect(shoulder, 'the secondary shoulder must retain depth above the recovery lane').toBeGreaterThan(recovery + 5);
+    expect(peak - recovery, 'each primary ski descent needs a substantial vertical run').toBeGreaterThan(15);
   }
 
-  expect(manifest.groups).toHaveLength(55);
-  expect(validTriangles).toBeGreaterThan(50_000);
-  expect(alignedNormalDot / validTriangles, 'render winding must agree with authored BSP normals').toBeGreaterThan(0.98);
-  expect(upwardFaces, 'map must retain player-facing floor surfaces').toBeGreaterThan(5_000);
-  expect(downwardFaces, 'map must retain player-facing ceiling surfaces').toBeGreaterThan(8_000);
+  const routeSamples = [
+    sampleMonsoonMasks(-88, 39).route,
+    sampleMonsoonMasks(88, 42).route,
+    sampleMonsoonMasks(-78, -58).route,
+    sampleMonsoonMasks(76, -61).route,
+  ];
+  expect(Math.min(...routeSamples)).toBeGreaterThan(0.85);
+
+  let drySamples = 0;
+  let walkableSamples = 0;
+  for (let z = -176; z <= 176; z += 8) {
+    for (let x = -216; x <= 216; x += 8) {
+      const height = sampleMonsoonHeight(x, z);
+      if (height <= MONSOON_DIVIDE.waterY + 1) continue;
+      drySamples += 1;
+      if (sampleMonsoonNormal(x, z).y >= 0.574) walkableSamples += 1;
+    }
+  }
+  expect(drySamples).toBeGreaterThan(1_500);
+  expect(walkableSamples / drySamples, 'at least four fifths of sampled dry land remains walkable despite the hero ridges').toBeGreaterThan(0.8);
 });

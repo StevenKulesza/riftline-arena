@@ -1,6 +1,6 @@
 import type { WeaponId } from '../game/config';
 import {
-  AMBIENCE_AUDIO_POOL,
+  AMBIENCE_AUDIO_POOLS,
   AUDIO_ASSET_URLS,
   CONFIRM_AUDIO_POOLS,
   COUNTDOWN_AUDIO_POOLS,
@@ -10,6 +10,8 @@ import {
   MOVEMENT_AUDIO_POOLS,
   PICKUP_AUDIO_POOLS,
   PLAYER_AUDIO_POOLS,
+  SURFACE_IMPACT_AUDIO_POOLS,
+  TRACER_AUDIO_POOLS,
   WEAPON_AUDIO_POOLS,
   WORLD_PICKUP_AUDIO_POOLS,
   type AudioGroup,
@@ -32,6 +34,8 @@ export type AudioDiagnostics = {
   fallbackMode: boolean;
   activeVoices: number;
   activeVoicesByPool: Record<string, number>;
+  jetpackActive: boolean;
+  laserBeamActive: boolean;
   lastEvent: string;
   playCounts: Record<string, number>;
   resets: number;
@@ -53,7 +57,17 @@ const GROUP_VOLUMES: Record<AudioGroup, number> = {
   movement: 0.48,
   voice: 0.76,
   music: 0.09,
+  ambience: 0.5,
 };
+
+// decodeAudioData completion can occupy Chromium's main/render threads even
+// though it returns a Promise. Loading the whole combat bank in parallel made
+// the first held trigger hitch for several seconds. Keep background decoding
+// serial and yield between assets so gameplay always gets a frame opportunity.
+const BACKGROUND_AUDIO_DECODE_CONCURRENCY = 12;
+const LASER_BEAM_ATTACK_SECONDS = 0.14;
+const LASER_BEAM_RELEASE_SECONDS = 0.2;
+const LASER_BEAM_VOLUME = 0.24;
 
 export class AudioSystem {
   private context: AudioContext | null = null;
@@ -79,6 +93,14 @@ export class AudioSystem {
   private resetCount = 0;
   private listenerPosition: AudioVector = { x: 0, y: 0, z: 0 };
   private listenerForward: AudioVector = { x: 0, y: 0, z: -1 };
+  private dirtCrunchBuffer: AudioBuffer | null = null;
+  private jetpackLoopVoice: ActiveVoice | null = null;
+  private jetpackActive = false;
+  private laserBeamBuffer: AudioBuffer | null = null;
+  private laserBeamVoice: ActiveVoice | null = null;
+  private laserBeamGain: GainNode | null = null;
+  private laserBeamRequested = false;
+  private laserBeamStopTimer = 0;
 
   constructor() {
     window.addEventListener('pointerdown', this.onUserGesture);
@@ -99,12 +121,8 @@ export class AudioSystem {
       await this.resumePromise;
     }
     this.unlocked = context.state === 'running';
-    if (this.unlocked) {
-      // Asset decoding must never hold the gesture/input path. Loading dozens
-      // of samples at once can starve Chromium's main/audio threads, so it is
-      // bounded below and ambience starts when the background load settles.
-      this.loadPromise ??= this.loadAssets(context).then(() => this.startAmbience());
-      if (this.buffers.size + this.missingUrls.size === AUDIO_ASSET_URLS.length) this.startAmbience();
+    if (this.unlocked && this.buffers.size + this.missingUrls.size === AUDIO_ASSET_URLS.length) {
+      this.startAmbience();
     }
   }
 
@@ -117,6 +135,10 @@ export class AudioSystem {
         (url) => this.loadAsset(context, url),
       ),
     );
+    // The match countdown is the safe loading window. Starting the full bank
+    // directly from the first fire key made combat and decoding contend for
+    // the same browser task queue in direct-entry/test states.
+    this.loadPromise ??= this.loadAssets(context).then(() => this.startAmbience());
   }
 
   setMuted(muted: boolean): void {
@@ -129,7 +151,10 @@ export class AudioSystem {
   setPaused(paused: boolean): void {
     this.paused = paused;
     window.clearTimeout(this.settleTimer);
-    if (paused) void this.context?.suspend().catch(() => undefined);
+    if (paused) {
+      this.stopLaserBeamImmediately();
+      void this.context?.suspend().catch(() => undefined);
+    }
     else if (!document.hidden) void this.unlock();
   }
 
@@ -150,12 +175,40 @@ export class AudioSystem {
     this.playPool(pool, `world:${emitterId}`, variance, spatial);
   }
 
+  /** Keeps the player's continuous laser on one voice for the whole trigger hold. */
+  setLaserBeamActive(active: boolean): void {
+    const wasRequested = this.laserBeamRequested;
+    this.laserBeamRequested = active;
+
+    if (!active) {
+      // The game reports the released state every fixed tick. Start one release
+      // envelope on the true→false edge instead of perpetually restarting it.
+      if (!wasRequested) return;
+      this.fadeLaserBeamOut();
+      return;
+    }
+    window.clearTimeout(this.laserBeamStopTimer);
+    this.laserBeamStopTimer = 0;
+    if (!this.canPlay()) return;
+    const context = this.context;
+    if (!context) return;
+    if (this.laserBeamVoice && this.laserBeamGain) {
+      const gain = this.laserBeamGain.gain;
+      const now = context.currentTime;
+      gain.cancelScheduledValues(now);
+      gain.setValueAtTime(Math.max(0.0001, gain.value), now);
+      gain.exponentialRampToValueAtTime(LASER_BEAM_VOLUME, now + LASER_BEAM_ATTACK_SECONDS * 0.72);
+      return;
+    }
+    this.startLaserBeam();
+  }
+
   dryFire(id: WeaponId): void {
     this.playPool(EMPTY_TRIGGER_POOL, `player:${id}`, 0);
   }
 
   weaponSwitch(id: WeaponId): void {
-    const pool = id === 'rocket' || id === 'shotgun'
+    const pool = id === 'rocket' || id === 'shotgun' || id === 'disc'
       ? EQUIP_AUDIO_POOLS.heavy
       : id === 'sniper' || id === 'rail'
         ? EQUIP_AUDIO_POOLS.precision
@@ -166,7 +219,7 @@ export class AudioSystem {
   ammoPickup(id: WeaponId, variance = 0): void {
     const pool = id === 'rail'
       ? PICKUP_AUDIO_POOLS.rail
-      : id === 'rocket'
+      : id === 'rocket' || id === 'disc'
         ? PICKUP_AUDIO_POOLS.rocket
         : id === 'plasma' || id === 'laser'
           ? PICKUP_AUDIO_POOLS.energy
@@ -174,7 +227,7 @@ export class AudioSystem {
     this.playPool(pool, 'player', variance);
   }
 
-  projectileImpact(id: 'rocket' | 'plasma', position: AudioVector, variance = 0): void {
+  projectileImpact(id: 'rocket' | 'plasma' | 'disc', position: AudioVector, variance = 0): void {
     const pool = IMPACT_AUDIO_POOLS[id];
     const spatial = { position };
     const cell = `${Math.round(position.x / 3)}:${Math.round(position.y / 3)}:${Math.round(position.z / 3)}`;
@@ -221,8 +274,71 @@ export class AudioSystem {
     );
   }
 
-  footstep(variance: number): void {
-    this.playPool(MOVEMENT_AUDIO_POOLS.footstep, 'movement:footstep', variance);
+  setJetpackActive(active: boolean): void {
+    if (this.jetpackActive === active) {
+      if (active) this.startLoopIfReady(MOVEMENT_AUDIO_POOLS.jetpackLoop);
+      return;
+    }
+    this.jetpackActive = active;
+    if (!active) {
+      if (this.jetpackLoopVoice) this.stopVoice(this.jetpackLoopVoice);
+      this.playPool(MOVEMENT_AUDIO_POOLS.jetpackCut, 'movement:jetpack', -0.1);
+      return;
+    }
+    this.playPool(MOVEMENT_AUDIO_POOLS.jetpackIgnite, 'movement:jetpack', 0.05);
+    this.startLoopIfReady(MOVEMENT_AUDIO_POOLS.jetpackLoop);
+  }
+
+  footstep(
+    variance: number,
+    surface: 'grass' | 'soil' | 'rock' | 'metal' | 'concrete' | 'water' = 'grass',
+  ): void {
+    const surfacePool = surface === 'grass'
+      ? MOVEMENT_AUDIO_POOLS.footstepGrass
+      : surface === 'soil'
+        ? MOVEMENT_AUDIO_POOLS.footstepMud
+        : surface === 'rock'
+          ? MOVEMENT_AUDIO_POOLS.footstepRock
+          : surface === 'water'
+            ? MOVEMENT_AUDIO_POOLS.footstepWater
+            : MOVEMENT_AUDIO_POOLS.footstep;
+    this.playPool(
+      surfacePool,
+      `movement:footstep:${surface}`,
+      variance + (surface === 'concrete' ? 0.14 : surface === 'rock' ? -0.08 : 0),
+    );
+    if (surface === 'soil') this.playDirtCrunch(variance);
+  }
+
+  surfaceImpact(
+    surface: 'grass' | 'soil' | 'rock' | 'metal' | 'concrete' | 'water',
+    position: AudioVector,
+    intensity = 1,
+  ): void {
+    const pool = surface === 'soil'
+      ? SURFACE_IMPACT_AUDIO_POOLS.soil
+      : surface === 'grass'
+        ? SURFACE_IMPACT_AUDIO_POOLS.grass
+        : surface === 'water'
+          ? SURFACE_IMPACT_AUDIO_POOLS.water
+          : null;
+    if (!pool) return;
+    const cell = `${Math.round(position.x / 3)}:${Math.round(position.y / 3)}:${Math.round(position.z / 3)}`;
+    this.playPool(pool, `surface:${surface}:${cell}`, clampAudioVariance(intensity * 0.25), { position });
+  }
+
+  tracerPass(position: AudioVector, nearMiss: boolean, variance: number, emitterId: string): void {
+    const pool = nearMiss ? TRACER_AUDIO_POOLS.nearMiss : TRACER_AUDIO_POOLS.pass;
+    this.playPool(pool, `tracer:${emitterId}`, variance, { position });
+  }
+
+  grunt(position: AudioVector | undefined, intensity: number, emitterId: string): void {
+    this.playPool(
+      PLAYER_AUDIO_POOLS.grunt,
+      `grunt:${emitterId}`,
+      clampAudioVariance(intensity - 0.5),
+      position ? { position } : undefined,
+    );
   }
 
   damage(armored: boolean): void {
@@ -235,7 +351,10 @@ export class AudioSystem {
   }
 
   reset(): void {
+    this.stopLaserBeamImmediately();
     this.stopAllVoices();
+    this.jetpackActive = false;
+    this.jetpackLoopVoice = null;
     this.lastPlayedAt.clear();
     this.lastVariant.clear();
     this.resetCount += 1;
@@ -263,6 +382,8 @@ export class AudioSystem {
       activeVoicesByPool: Object.fromEntries(
         [...this.voicesByPool].map(([id, voices]) => [id, voices.size]),
       ),
+      jetpackActive: this.jetpackActive,
+      laserBeamActive: Boolean(this.laserBeamVoice && this.laserBeamRequested),
       lastEvent: this.lastEvent,
       playCounts: Object.fromEntries(this.playCounts),
       resets: this.resetCount,
@@ -273,6 +394,7 @@ export class AudioSystem {
     if (this.disposed) return;
     this.disposed = true;
     window.clearTimeout(this.settleTimer);
+    window.clearTimeout(this.laserBeamStopTimer);
     window.removeEventListener('pointerdown', this.onUserGesture);
     window.removeEventListener('keydown', this.onUserGesture);
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
@@ -284,6 +406,13 @@ export class AudioSystem {
     void this.context?.close().catch(() => undefined);
     this.context = null;
     this.master = null;
+    this.dirtCrunchBuffer = null;
+    this.jetpackLoopVoice = null;
+    this.jetpackActive = false;
+    this.laserBeamBuffer = null;
+    this.laserBeamVoice = null;
+    this.laserBeamGain = null;
+    this.laserBeamRequested = false;
   }
 
   private readonly onUserGesture = (): void => {
@@ -299,7 +428,10 @@ export class AudioSystem {
   private readonly onVisibilityChange = (): void => {
     this.visibilitySuspended = document.hidden;
     window.clearTimeout(this.settleTimer);
-    if (document.hidden) void this.context?.suspend().catch(() => undefined);
+    if (document.hidden) {
+      this.stopLaserBeamImmediately();
+      void this.context?.suspend().catch(() => undefined);
+    }
     else if (!this.paused) void this.unlock();
   };
 
@@ -343,9 +475,26 @@ export class AudioSystem {
       while (nextAsset < AUDIO_ASSET_URLS.length && !this.disposed) {
         const url = AUDIO_ASSET_URLS[nextAsset++];
         await this.loadAsset(context, url);
+        await this.yieldToGameplay();
       }
     };
-    await Promise.all(Array.from({ length: Math.min(12, AUDIO_ASSET_URLS.length) }, () => loadNext()));
+    await Promise.all(Array.from(
+      { length: Math.min(BACKGROUND_AUDIO_DECODE_CONCURRENCY, AUDIO_ASSET_URLS.length) },
+      () => loadNext(),
+    ));
+  }
+
+  private async yieldToGameplay(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const requestIdle = (window as unknown as {
+        requestIdleCallback?: (callback: () => void, options: { timeout: number }) => number;
+      }).requestIdleCallback;
+      if (requestIdle) {
+        requestIdle.call(window, () => resolve(), { timeout: 250 });
+      } else {
+        setTimeout(resolve, 50);
+      }
+    });
   }
 
   private loadAsset(context: AudioContext, url: string): Promise<void> {
@@ -387,6 +536,146 @@ export class AudioSystem {
     if (buffer) this.playBuffer(pool, buffer, variance, spatial);
   }
 
+  private startLoopIfReady(pool: AudioPool): void {
+    if (this.jetpackLoopVoice || !this.canPlay()) return;
+    const context = this.context;
+    if (!context) return;
+    const url = pool.urls.find((candidate) => this.buffers.has(candidate));
+    if (!url) return;
+    const buffer = this.buffers.get(url);
+    const group = this.groups.get(pool.group);
+    if (!buffer || !group) return;
+    const source = context.createBufferSource();
+    const gain = context.createGain();
+    source.buffer = buffer;
+    source.loop = true;
+    gain.gain.value = pool.volume;
+    const nodes = this.connectVoice(source, gain, group);
+    this.recordEvent(pool.id);
+    this.jetpackLoopVoice = this.trackVoice(source, nodes, pool.id, pool.maxVoices);
+    source.start();
+  }
+
+  private startLaserBeam(): void {
+    if (this.laserBeamVoice || !this.canPlay()) return;
+    const context = this.context;
+    const group = this.groups.get('weapons');
+    if (!context || !group) return;
+    this.laserBeamBuffer ??= this.createLaserBeamBuffer(context);
+    const source = context.createBufferSource();
+    const gain = context.createGain();
+    source.buffer = this.laserBeamBuffer;
+    source.loop = true;
+    source.loopStart = 0;
+    source.loopEnd = this.laserBeamBuffer.duration;
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(
+      LASER_BEAM_VOLUME,
+      context.currentTime + LASER_BEAM_ATTACK_SECONDS,
+    );
+    const nodes = this.connectVoice(source, gain, group, undefined, {
+      lowShelfFrequencyHz: 180,
+      lowShelfGainDb: -2.5,
+      presenceFrequencyHz: 1_650,
+      presenceGainDb: 2.2,
+      lowpassHz: 5_200,
+    });
+    this.recordEvent('weapon.laser');
+    this.laserBeamGain = gain;
+    this.laserBeamVoice = this.trackVoice(source, nodes, 'weapon.laser', 1);
+    source.start();
+  }
+
+  private fadeLaserBeamOut(): void {
+    const context = this.context;
+    const voice = this.laserBeamVoice;
+    const beamGain = this.laserBeamGain;
+    if (!context || !voice || !beamGain) return;
+    const now = context.currentTime;
+    beamGain.gain.cancelScheduledValues(now);
+    beamGain.gain.setValueAtTime(Math.max(0.0001, beamGain.gain.value), now);
+    beamGain.gain.exponentialRampToValueAtTime(0.0001, now + LASER_BEAM_RELEASE_SECONDS);
+    this.laserBeamStopTimer = window.setTimeout(() => {
+      this.laserBeamStopTimer = 0;
+      if (this.laserBeamRequested || this.laserBeamVoice !== voice) return;
+      this.stopVoice(voice);
+    }, (LASER_BEAM_RELEASE_SECONDS + 0.04) * 1_000);
+  }
+
+  private stopLaserBeamImmediately(): void {
+    this.laserBeamRequested = false;
+    window.clearTimeout(this.laserBeamStopTimer);
+    this.laserBeamStopTimer = 0;
+    if (this.laserBeamVoice) this.stopVoice(this.laserBeamVoice);
+  }
+
+  private createLaserBeamBuffer(context: AudioContext): AudioBuffer {
+    // Every component completes an integer number of cycles in this half-second
+    // buffer, so the held beam loops without a seam or a repeated attack click.
+    const duration = 0.5;
+    const sampleCount = Math.round(context.sampleRate * duration);
+    const buffer = context.createBuffer(1, sampleCount, context.sampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let index = 0; index < sampleCount; index += 1) {
+      const time = index / context.sampleRate;
+      const phaseMotion = Math.sin(Math.PI * 2 * 8 * time) * 0.12;
+      const carrier = Math.sin(Math.PI * 2 * 146 * time + phaseMotion) * 0.48;
+      const harmonic = Math.sin(Math.PI * 2 * 292 * time - phaseMotion * 0.7) * 0.22;
+      const edge = Math.sin(Math.PI * 2 * 584 * time + phaseMotion * 1.4) * 0.1;
+      const electricalTexture = (
+        Math.sin(Math.PI * 2 * 1_872 * time + phaseMotion * 2.1)
+        + Math.sin(Math.PI * 2 * 2_310 * time - phaseMotion * 1.8)
+      ) * 0.035;
+      channel[index] = (carrier + harmonic + edge + electricalTexture) * 0.34;
+    }
+    return buffer;
+  }
+
+  private playDirtCrunch(variance: number): void {
+    if (!this.canPlay()) return;
+    const context = this.context;
+    const movementGroup = this.groups.get('movement');
+    if (!context || !movementGroup) return;
+    const cooldownKey = 'movement:dirt-crunch';
+    const lastPlayed = this.lastPlayedAt.get(cooldownKey) ?? Number.NEGATIVE_INFINITY;
+    if (context.currentTime - lastPlayed < 0.085) return;
+    this.lastPlayedAt.set(cooldownKey, context.currentTime);
+    this.recordEvent('movement:dirt-crunch');
+
+    if (!this.dirtCrunchBuffer) {
+      const sampleCount = Math.ceil(context.sampleRate * 0.115);
+      const buffer = context.createBuffer(1, sampleCount, context.sampleRate);
+      const channel = buffer.getChannelData(0);
+      let held = 0;
+      for (let index = 0; index < sampleCount; index += 1) {
+        const progress = index / sampleCount;
+        if (index % 9 === 0) held = Math.random() * 2 - 1;
+        const grit = (Math.random() * 2 - 1) * 0.58 + held * 0.42;
+        const pebble = index % 137 < 4 ? (Math.random() * 2 - 1) * 0.72 : 0;
+        channel[index] = (grit + pebble) * Math.pow(1 - progress, 2.25);
+      }
+      this.dirtCrunchBuffer = buffer;
+    }
+
+    const source = context.createBufferSource();
+    source.buffer = this.dirtCrunchBuffer;
+    source.playbackRate.value = 0.88 + Math.max(-0.5, Math.min(0.5, variance)) * 0.18;
+    const bandpass = context.createBiquadFilter();
+    bandpass.type = 'bandpass';
+    bandpass.frequency.value = 1180 + (variance + 0.5) * 420;
+    bandpass.Q.value = 0.68;
+    const lowpass = context.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.value = 3900;
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0.001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.19, context.currentTime + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.105);
+    source.connect(bandpass).connect(lowpass).connect(gain).connect(movementGroup);
+    this.trackVoice(source, [bandpass, lowpass, gain], 'movement:dirt-crunch', 5);
+    source.start();
+  }
+
   private canPlay(): boolean {
     return Boolean(
       !this.disposed
@@ -421,8 +710,10 @@ export class AudioSystem {
   }
 
   private startAmbience(): void {
-    if (this.voicesByPool.get(AMBIENCE_AUDIO_POOL.id)?.size) return;
-    this.playPool(AMBIENCE_AUDIO_POOL, 'global', 0);
+    for (const pool of AMBIENCE_AUDIO_POOLS) {
+      if (this.voicesByPool.get(pool.id)?.size) continue;
+      this.playPool(pool, 'global', 0);
+    }
   }
 
   private connectVoice(
@@ -470,7 +761,7 @@ export class AudioSystem {
     return [...toneNodes, gain, panner];
   }
 
-  private trackVoice(source: AudioScheduledSourceNode, nodes: AudioNode[], poolId: string, maxVoices: number): void {
+  private trackVoice(source: AudioScheduledSourceNode, nodes: AudioNode[], poolId: string, maxVoices: number): ActiveVoice {
     const poolVoices = this.voicesByPool.get(poolId) ?? new Set<ActiveVoice>();
     this.voicesByPool.set(poolId, poolVoices);
     while (poolVoices.size >= maxVoices) {
@@ -482,6 +773,7 @@ export class AudioSystem {
     this.voices.add(voice);
     poolVoices.add(voice);
     source.onended = () => this.cleanupVoice(voice);
+    return voice;
   }
 
   private stopVoice(voice: ActiveVoice): void {
@@ -496,6 +788,13 @@ export class AudioSystem {
   private cleanupVoice(voice: ActiveVoice): void {
     if (!this.voices.delete(voice)) return;
     this.voicesByPool.get(voice.poolId)?.delete(voice);
+    if (this.jetpackLoopVoice === voice) this.jetpackLoopVoice = null;
+    if (this.laserBeamVoice === voice) {
+      window.clearTimeout(this.laserBeamStopTimer);
+      this.laserBeamStopTimer = 0;
+      this.laserBeamVoice = null;
+      this.laserBeamGain = null;
+    }
     voice.source.disconnect();
     for (const node of voice.nodes) node.disconnect();
   }
@@ -524,4 +823,8 @@ export class AudioSystem {
     listener.upY.setValueAtTime(1, now);
     listener.upZ.setValueAtTime(0, now);
   }
+}
+
+function clampAudioVariance(value: number, min = -0.5, max = 0.5): number {
+  return Math.max(min, Math.min(max, value));
 }

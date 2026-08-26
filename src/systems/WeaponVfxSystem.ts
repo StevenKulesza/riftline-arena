@@ -7,7 +7,7 @@ type Effect = {
   duration: number;
   materials: THREE.Material[];
   update: (progress: number, delta: number) => void;
-  kind?: 'tracer';
+  kind?: 'muzzle' | 'beam' | 'trail' | 'impact' | 'tracer' | 'burst';
 };
 
 type ContinuousLaser = {
@@ -17,6 +17,11 @@ type ContinuousLaser = {
   haloGeometry: THREE.CylinderGeometry;
   coreMaterial: THREE.MeshBasicMaterial;
   haloMaterial: THREE.MeshBasicMaterial;
+  emitter: THREE.Group;
+  emitterCore: THREE.Mesh;
+  emitterRing: THREE.Mesh;
+  emitterMaterial: THREE.MeshBasicMaterial;
+  flareGeometries: THREE.BufferGeometry[];
 };
 
 type ImpactMark = {
@@ -32,6 +37,32 @@ type ImpactMark = {
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const SURFACE_NORMAL = new THREE.Vector3(0, 0, 1);
 const UP = new THREE.Vector3(0, 1, 0);
+const ORIENT_DIRECTION = new THREE.Vector3();
+const MAX_TRANSIENT_EFFECTS = 48;
+const MAX_TRAIL_EFFECTS = 8;
+const MAX_STUCK_TRACERS = 12;
+const MAX_IMPACT_MARKS = 24;
+const MAX_EFFECTS_BY_KIND: Record<NonNullable<Effect['kind']>, number> = {
+  muzzle: 2,
+  beam: 12,
+  trail: MAX_TRAIL_EFFECTS,
+  impact: 8,
+  tracer: MAX_STUCK_TRACERS,
+  burst: 4,
+};
+const MAX_MARKS_BY_WEAPON: Record<WeaponId, number> = {
+  machine: 4,
+  shotgun: 8,
+  rocket: 6,
+  plasma: 8,
+  laser: 8,
+  sniper: 8,
+  rail: 8,
+  disc: 10,
+};
+const TRAIL_SPAWNS_PER_SECOND = 45;
+const TRAIL_BURST_ALLOWANCE = 5;
+const GRAPPLE_CURVE_AMOUNTS = [0.12, 0.34, 0.58, 0.82] as const;
 
 function additiveMaterial(color: number, opacity = 1, depthTest = true): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({
@@ -46,8 +77,24 @@ function additiveMaterial(color: number, opacity = 1, depthTest = true): THREE.M
   });
 }
 
+function smokeMaterial(color = 0x665e58, opacity = 0.14, depthTest = false): THREE.MeshBasicMaterial {
+  return new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    blending: THREE.NormalBlending,
+    depthWrite: false,
+    depthTest,
+    toneMapped: true,
+  });
+}
+
+function suppressSawSlingLights(weapon: WeaponId): boolean {
+  return weapon === 'disc';
+}
+
 function orientBetween(root: THREE.Object3D, start: THREE.Vector3, end: THREE.Vector3): number {
-  const direction = end.clone().sub(start);
+  const direction = ORIENT_DIRECTION.copy(end).sub(start);
   const length = direction.length();
   root.position.copy(start).add(end).multiplyScalar(0.5);
   if (length > 0.0001) root.quaternion.setFromUnitVectors(UP, direction.multiplyScalar(1 / length));
@@ -59,8 +106,19 @@ export class WeaponVfxSystem {
   private readonly marks: ImpactMark[] = [];
   private readonly tempPosition = new THREE.Vector3();
   private readonly tempQuaternion = new THREE.Quaternion();
+  private readonly tempDirection = new THREE.Vector3();
+  private readonly tempDirectionB = new THREE.Vector3();
+  private readonly tempSide = new THREE.Vector3();
   private readonly laserLaggedEnd = new THREE.Vector3();
+  private readonly laserLiveVector = new THREE.Vector3();
+  private readonly laserLaggedVector = new THREE.Vector3();
+  private readonly laserLivePoint = new THREE.Vector3();
+  private readonly laserLaggedPoint = new THREE.Vector3();
   private readonly laserPoints = Array.from({ length: 11 }, () => new THREE.Vector3());
+  private readonly sharedGeometries = new Map<string, THREE.BufferGeometry>();
+  private readonly sharedGeometrySet = new Set<THREE.BufferGeometry>();
+  private readonly grappleCurvePoints = Array.from({ length: 6 }, () => new THREE.Vector3());
+  private readonly grappleCurve = new THREE.CatmullRomCurve3(this.grappleCurvePoints, false, 'catmullrom', 0.18);
   private continuousLaser?: ContinuousLaser;
   private grappleRoot?: THREE.Group;
   private grappleCable?: THREE.Mesh;
@@ -70,6 +128,8 @@ export class WeaponVfxSystem {
   private laserPhase = 0;
   private laserBend = 0;
   private ropePhase = 0;
+  private grappleGeometryFrame = 0;
+  private trailSpawnTokens = TRAIL_BURST_ALLOWANCE;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -77,7 +137,83 @@ export class WeaponVfxSystem {
     private readonly random: () => number,
   ) {}
 
+  prewarm(renderer: THREE.WebGLRenderer): void {
+    // Dynamic weapon effects otherwise compile/upload on the first trigger
+    // pull. Precompile the actual shared ballistic/energy geometry while the
+    // ready screen is visible so a cold plasma or rocket shot cannot stall a
+    // live frame.
+    const prewarmScene = new THREE.Scene();
+    prewarmScene.fog = this.scene.fog;
+    const hot = additiveMaterial(0xffffff, 1, false);
+    const glow = additiveMaterial(0x79e8ff, 0.72, true);
+    const smoke = smokeMaterial(0x776f68, 0.1, false);
+    const standard = new THREE.MeshStandardMaterial({ color: 0xb9a7a0, roughness: 0.28, metalness: 0.88 });
+    const physical = new THREE.MeshPhysicalMaterial({
+      color: 0x5f1717,
+      roughness: 0.3,
+      metalness: 0.48,
+      clearcoat: 0.62,
+    });
+    const geometries = [
+      this.sharedGeometry('muzzle-machine-cone-7', () => new THREE.ConeGeometry(1, 1, 7, 1, true)),
+      this.sharedGeometry('beam-cylinder-7', () => new THREE.CylinderGeometry(1, 0.72, 1, 7, 1, true)),
+      this.sharedGeometry('impact-unit-circle-18', () => new THREE.CircleGeometry(1, 18)),
+      this.sharedGeometry('impact-unit-ring-28', () => new THREE.RingGeometry(0.84, 1, 28)),
+      this.sharedGeometry('projectile-plasma-core', () => new THREE.IcosahedronGeometry(0.14, 2)),
+      this.sharedGeometry('projectile-plasma-shell', () => new THREE.IcosahedronGeometry(0.27, 2)),
+      this.sharedGeometry('projectile-plasma-ring', () => new THREE.TorusGeometry(0.3, 0.018, 6, 22)),
+      this.sharedGeometry('projectile-plasma-tail', () => new THREE.ConeGeometry(0.16, 0.65, 10, 1, true)),
+      this.sharedGeometry('trail-plasma-mote', () => new THREE.IcosahedronGeometry(0.075, 1)),
+      this.sharedGeometry('trail-plasma-shell', () => new THREE.IcosahedronGeometry(0.14, 1)),
+      this.sharedGeometry('muzzle-plasma-chamber', () => new THREE.IcosahedronGeometry(0.18, 2)),
+      this.sharedGeometry('muzzle-plasma-core', () => new THREE.IcosahedronGeometry(0.075, 1)),
+      this.sharedGeometry('muzzle-plasma-ring', () => new THREE.TorusGeometry(0.21, 0.014, 6, 24)),
+    ];
+    geometries.forEach((geometry, index) => {
+      const material = index === geometries.length - 1 ? smoke : index % 2 ? glow : hot;
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set((index % 4) * 0.02, Math.floor(index / 4) * 0.02, -1);
+      mesh.frustumCulled = false;
+      prewarmScene.add(mesh);
+    });
+    const unitBox = this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1));
+    const standardMesh = new THREE.Mesh(unitBox, standard);
+    const physicalMesh = new THREE.Mesh(unitBox, physical);
+    standardMesh.frustumCulled = false;
+    physicalMesh.frustumCulled = false;
+    prewarmScene.add(standardMesh, physicalMesh);
+    const burstGeometry = this.sharedGeometry(
+      'burst-spark-cylinder',
+      () => new THREE.CylinderGeometry(0.009, 0.022, 1, 5),
+    );
+    const burst = new THREE.InstancedMesh(burstGeometry, hot, 2);
+    burst.setColorAt(0, new THREE.Color(0xffffff));
+    burst.setColorAt(1, new THREE.Color(0xff6b2e));
+    burst.frustumCulled = false;
+    prewarmScene.add(burst);
+    this.continuousLaser ??= this.createContinuousLaser(0x76ffb0);
+    const laserRoot = this.continuousLaser.root;
+    this.scene.remove(laserRoot);
+    laserRoot.visible = true;
+    prewarmScene.add(laserRoot);
+    renderer.compile(prewarmScene, this.camera);
+    prewarmScene.remove(laserRoot);
+    laserRoot.visible = false;
+    this.scene.add(laserRoot);
+    hot.dispose();
+    glow.dispose();
+    smoke.dispose();
+    standard.dispose();
+    physical.dispose();
+    prewarmScene.clear();
+  }
+
   muzzle(weapon: WeaponId, color: number, socket: THREE.Object3D): void {
+    // The exposed saw already supplies the firing silhouette. Extra collapse
+    // rings and sparks caused the flashing/shimmering report and multiplied
+    // draw calls during ricochet volleys.
+    if (suppressSawSlingLights(weapon)) return;
+    if (!this.hasTransientCapacity()) return;
     socket.updateWorldMatrix(true, false);
     socket.getWorldPosition(this.tempPosition);
     socket.getWorldQuaternion(this.tempQuaternion);
@@ -87,181 +223,493 @@ export class WeaponVfxSystem {
     root.position.copy(this.tempPosition);
     root.quaternion.copy(this.tempQuaternion);
 
-    const hot = additiveMaterial(0xffffff, 0.72, false);
-    const glow = additiveMaterial(color, 0.58, false);
-    const materials: THREE.Material[] = [hot, glow];
-    const heavy = weapon === 'rocket' || weapon === 'rail' || weapon === 'shotgun';
-    const coneLength = (weapon === 'rail' ? 1.25 : heavy ? 0.85 : 0.52) * 0.5;
-    const coneRadius = (weapon === 'shotgun' ? 0.32 : weapon === 'rocket' ? 0.28 : weapon === 'rail' ? 0.22 : 0.13) * 0.36;
+    const hotColors: Record<WeaponId, number> = {
+      machine: 0xfff4c2,
+      shotgun: 0xfff0cf,
+      rocket: 0xfff2b0,
+      plasma: 0xffeeff,
+      laser: 0xebfff1,
+      sniper: 0xfff7de,
+      rail: 0xf9ffca,
+      disc: 0xffd37a,
+    };
+    const hotOpacity = weapon === 'disc' ? 0.42 : 0.92;
+    const glowOpacity = weapon === 'disc' ? 0.26 : 0.66;
+    const softOpacity = weapon === 'disc' ? 0.08 : 0.22;
+    const hot = additiveMaterial(hotColors[weapon], hotOpacity, false);
+    const glow = additiveMaterial(color, glowOpacity, false);
+    const soft = weapon === 'machine' ? undefined : additiveMaterial(color, softOpacity, false);
+    const materials: THREE.Material[] = soft ? [hot, glow, soft] : [hot, glow];
 
-    const cone = new THREE.Mesh(new THREE.ConeGeometry(coneRadius, coneLength, weapon === 'rocket' ? 8 : 12, 1, true), glow);
-    cone.name = 'muzzle-plume';
-    cone.rotation.x = -Math.PI * 0.5;
-    cone.position.z = -coneLength * 0.5;
-    root.add(cone);
-
-    const core = new THREE.Mesh(new THREE.ConeGeometry(coneRadius * 0.38, coneLength * 0.72, 10, 1, true), hot);
-    core.name = 'muzzle-core';
-    core.rotation.x = -Math.PI * 0.5;
-    core.position.z = -coneLength * 0.36;
-    root.add(core);
-
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(coneRadius * 0.78, Math.max(0.018, coneRadius * 0.12), 8, 24), glow);
-    ring.name = 'muzzle-ring';
-    ring.position.z = -0.04;
-    root.add(ring);
-
-    if (weapon === 'rail' || weapon === 'plasma') {
+    // Each weapon owns a different silhouette and time profile. This keeps the
+    // muzzle event readable in a frozen frame without falling back to a shared
+    // white cone or a large camera-facing disc.
+    if (weapon === 'machine') {
+      // Two nested cones preserve the hot-core silhouette without spawning
+      // nine independently rendered meshes for every automatic round.
+      const geometry = this.sharedGeometry(
+        'muzzle-machine-cone-7',
+        () => new THREE.ConeGeometry(1, 1, 7, 1, true),
+      );
+      const core = new THREE.Mesh(geometry, hot);
+      core.name = 'machine-muzzle-hot-core';
+      core.rotation.x = -Math.PI * 0.5;
+      core.position.set(-0.035, 0.028, -0.27);
+      core.scale.set(0.045, 0.5, 0.045);
+      const envelope = new THREE.Mesh(geometry, glow);
+      envelope.name = 'machine-muzzle-heat-envelope';
+      envelope.rotation.x = -Math.PI * 0.5;
+      envelope.position.copy(core.position);
+      envelope.scale.set(0.07, 0.39, 0.07);
+      root.add(envelope, core);
+    } else if (weapon === 'shotgun') {
+      const coneGeometry = this.sharedGeometry(
+        'muzzle-shotgun-cone-12',
+        () => new THREE.ConeGeometry(1, 1, 12, 1, true),
+      );
+      for (let index = 0; index < 2; index += 1) {
+        const blast = new THREE.Mesh(coneGeometry, index === 0 ? hot : glow);
+        blast.name = `shotgun-volumetric-blast-${index}`;
+        blast.rotation.x = -Math.PI * 0.5;
+        blast.position.z = -0.3 - index * 0.12;
+        blast.rotation.z = index * 0.43;
+        blast.scale.set(0.14 + index * 0.09, 0.7 + index * 0.17, 0.14 + index * 0.09);
+        root.add(blast);
+      }
+      const smoke = smokeMaterial(0x8c8377, 0.13, false);
+      materials.push(smoke);
+      const wisp = new THREE.Mesh(
+        this.sharedGeometry('muzzle-shotgun-smoke', () => new THREE.IcosahedronGeometry(0.1, 1)),
+        smoke,
+      );
+      wisp.name = 'shotgun-smoke-wisp';
+      wisp.position.set(0.04, 0.06, -0.24);
+      root.add(wisp);
+      for (let index = 0; index < 2; index += 1) {
+        const spark = new THREE.Mesh(
+          this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1)),
+          index === 0 ? hot : glow,
+        );
+        spark.name = `shotgun-spark-${index}`;
+        spark.scale.set(0.012, 0.012, 0.28 + index * 0.1);
+        spark.position.set((this.random() - 0.5) * 0.38, (this.random() - 0.5) * 0.28, -0.38 - this.random() * 0.22);
+        spark.rotation.z = this.random() * Math.PI;
+        root.add(spark);
+      }
+    } else if (weapon === 'rocket') {
+      const outerPlume = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.82, 12, 1, true), glow);
+      outerPlume.name = 'rocket-luminous-plume';
+      outerPlume.rotation.x = -Math.PI * 0.5;
+      outerPlume.position.z = -0.34;
+      const innerPlume = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.68, 10, 1, true), hot);
+      innerPlume.name = 'rocket-hot-exhaust-core';
+      innerPlume.rotation.x = -Math.PI * 0.5;
+      innerPlume.position.z = -0.29;
+      const heatShell = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 8, 0, Math.PI * 2, 0.15, Math.PI * 0.7), soft);
+      heatShell.name = 'rocket-heat-shimmer';
+      heatShell.scale.z = 1.7;
+      heatShell.position.z = -0.18;
+      const pressure = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.016, 6, 28), glow);
+      pressure.name = 'rocket-pressure-ring';
+      pressure.position.z = -0.12;
+      root.add(outerPlume, innerPlume, heatShell, pressure);
+    } else if (weapon === 'plasma') {
+      const chamberOrb = new THREE.Mesh(
+        this.sharedGeometry('muzzle-plasma-chamber', () => new THREE.IcosahedronGeometry(0.18, 2)),
+        glow,
+      );
+      chamberOrb.name = 'plasma-chamber-discharge';
+      chamberOrb.position.z = -0.18;
+      const orbCore = new THREE.Mesh(
+        this.sharedGeometry('muzzle-plasma-core', () => new THREE.IcosahedronGeometry(0.075, 1)),
+        hot,
+      );
+      orbCore.position.z = -0.18;
+      root.add(chamberOrb, orbCore);
+      const torus = new THREE.Mesh(
+        this.sharedGeometry('muzzle-plasma-ring', () => new THREE.TorusGeometry(0.21, 0.014, 6, 24)),
+        glow,
+      );
+      torus.name = 'plasma-discharge-ring';
+      torus.position.z = -0.22;
+      root.add(torus);
+    } else if (weapon === 'laser') {
+      const emitterCore = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.44, 10, 1, true), hot);
+      emitterCore.name = 'laser-emitter-core-flare';
+      emitterCore.rotation.x = -Math.PI * 0.5;
+      emitterCore.position.z = -0.22;
+      root.add(emitterCore);
       for (let index = 0; index < 3; index += 1) {
-        const arc = new THREE.Mesh(new THREE.TorusGeometry(coneRadius * (1.25 + index * 0.35), 0.012, 6, 18, Math.PI * 1.3), glow);
-        arc.name = `muzzle-arc-${index}`;
-        arc.position.z = -0.08 - index * 0.09;
-        arc.rotation.z = index * 2.1;
+        const aperture = new THREE.Mesh(new THREE.TorusGeometry(0.07 + index * 0.035, 0.007, 5, 24), index === 0 ? hot : glow);
+        aperture.name = `laser-aperture-flare-${index}`;
+        aperture.position.z = -0.025 - index * 0.028;
+        root.add(aperture);
+      }
+      for (let index = 0; index < 4; index += 1) {
+        const blade = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.16, 0.012), glow);
+        blade.position.z = -0.06;
+        blade.rotation.z = index * Math.PI * 0.5;
+        root.add(blade);
+      }
+    } else if (weapon === 'sniper') {
+      const needle = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.82, 7, 1, true), hot);
+      needle.name = 'sniper-directional-needle';
+      needle.rotation.x = -Math.PI * 0.5;
+      needle.position.z = -0.4;
+      root.add(needle);
+      for (let index = 0; index < 6; index += 1) {
+        const blade = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.28 + (index % 2) * 0.13, 0.025), index % 2 ? glow : hot);
+        blade.name = `sniper-star-blade-${index}`;
+        blade.position.z = -0.06;
+        blade.rotation.z = index * Math.PI / 3;
+        root.add(blade);
+      }
+      const smoke = smokeMaterial(0x7d7870, 0.1, false);
+      materials.push(smoke);
+      for (let index = 0; index < 3; index += 1) {
+        const wisp = new THREE.Mesh(new THREE.IcosahedronGeometry(0.06 + index * 0.02, 1), smoke);
+        wisp.name = `sniper-smoke-${index}`;
+        wisp.position.set((this.random() - 0.5) * 0.13, 0.04 + this.random() * 0.12, -0.1 - index * 0.11);
+        root.add(wisp);
+      }
+    } else if (weapon === 'disc') {
+      // The launcher pinches a wide magnetic aperture down around the disc.
+      // Teal field lines and amber induction sparks keep this distinct from
+      // the railgun's white longitudinal discharge.
+      for (let index = 0; index < 3; index += 1) {
+        const fieldRing = new THREE.Mesh(
+          new THREE.TorusGeometry(0.19 + index * 0.055, 0.014 - index * 0.002, 7, 32),
+          index === 1 ? hot : glow,
+        );
+        fieldRing.name = `disc-magnetic-collapse-ring-${index}`;
+        fieldRing.position.z = -0.08 - index * 0.065;
+        fieldRing.rotation.z = index * 0.52;
+        fieldRing.userData.spin = index % 2 ? -1 : 1;
+        root.add(fieldRing);
+      }
+      const inductionCore = new THREE.Mesh(new THREE.RingGeometry(0.055, 0.115, 24), glow);
+      inductionCore.name = 'disc-induction-aperture';
+      inductionCore.position.z = -0.24;
+      root.add(inductionCore);
+      for (let index = 0; index < 4; index += 1) {
+        const spark = new THREE.Mesh(
+          new THREE.BoxGeometry(0.009, 0.009, 0.16 + this.random() * 0.22),
+          index % 3 === 0 ? hot : glow,
+        );
+        const angle = index * Math.PI * 2 / 4 + (this.random() - 0.5) * 0.18;
+        spark.name = `disc-induction-spark-${index}`;
+        spark.position.set(Math.cos(angle) * (0.1 + this.random() * 0.14), Math.sin(angle) * (0.1 + this.random() * 0.14), -0.15);
+        spark.rotation.set((this.random() - 0.5) * 0.42, (this.random() - 0.5) * 0.42, angle);
+        spark.userData.radial = new THREE.Vector2(Math.cos(angle), Math.sin(angle));
+        root.add(spark);
+      }
+    } else {
+      const leftRail = new THREE.Mesh(new THREE.ConeGeometry(0.045, 1.05, 7, 1, true), glow);
+      leftRail.name = 'rail-discharge-left';
+      leftRail.rotation.x = -Math.PI * 0.5;
+      leftRail.position.set(-0.075, 0, -0.5);
+      const rightRail = leftRail.clone();
+      rightRail.name = 'rail-discharge-right';
+      rightRail.position.x = 0.075;
+      const core = new THREE.Mesh(new THREE.ConeGeometry(0.035, 1.2, 8, 1, true), hot);
+      core.name = 'rail-collapse-core';
+      core.rotation.x = -Math.PI * 0.5;
+      core.position.z = -0.57;
+      root.add(leftRail, rightRail, core);
+      for (let index = 0; index < 4; index += 1) {
+        const side = index % 2 ? 1 : -1;
+        const curve = new THREE.QuadraticBezierCurve3(
+          new THREE.Vector3(side * 0.17, (index - 1.5) * 0.04, 0.05),
+          new THREE.Vector3(side * 0.3, (this.random() - 0.5) * 0.24, -0.38),
+          new THREE.Vector3(side * 0.04, (this.random() - 0.5) * 0.08, -0.82),
+        );
+        const arc = new THREE.Mesh(new THREE.TubeGeometry(curve, 8, index === 0 ? 0.014 : 0.009, 4, false), index === 0 ? hot : glow);
+        arc.name = `rail-collapse-arc-${index}`;
         root.add(arc);
       }
     }
 
-    if (weapon === 'rocket') {
-      const backblast = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.26, 10, 1, true), glow);
-      backblast.name = 'rocket-backblast';
-      backblast.rotation.x = Math.PI * 0.5;
-      backblast.position.z = 0.13;
-      root.add(backblast);
-    }
-
+    root.traverse((object) => { object.frustumCulled = false; });
     this.scene.add(root);
-    const duration = weapon === 'rail' ? 0.16 : heavy ? 0.1 : 0.065;
-    this.effects.push({
+    const duration = weapon === 'rail' ? 0.2
+      : weapon === 'disc' ? 0.18
+      : weapon === 'rocket' || weapon === 'shotgun' ? 0.16
+        : weapon === 'plasma' || weapon === 'sniper' ? 0.12 : 0.085;
+    this.addEffect({
       root,
       age: 0,
       duration,
       materials,
-      update: (progress) => {
-        const envelope = 1 - progress;
-        hot.opacity = envelope * 0.72;
-        glow.opacity = envelope * 0.58;
-        root.scale.setScalar(0.82 + Math.sin(progress * Math.PI) * 0.35);
-        ring.rotation.z += 0.24;
+      kind: 'muzzle',
+      update: (progress, delta) => {
+        const envelope = Math.pow(1 - progress, weapon === 'shotgun' ? 1.15 : 1.7);
+        hot.opacity = envelope * hotOpacity;
+        glow.opacity = envelope * glowOpacity;
+        if (soft) soft.opacity = envelope * softOpacity;
+        root.scale.z = 0.72 + Math.sin(progress * Math.PI) * (weapon === 'rail' ? 0.7 : 0.42);
+        root.scale.x = root.scale.y = weapon === 'disc' ? 1 : 0.9 + progress * (weapon === 'shotgun' ? 0.65 : 0.28);
+        for (const child of root.children) {
+          if (child.name.startsWith('disc-magnetic-collapse-ring')) {
+            const collapse = Math.max(0.12, 1 - THREE.MathUtils.smoothstep(progress, 0, 0.82) * 0.82);
+            child.scale.setScalar(collapse);
+            child.rotation.z += delta * 16 * (child.userData.spin as number);
+            child.position.z -= delta * 1.4;
+          } else if (child.name.startsWith('disc-induction-spark')) {
+            const radial = child.userData.radial as THREE.Vector2;
+            child.position.x += radial.x * delta * 1.8;
+            child.position.y += radial.y * delta * 1.8;
+            child.position.z -= delta * 3.6;
+            child.scale.z = Math.max(0.08, envelope);
+          } else if (child.name.includes('smoke')) {
+            child.position.y += 0.008;
+            child.scale.multiplyScalar(1.045);
+          } else if (child.name.includes('ring')) {
+            child.rotation.z += weapon === 'plasma' ? 0.28 : 0.11;
+            child.scale.multiplyScalar(1.035);
+          } else if (child.name.includes('spark')) {
+            child.position.z -= 0.035;
+            child.scale.z = Math.max(0.08, envelope);
+          }
+        }
       },
     });
   }
 
   beam(start: THREE.Vector3, end: THREE.Vector3, weapon: WeaponId, color: number, duration: number): void {
+    if (!this.hasTransientCapacity()) return;
     const visibleStart = start.clone();
-    if (weapon === 'machine') visibleStart.lerp(end, 0.08);
-    if (weapon === 'shotgun') visibleStart.lerp(end, 0.04);
+    if (weapon === 'machine') visibleStart.lerp(end, 0.11);
+    if (weapon === 'shotgun') visibleStart.lerp(end, 0.06);
     const root = new THREE.Group();
     root.name = `${weapon}-beam-vfx`;
     const length = orientBetween(root, visibleStart, end);
-    const coreMaterial = additiveMaterial(weapon === 'rail' ? 0xffffff : color, 1);
-    const glowMaterial = additiveMaterial(color, 0.38);
-    const coreRadius = weapon === 'rail' ? 0.03
-      : weapon === 'sniper' ? 0.012
-        : weapon === 'shotgun' ? 0.006
-          : weapon === 'machine' ? 0.009 : 0.014;
-    const haloRadius = weapon === 'rail' ? 0.11
-      : weapon === 'sniper' ? 0.052
-        : weapon === 'shotgun' ? 0.013
-          : weapon === 'machine' ? 0.022 : 0.06;
-    const coreOpacity = weapon === 'shotgun' ? 0.42 : weapon === 'machine' ? 0.66 : weapon === 'sniper' ? 0.9 : 1;
-    const glowOpacity = weapon === 'shotgun' ? 0.07 : weapon === 'machine' ? 0.14 : weapon === 'sniper' ? 0.22 : 0.34;
+    if (length <= 0.001) return;
+    const coreMaterial = additiveMaterial(weapon === 'rail' ? 0xfaffd8 : weapon === 'sniper' ? 0xfff4d6 : color, 1);
+    const glowMaterial = additiveMaterial(color, 0.34);
+    const accentMaterial = additiveMaterial(weapon === 'rail' ? 0x96fbff : 0xffffff, 0.58);
+    const materials = [coreMaterial, glowMaterial, accentMaterial];
+    const coreOpacity = weapon === 'machine' ? 0.92
+      : weapon === 'shotgun' ? duration > 0.1 ? 0.92 : 0.18
+        : weapon === 'sniper' ? 0.96 : 1;
+    const glowOpacity = weapon === 'machine' ? 0.22
+      : weapon === 'shotgun' ? duration > 0.1 ? 0.24 : 0.035
+        : weapon === 'sniper' ? 0.18 : weapon === 'rail' ? 0.4 : 0.26;
     coreMaterial.opacity = coreOpacity;
     glowMaterial.opacity = glowOpacity;
-    const core = new THREE.Mesh(new THREE.CylinderGeometry(coreRadius, coreRadius * 0.72, length, 8, 1, true), coreMaterial);
-    const halo = new THREE.Mesh(new THREE.CylinderGeometry(haloRadius, haloRadius * 0.72, length, 10, 1, true), glowMaterial);
-    core.name = 'beam-core';
-    halo.name = 'beam-halo';
-    root.add(halo, core);
+    accentMaterial.opacity = weapon === 'rail' ? 0.7 : 0.45;
+
+    const addCylinder = (
+      name: string,
+      radius: number,
+      beamLength: number,
+      positionY: number,
+      material: THREE.Material,
+      sides = 7,
+    ): THREE.Mesh => {
+      const mesh = new THREE.Mesh(
+        this.sharedGeometry(
+          `beam-cylinder-${sides}`,
+          () => new THREE.CylinderGeometry(1, 0.72, 1, sides, 1, true),
+        ),
+        material,
+      );
+      mesh.name = name;
+      mesh.position.y = positionY;
+      mesh.scale.set(radius, beamLength, radius);
+      root.add(mesh);
+      return mesh;
+    };
 
     if (weapon === 'machine') {
-      // A fast sequence of tiny ionized packet glints gives the ballistic
-      // tracer character without turning every round into a solid laser.
-      for (let index = 0; index < 5; index += 1) {
-        const packet = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.006, Math.min(0.34, length * 0.055), 6), coreMaterial);
-        packet.name = `machine-tracer-packet-${index}`;
-        packet.position.y = -length * 0.42 + length * (index / 5) * 0.82;
-        root.add(packet);
+      // Ballistic packet: only a short, fast-moving hot slug is visible. The
+      // previous full-distance white cylinder was what made every gun read as
+      // the same low-resolution laser.
+      const packetLength = Math.min(3.8, Math.max(0.48, length * 0.12));
+      const packet = addCylinder('machine-hot-tracer', 0.012, packetLength, -length * 0.24, coreMaterial, 6);
+      const halo = addCylinder('machine-tracer-heat-envelope', 0.032, packetLength * 1.18, -length * 0.24, glowMaterial, 7);
+      packet.userData.travel = Math.max(22, length / Math.max(duration, 0.03));
+      halo.userData.travel = packet.userData.travel;
+    } else if (weapon === 'shotgun') {
+      const sabot = duration > 0.1;
+      const streakLength = sabot ? Math.min(length, 7.5) : Math.min(1.1, length * 0.08);
+      const positionY = sabot ? -length * 0.16 : -length * (0.16 + this.random() * 0.32);
+      addCylinder(sabot ? 'shotgun-sabot-core' : 'shotgun-pellet-streak', sabot ? 0.016 : 0.0045, streakLength, positionY, coreMaterial, sabot ? 7 : 5);
+      addCylinder(sabot ? 'shotgun-sabot-pressure-sleeve' : 'shotgun-pellet-haze', sabot ? 0.055 : 0.012, streakLength * 1.08, positionY, glowMaterial, 7);
+      if (sabot) {
+        for (let index = 0; index < 3; index += 1) {
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(0.055 + index * 0.022, 0.006, 5, 18), glowMaterial);
+          ring.name = `shotgun-sabot-wave-${index}`;
+          ring.rotation.x = Math.PI * 0.5;
+          ring.position.y = positionY - streakLength * 0.35 + index * streakLength * 0.28;
+          root.add(ring);
+        }
       }
     } else if (weapon === 'sniper') {
-      for (let index = 0; index < 3; index += 1) {
-        const wave = new THREE.Mesh(new THREE.RingGeometry(0.035 + index * 0.024, 0.045 + index * 0.024, 16), glowMaterial);
+      const tracerLength = Math.min(12, Math.max(3.5, length * 0.18));
+      addCylinder('sniper-high-velocity-core', 0.011, tracerLength, -length * 0.1, coreMaterial, 6);
+      addCylinder('sniper-directional-haze', 0.042, tracerLength * 1.12, -length * 0.1, glowMaterial, 8);
+      const wakeLength = Math.min(length * 0.42, 18);
+      addCylinder('sniper-ballistic-wake', 0.004, wakeLength, -length * 0.28, accentMaterial, 5);
+      for (let index = 0; index < 2; index += 1) {
+        const wave = new THREE.Mesh(new THREE.TorusGeometry(0.035 + index * 0.035, 0.005, 5, 18), glowMaterial);
         wave.name = `sniper-pressure-wave-${index}`;
         wave.rotation.x = Math.PI * 0.5;
-        wave.position.y = length * (0.18 + index * 0.22) - length * 0.5;
+        wave.position.y = -length * (0.18 + index * 0.18);
         root.add(wave);
       }
     } else if (weapon === 'rail') {
-      for (let index = 0; index < 8; index += 1) {
-        const marker = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.012, 6, 18), glowMaterial);
-        marker.name = `rail-wave-${index}`;
-        marker.rotation.x = Math.PI * 0.5;
-        marker.position.y = -length * 0.5 + length * ((index + 0.5) / 8);
-        root.add(marker);
+      const overcharged = duration > 0.25;
+      addCylinder('rail-collapse-core', overcharged ? 0.034 : 0.026, length, 0, coreMaterial, 8);
+      addCylinder('rail-magnetic-envelope', overcharged ? 0.13 : 0.09, length, 0, glowMaterial, 10);
+      // Twin longitudinal rails make the event feel connected to the weapon's
+      // physical bores instead of a detached rune laid over the screen.
+      for (const side of [-1, 1]) {
+        const rail = addCylinder(`rail-field-line-${side}`, 0.008, length * 0.92, 0, accentMaterial, 5);
+        rail.position.x = side * (overcharged ? 0.12 : 0.085);
       }
-    }
-
-    this.scene.add(root);
-    this.effects.push({
-      root,
-      age: 0,
-      duration,
-      materials: [coreMaterial, glowMaterial],
-      update: (progress, delta) => {
-        const envelope = Math.pow(1 - progress, 1.8);
-        coreMaterial.opacity = envelope * coreOpacity;
-        glowMaterial.opacity = envelope * glowOpacity;
-        root.scale.x = 0.65 + envelope * 0.55;
-        root.scale.z = root.scale.x;
-        if (weapon === 'rail') root.rotation.y += 0.2;
-        if (weapon === 'machine') root.position.addScaledVector(end.clone().sub(visibleStart).normalize(), delta * 18);
-      },
-    });
-  }
-
-  projectileTrail(position: THREE.Vector3, weapon: 'rocket' | 'plasma', color: number): void {
-    const root = new THREE.Group();
-    root.name = `${weapon}-projectile-trail`;
-    root.position.copy(position);
-    const glow = additiveMaterial(color, weapon === 'rocket' ? 0.48 : 0.34);
-    const hot = additiveMaterial(weapon === 'rocket' ? 0xffdf8a : 0xf4e8ff, 0.6);
-    const materials: THREE.Material[] = [glow, hot];
-
-    if (weapon === 'rocket') {
-      const ember = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 6), hot);
-      ember.position.set((this.random() - 0.5) * 0.05, (this.random() - 0.5) * 0.05, 0);
-      root.add(ember);
-      const smokeMaterial = new THREE.MeshBasicMaterial({
-        color: 0x2a2423,
-        transparent: true,
-        opacity: 0.18,
-        depthWrite: false,
-        blending: THREE.NormalBlending,
-      });
-      materials.push(smokeMaterial);
-      const smoke = new THREE.Mesh(new THREE.IcosahedronGeometry(0.075, 1), smokeMaterial);
-      smoke.name = 'rocket-smoke-wisp';
-      root.add(smoke);
+      const ringCount = overcharged ? 7 : 4;
+      for (let index = 0; index < ringCount; index += 1) {
+        const amount = (index + 1) / (ringCount + 1);
+        const ring = new THREE.Mesh(new THREE.TorusGeometry((overcharged ? 0.16 : 0.11) * (0.88 + amount * 0.22), 0.008, 5, 20), index % 2 ? accentMaterial : glowMaterial);
+        ring.name = `rail-collapse-wave-${index}`;
+        ring.rotation.x = Math.PI * 0.5;
+        ring.position.y = -length * 0.5 + length * amount;
+        ring.userData.phase = amount;
+        root.add(ring);
+      }
     } else {
-      const mote = new THREE.Mesh(new THREE.IcosahedronGeometry(0.038, 1), hot);
-      const ripple = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.008, 5, 14), glow);
-      ripple.rotation.set(this.random() * Math.PI, this.random() * Math.PI, this.random() * Math.PI);
-      root.add(mote, ripple);
+      // Bot laser traces use a narrow coherent core; the player's held laser
+      // uses the richer persistent path below.
+      addCylinder('coherent-beam-core', weapon === 'laser' ? 0.014 : 0.018, length, 0, coreMaterial, 8);
+      addCylinder('coherent-beam-halo', weapon === 'laser' ? 0.052 : 0.07, length, 0, glowMaterial, 10);
     }
 
+    root.traverse((object) => { object.frustumCulled = false; });
     this.scene.add(root);
-    const duration = weapon === 'rocket' ? 0.34 : 0.22;
-    this.effects.push({
+    const direction = end.clone().sub(visibleStart).normalize();
+    this.addEffect({
       root,
       age: 0,
       duration,
       materials,
+      kind: 'beam',
+      update: (progress, delta) => {
+        const envelope = Math.pow(1 - progress, weapon === 'rail' ? 1.35 : 1.8);
+        coreMaterial.opacity = envelope * coreOpacity;
+        glowMaterial.opacity = envelope * glowOpacity;
+        accentMaterial.opacity = envelope * (weapon === 'rail' ? 0.7 : 0.45);
+        if (weapon === 'machine') {
+          root.position.addScaledVector(direction, delta * Math.max(22, length / Math.max(duration, 0.03)));
+        } else if (weapon === 'sniper') {
+          root.position.addScaledVector(direction, delta * Math.max(55, length / Math.max(duration, 0.04)));
+        } else if (weapon === 'rail') {
+          root.scale.x = root.scale.z = 0.5 + envelope * 0.72;
+          for (const child of root.children) {
+            if (!child.name.startsWith('rail-collapse-wave')) continue;
+            const phase = child.userData.phase as number;
+            child.scale.setScalar(0.45 + envelope * (0.55 + phase * 0.28));
+            child.rotation.z += delta * (child.id % 2 ? 8 : -8);
+          }
+        }
+      },
+    });
+  }
+
+  projectileTrail(position: THREE.Vector3, weapon: 'rocket' | 'plasma' | 'disc', color: number): void {
+    if (suppressSawSlingLights(weapon)) return;
+    if (!this.consumeTrailBudget()) return;
+    const root = new THREE.Group();
+    root.name = `${weapon}-projectile-trail`;
+    root.position.copy(position);
+    const glow = additiveMaterial(color, weapon === 'rocket' ? 0.62 : weapon === 'disc' ? 0.2 : 0.48);
+    const hot = additiveMaterial(weapon === 'rocket' ? 0xffefb2 : weapon === 'disc' ? 0xffcb64 : 0xfff0ff, weapon === 'disc' ? 0.34 : 0.82);
+    const materials: THREE.Material[] = [glow, hot];
+    let smokeWisp: THREE.Mesh | undefined;
+    let plasmaShell: THREE.Mesh | undefined;
+    const discAfterRings: THREE.Object3D[] = [];
+
+    if (weapon === 'rocket') {
+      const ember = new THREE.Mesh(
+        this.sharedGeometry('trail-rocket-ember', () => new THREE.IcosahedronGeometry(0.052, 1)),
+        hot,
+      );
+      ember.position.set((this.random() - 0.5) * 0.05, (this.random() - 0.5) * 0.05, 0);
+      const heat = new THREE.Mesh(
+        this.sharedGeometry('trail-rocket-heat', () => new THREE.SphereGeometry(0.11, 8, 6)),
+        glow,
+      );
+      heat.name = 'rocket-trail-heat-glow';
+      heat.scale.z = 1.7;
+      root.add(heat, ember);
+      // Warm, translucent vapour avoids the opaque charcoal discs that were
+      // reading as black holes in the player's firing screenshots.
+      const smokeMat = smokeMaterial(0x8b796a, 0.1);
+      materials.push(smokeMat);
+      smokeWisp = new THREE.Mesh(
+        this.sharedGeometry('trail-rocket-smoke', () => new THREE.IcosahedronGeometry(0.09, 1)),
+        smokeMat,
+      );
+      smokeWisp.name = 'rocket-smoke-wisp';
+      smokeWisp.position.set((this.random() - 0.5) * 0.1, (this.random() - 0.5) * 0.1, 0.08);
+      root.add(smokeWisp);
+    } else if (weapon === 'plasma') {
+      const mote = new THREE.Mesh(
+        this.sharedGeometry('trail-plasma-mote', () => new THREE.IcosahedronGeometry(0.075, 1)),
+        hot,
+      );
+      plasmaShell = new THREE.Mesh(
+        this.sharedGeometry('trail-plasma-shell', () => new THREE.IcosahedronGeometry(0.14, 1)),
+        glow,
+      );
+      plasmaShell.name = 'plasma-trail-shell';
+      root.add(plasmaShell, mote);
+    } else {
+      // A pair of thin after-rings reads as a spinning cutting plane without
+      // leaving a bright opaque blob behind every bouncing projectile.
+      for (let index = 0; index < 2; index += 1) {
+        const afterRing = new THREE.Mesh(
+          this.sharedGeometry(
+            `trail-disc-ring-${index}`,
+            () => new THREE.TorusGeometry(0.19 - index * 0.035, 0.006, 5, 24),
+          ),
+          index === 0 ? glow : hot,
+        );
+        afterRing.name = `disc-trail-after-ring-${index}`;
+        afterRing.rotation.set((this.random() - 0.5) * 0.22, (this.random() - 0.5) * 0.22, this.random() * Math.PI);
+        afterRing.scale.y = 0.76;
+        root.add(afterRing);
+        discAfterRings.push(afterRing);
+      }
+      for (let index = 0; index < 3; index += 1) {
+        const emberLength = 0.13 + this.random() * 0.12;
+        const ember = new THREE.Mesh(
+          this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1)),
+          index === 0 ? hot : glow,
+        );
+        ember.name = `disc-trail-ember-${index}`;
+        ember.scale.set(0.008, 0.008, emberLength);
+        ember.position.set((this.random() - 0.5) * 0.2, (this.random() - 0.5) * 0.14, 0.05 + this.random() * 0.1);
+        ember.rotation.set((this.random() - 0.5) * 0.4, (this.random() - 0.5) * 0.4, this.random() * Math.PI);
+        root.add(ember);
+      }
+    }
+
+    this.scene.add(root);
+    const duration = weapon === 'rocket' ? 0.34 : weapon === 'disc' ? 0.14 : 0.22;
+    this.addEffect({
+      root,
+      age: 0,
+      duration,
+      materials,
+      kind: 'trail',
       update: (progress, delta) => {
         const envelope = Math.pow(1 - progress, 1.4);
-        glow.opacity = envelope * (weapon === 'rocket' ? 0.48 : 0.34);
-        hot.opacity = envelope * 0.6;
-        root.scale.multiplyScalar(1 + delta * (weapon === 'rocket' ? 2.4 : 1.3));
-        const smoke = root.getObjectByName('rocket-smoke-wisp') as THREE.Mesh | undefined;
-        if (smoke) (smoke.material as THREE.MeshBasicMaterial).opacity = envelope * 0.18;
+        glow.opacity = envelope * (weapon === 'rocket' ? 0.62 : weapon === 'disc' ? 0.2 : 0.48);
+        hot.opacity = envelope * (weapon === 'disc' ? 0.34 : 0.82);
+        root.scale.multiplyScalar(1 + delta * (weapon === 'rocket' ? 1.9 : weapon === 'disc' ? 0.55 : 1.25));
+        if (smokeWisp) (smokeWisp.material as THREE.MeshBasicMaterial).opacity = envelope * 0.1;
+        if (plasmaShell) plasmaShell.rotation.z += delta * 9;
+        for (const ring of discAfterRings) ring.rotation.z += delta * (ring.id % 2 ? 24 : -24);
       },
     });
   }
@@ -275,14 +723,14 @@ export class WeaponVfxSystem {
 
     const lagFactor = 1 - Math.exp(-Math.max(delta, 1 / 120) * 8.5);
     this.laserLaggedEnd.lerp(end, lagFactor);
-    const liveVector = end.clone().sub(start);
-    const laggedVector = this.laserLaggedEnd.clone().sub(start);
+    const liveVector = this.laserLiveVector.copy(end).sub(start);
+    const laggedVector = this.laserLaggedVector.copy(this.laserLaggedEnd).sub(start);
     this.laserBend = 0;
     for (let index = 0; index < this.laserPoints.length; index += 1) {
       const amount = index / (this.laserPoints.length - 1);
       const bend = Math.sin(amount * Math.PI) * 0.72;
-      const livePoint = start.clone().addScaledVector(liveVector, amount);
-      const laggedPoint = start.clone().addScaledVector(laggedVector, amount);
+      const livePoint = this.laserLivePoint.copy(start).addScaledVector(liveVector, amount);
+      const laggedPoint = this.laserLaggedPoint.copy(start).addScaledVector(laggedVector, amount);
       this.laserPoints[index].copy(livePoint).lerp(laggedPoint, bend);
       this.laserBend = Math.max(this.laserBend, this.laserPoints[index].distanceTo(livePoint));
     }
@@ -290,6 +738,15 @@ export class WeaponVfxSystem {
     this.laserPhase += delta * 18;
     laser.coreMaterial.opacity = 0.88 + Math.sin(this.laserPhase) * 0.1;
     laser.haloMaterial.opacity = 0.26 + Math.sin(this.laserPhase * 0.73) * 0.07;
+    laser.emitterMaterial.opacity = 0.72 + Math.sin(this.laserPhase * 1.7) * 0.18;
+    laser.emitter.position.copy(start);
+    if (liveVector.lengthSq() > 0.0001) {
+      laser.emitter.quaternion.setFromUnitVectors(FORWARD, this.tempDirection.copy(liveVector).normalize());
+    }
+    const emitterPulse = 0.88 + Math.sin(this.laserPhase * 1.45) * 0.16;
+    laser.emitterCore.scale.setScalar(emitterPulse);
+    laser.emitterRing.scale.setScalar(0.9 + Math.sin(this.laserPhase * 0.82) * 0.1);
+    laser.emitterRing.rotation.z += delta * 5.5;
     laser.segments.forEach((segment, index) => {
       const segmentStart = this.laserPoints[index];
       const segmentEnd = this.laserPoints[index + 1];
@@ -305,6 +762,8 @@ export class WeaponVfxSystem {
   }
 
   impact(position: THREE.Vector3, color: number, weapon: WeaponId, surfaceNormal?: THREE.Vector3): void {
+    if (suppressSawSlingLights(weapon)) return;
+    if (!this.hasTransientCapacity()) return;
     const root = new THREE.Group();
     root.name = `${weapon}-impact-vfx`;
     root.position.copy(position);
@@ -316,26 +775,54 @@ export class WeaponVfxSystem {
       root.lookAt(this.camera.position);
     }
     const glow = additiveMaterial(color, 0.95);
-    const hot = additiveMaterial(weapon === 'rocket' ? 0xffc06a : 0xffffff, weapon === 'rocket' ? 0.72 : 1);
+    const hot = additiveMaterial(
+      weapon === 'rocket' ? 0xffc06a : weapon === 'disc' ? 0xffcf6a : 0xffffff,
+      weapon === 'rocket' ? 0.72 : weapon === 'disc' ? 0.9 : 1,
+    );
     const materials: THREE.Material[] = [glow, hot];
     const heavy = weapon === 'rocket' || weapon === 'rail';
-    const radius = weapon === 'rocket' ? 1.8 : weapon === 'rail' ? 1.15 : weapon === 'plasma' ? 0.72 : 0.46;
+    const rapidImpact = weapon === 'machine' || weapon === 'shotgun' || weapon === 'plasma' || weapon === 'laser';
+    const radius = weapon === 'rocket' ? 1.8 : weapon === 'rail' ? 1.15 : weapon === 'plasma' ? 0.72 : weapon === 'disc' ? 0.58 : 0.46;
 
-    const flash = new THREE.Mesh(new THREE.CircleGeometry(radius * (weapon === 'rocket' ? 0.25 : 0.34), 18), hot);
+    const flash = new THREE.Mesh(
+      weapon === 'disc'
+        ? new THREE.RingGeometry(radius * 0.17, radius * 0.39, 22)
+        : rapidImpact
+          ? this.sharedGeometry('impact-unit-circle-18', () => new THREE.CircleGeometry(1, 18))
+          : new THREE.CircleGeometry(radius * (weapon === 'rocket' ? 0.25 : 0.34), 18),
+      hot,
+    );
     flash.name = 'impact-flash';
+    const flashBaseScale = rapidImpact ? radius * 0.34 : 1;
+    if (rapidImpact) flash.scale.setScalar(flashBaseScale);
     root.add(flash);
-    for (let index = 0; index < (heavy ? 3 : 2); index += 1) {
-      const ring = new THREE.Mesh(new THREE.RingGeometry(radius * (0.32 + index * 0.17), radius * (0.38 + index * 0.18), 28), glow);
+    const ringCount = rapidImpact ? 1 : heavy ? 3 : 2;
+    for (let index = 0; index < ringCount; index += 1) {
+      const ring = new THREE.Mesh(
+        rapidImpact
+          ? this.sharedGeometry('impact-unit-ring-28', () => new THREE.RingGeometry(0.84, 1, 28))
+          : new THREE.RingGeometry(radius * (0.32 + index * 0.17), radius * (0.38 + index * 0.18), 28),
+        glow,
+      );
       ring.name = `impact-ring-${index}`;
       ring.position.z = -0.01 * index;
       ring.userData.phase = index * 0.16;
+      ring.userData.baseScale = rapidImpact ? radius * 0.38 : 1;
+      if (rapidImpact) ring.scale.setScalar(ring.userData.baseScale as number);
       root.add(ring);
     }
 
-    const shardCount = heavy ? 14 : weapon === 'plasma' ? 9 : 6;
+    const shardCount = rapidImpact ? 0 : heavy ? 14 : weapon === 'disc' ? 11 : 6;
     for (let index = 0; index < shardCount; index += 1) {
-      const shard = new THREE.Mesh(new THREE.ConeGeometry(0.025 + this.random() * 0.02, 0.35 + this.random() * 0.48, 4), index % 3 === 0 ? hot : glow);
+      const shardRadius = 0.025 + this.random() * 0.02;
+      const shardLength = 0.35 + this.random() * 0.48;
+      const shard = new THREE.Mesh(
+        this.sharedGeometry('impact-shard-cone', () => new THREE.ConeGeometry(1, 1, 4)),
+        index % 3 === 0 ? hot : glow,
+      );
       shard.name = `impact-shard-${index}`;
+      shard.scale.set(shardRadius, shardLength, shardRadius);
+      shard.userData.baseScaleY = shardLength;
       const angle = (index / shardCount) * Math.PI * 2 + this.random() * 0.25;
       shard.rotation.z = angle;
       shard.position.set(Math.cos(angle) * 0.12, Math.sin(angle) * 0.12, 0.02);
@@ -344,25 +831,27 @@ export class WeaponVfxSystem {
     }
 
     this.scene.add(root);
-    const duration = heavy ? 0.52 : 0.3;
-    this.effects.push({
+    const duration = heavy ? 0.52 : weapon === 'disc' ? 0.38 : weapon === 'machine' ? 0.2 : 0.3;
+    this.addEffect({
       root,
       age: 0,
       duration,
       materials,
+      kind: 'impact',
       update: (progress, delta) => {
         const envelope = Math.pow(1 - progress, 1.35);
-        hot.opacity = envelope * (weapon === 'rocket' ? 0.72 : 1);
+        hot.opacity = envelope * (weapon === 'rocket' ? 0.72 : weapon === 'disc' ? 0.9 : 1);
         glow.opacity = envelope * 0.9;
-        flash.scale.setScalar(0.5 + progress * 2.4);
+        flash.scale.setScalar(flashBaseScale * (0.5 + progress * 2.4));
         for (const child of root.children) {
           if (child.name.startsWith('impact-ring')) {
             const phase = child.userData.phase as number;
-            child.scale.setScalar(0.45 + Math.max(0, progress - phase) * 2.8);
+            const baseScale = (child.userData.baseScale as number | undefined) ?? 1;
+            child.scale.setScalar(baseScale * (0.45 + Math.max(0, progress - phase) * 2.8));
             child.rotation.z += delta * (child.id % 2 ? 4 : -4);
           } else if (child.name.startsWith('impact-shard')) {
             child.position.addScaledVector(child.userData.velocity as THREE.Vector3, delta);
-            child.scale.y = Math.max(0.08, envelope);
+            child.scale.y = (child.userData.baseScaleY as number) * Math.max(0.08, envelope);
           }
         }
       },
@@ -370,6 +859,7 @@ export class WeaponVfxSystem {
   }
 
   mark(position: THREE.Vector3, surfaceNormal: THREE.Vector3, weapon: WeaponId, color: number): void {
+    if (suppressSawSlingLights(weapon)) return;
     const duplicate = this.marks.find((entry) => entry.weapon === weapon && entry.position.distanceToSquared(position) < 0.012);
     if (duplicate) {
       duplicate.age = 0;
@@ -391,6 +881,7 @@ export class WeaponVfxSystem {
       laser: 0.12,
       sniper: 0.16,
       rail: 0.36,
+      disc: 0.24,
     };
     const radius = radii[weapon];
     const dark = new THREE.MeshBasicMaterial({
@@ -416,7 +907,7 @@ export class WeaponVfxSystem {
     root.add(crater);
 
     if (weapon === 'rocket') {
-      for (let index = 0; index < 3; index += 1) {
+      for (let index = 0; index < 2; index += 1) {
         const ring = new THREE.Mesh(
           new THREE.RingGeometry(radius * (0.28 + index * 0.2), radius * (0.34 + index * 0.21), 22),
           index === 0 ? accent : dark,
@@ -425,9 +916,9 @@ export class WeaponVfxSystem {
         ring.rotation.z = index * 0.73;
         root.add(ring);
       }
-      for (let index = 0; index < 9; index += 1) {
+      for (let index = 0; index < 3; index += 1) {
         const chip = new THREE.Mesh(new THREE.CircleGeometry(0.045 + this.random() * 0.055, 6), dark);
-        const angle = (index / 9) * Math.PI * 2 + this.random() * 0.22;
+        const angle = (index / 3) * Math.PI * 2 + this.random() * 0.22;
         chip.position.set(Math.cos(angle) * radius * (0.68 + this.random() * 0.34), Math.sin(angle) * radius * (0.68 + this.random() * 0.34), 0.001);
         root.add(chip);
       }
@@ -446,6 +937,19 @@ export class WeaponVfxSystem {
         ring.position.z = 0.002 + index * 0.001;
         root.add(ring);
       }
+    } else if (weapon === 'disc') {
+      const cut = new THREE.Mesh(new THREE.RingGeometry(radius * 0.36, radius * 0.76, 20), accent);
+      cut.name = 'disc-gouge-ring';
+      cut.position.z = 0.002;
+      cut.scale.y = 0.68;
+      root.add(cut);
+      for (let index = 0; index < 4; index += 1) {
+        const slash = new THREE.Mesh(new THREE.PlaneGeometry(radius * 0.08, radius * (0.75 + index * 0.12)), index === 0 ? accent : dark);
+        slash.name = `disc-gouge-slash-${index}`;
+        slash.position.set((index - 1.5) * radius * 0.12, 0, 0.003 + index * 0.0005);
+        slash.rotation.z = Math.PI * 0.5 + (index - 1.5) * 0.11;
+        root.add(slash);
+      }
     } else {
       const puncture = new THREE.Mesh(new THREE.RingGeometry(radius * 0.22, radius * 0.5, weapon === 'shotgun' ? 7 : 12), accent);
       puncture.position.z = 0.002;
@@ -453,11 +957,16 @@ export class WeaponVfxSystem {
     }
 
     this.scene.add(root);
-    this.marks.push({ root, material: dark, accentMaterial: accent, position: position.clone(), weapon, age: 0, duration: weapon === 'rocket' ? 42 : 30 });
-    while (this.marks.length > 96) this.removeMark(0);
+    this.marks.push({ root, material: dark, accentMaterial: accent, position: position.clone(), weapon, age: 0, duration: weapon === 'rocket' ? 42 : weapon === 'disc' ? 22 : 30 });
+    while (this.marks.filter((entry) => entry.weapon === weapon).length > MAX_MARKS_BY_WEAPON[weapon]) {
+      const sameWeaponIndex = this.marks.findIndex((entry) => entry.weapon === weapon);
+      this.removeMark(sameWeaponIndex);
+    }
+    while (this.marks.length > MAX_IMPACT_MARKS) this.removeMark(0);
   }
 
   stickTracer(target: THREE.Object3D, worldPosition: THREE.Vector3, incomingDirection: THREE.Vector3, color: number): void {
+    if (!this.hasTransientCapacity() || this.countEffects('tracer') >= MAX_STUCK_TRACERS) return;
     const direction = incomingDirection.clone().normalize();
     if (direction.lengthSq() < 0.5) return;
     target.updateWorldMatrix(true, true);
@@ -487,7 +996,7 @@ export class WeaponVfxSystem {
     ring.rotation.x = Math.PI * 0.5;
     root.add(tracer, tip, ring);
     target.add(root);
-    this.effects.push({
+    this.addEffect({
       root,
       age: 0,
       duration: 1.8,
@@ -503,42 +1012,69 @@ export class WeaponVfxSystem {
   }
 
   burst(position: THREE.Vector3, color: number, count: number): void {
+    if (!this.hasTransientCapacity()) return;
     const root = new THREE.Group();
     root.name = 'spark-burst-vfx';
     root.position.copy(position);
-    const material = additiveMaterial(color, 0.9);
-    const hot = additiveMaterial(0xffffff, 0.8);
+    const material = additiveMaterial(0xffffff, 0.9);
     const limitedCount = Math.min(18, Math.max(3, count));
+    const sparks = new THREE.InstancedMesh(
+      this.sharedGeometry('burst-spark-cylinder', () => new THREE.CylinderGeometry(0.009, 0.022, 1, 5)),
+      material,
+      limitedCount,
+    );
+    sparks.name = 'instanced-spark-burst';
+    sparks.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    sparks.frustumCulled = false;
+    const positions: THREE.Vector3[] = [];
+    const velocities: THREE.Vector3[] = [];
+    const orientations: THREE.Quaternion[] = [];
+    const baseScales: number[] = [];
+    const dummy = new THREE.Object3D();
     for (let index = 0; index < limitedCount; index += 1) {
       const length = 0.18 + this.random() * 0.72;
-      const spark = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.022, length, 5), index % 4 === 0 ? hot : material);
-      spark.name = `spark-${index}`;
       const velocity = new THREE.Vector3(this.random() - 0.5, this.random() * 0.75 + 0.08, this.random() - 0.5).normalize().multiplyScalar(2.6 + this.random() * 5.5);
-      spark.userData.velocity = velocity;
-      spark.quaternion.setFromUnitVectors(UP, velocity.clone().normalize());
-      root.add(spark);
+      const orientation = new THREE.Quaternion().setFromUnitVectors(UP, velocity.clone().normalize());
+      positions.push(new THREE.Vector3());
+      velocities.push(velocity);
+      orientations.push(orientation);
+      baseScales.push(length);
+      dummy.position.set(0, 0, 0);
+      dummy.quaternion.copy(orientation);
+      dummy.scale.set(1, length, 1);
+      dummy.updateMatrix();
+      sparks.setMatrixAt(index, dummy.matrix);
+      sparks.setColorAt(index, new THREE.Color(index % 4 === 0 ? 0xffffff : color));
     }
+    sparks.instanceMatrix.needsUpdate = true;
+    if (sparks.instanceColor) sparks.instanceColor.needsUpdate = true;
+    root.add(sparks);
     this.scene.add(root);
-    this.effects.push({
+    this.addEffect({
       root,
       age: 0,
       duration: 0.3,
-      materials: [material, hot],
+      materials: [material],
+      kind: 'burst',
       update: (progress, delta) => {
         const envelope = 1 - progress;
         material.opacity = envelope * 0.9;
-        hot.opacity = envelope;
-        for (const child of root.children) {
-          const velocity = child.userData.velocity as THREE.Vector3;
-          child.position.addScaledVector(velocity, delta);
+        for (let index = 0; index < limitedCount; index += 1) {
+          const velocity = velocities[index];
+          positions[index].addScaledVector(velocity, delta);
           velocity.y -= delta * 6.5;
-          child.scale.y = envelope;
+          dummy.position.copy(positions[index]);
+          dummy.quaternion.copy(orientations[index]);
+          dummy.scale.set(1, baseScales[index] * envelope, 1);
+          dummy.updateMatrix();
+          sparks.setMatrixAt(index, dummy.matrix);
         }
+        sparks.instanceMatrix.needsUpdate = true;
       },
     });
   }
 
-  createProjectile(weapon: 'rocket' | 'plasma', color: number): THREE.Group {
+  createProjectile(weapon: 'rocket' | 'plasma' | 'disc', color: number): THREE.Group {
     const root = new THREE.Group();
     root.name = `${weapon}-projectile`;
     if (weapon === 'rocket') {
@@ -559,39 +1095,118 @@ export class WeaponVfxSystem {
       warheadBand.rotation.x = Math.PI * 0.5;
       warheadBand.position.z = -0.13;
       root.add(warheadBand);
+      const fins: THREE.Object3D[] = [];
       for (let index = 0; index < 3; index += 1) {
         const fin = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.15, 0.12), index === 0 ? shell : body);
         fin.name = `rocket-fin-${index}`;
         fin.position.z = 0.16;
         fin.rotation.z = index * Math.PI * 2 / 3;
         root.add(fin);
+        fins.push(fin);
       }
       const exhaust = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.32, 10, 1, true), glow);
+      exhaust.name = 'rocket-exhaust-plume';
       exhaust.rotation.x = Math.PI * 0.5;
       exhaust.position.z = 0.34;
       root.add(exhaust);
       const exhaustCore = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.22, 8, 1, true), hot);
+      exhaustCore.name = 'rocket-exhaust-hot-core';
       exhaustCore.rotation.x = Math.PI * 0.5;
       exhaustCore.position.z = 0.29;
       root.add(exhaustCore);
-    } else {
+      const heatGlow = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 7), glow);
+      heatGlow.name = 'rocket-exhaust-heat-glow';
+      heatGlow.position.z = 0.25;
+      heatGlow.scale.z = 1.85;
+      const pressureRing = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.009, 5, 18), glow);
+      pressureRing.name = 'rocket-exhaust-pressure-ring';
+      pressureRing.position.z = 0.28;
+      root.add(heatGlow, pressureRing);
+      root.userData.vfxParts = { spinRing: warheadBand, fins, plume: exhaust, heatGlow, pressureRing };
+    } else if (weapon === 'plasma') {
       const glow = additiveMaterial(color, 0.82);
       const hot = additiveMaterial(0xffffff, 1);
-      root.add(new THREE.Mesh(new THREE.IcosahedronGeometry(0.14, 2), hot));
-      const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(0.27, 2), glow);
+      root.add(new THREE.Mesh(
+        this.sharedGeometry('projectile-plasma-core', () => new THREE.IcosahedronGeometry(0.14, 2)),
+        hot,
+      ));
+      const shell = new THREE.Mesh(
+        this.sharedGeometry('projectile-plasma-shell', () => new THREE.IcosahedronGeometry(0.27, 2)),
+        glow,
+      );
       shell.name = 'plasma-shell';
       root.add(shell);
-      for (let index = 0; index < 3; index += 1) {
-        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.018, 6, 22), glow);
+      const rings: THREE.Object3D[] = [];
+      for (let index = 0; index < 2; index += 1) {
+        const ring = new THREE.Mesh(
+          this.sharedGeometry('projectile-plasma-ring', () => new THREE.TorusGeometry(0.3, 0.018, 6, 22)),
+          glow,
+        );
         ring.name = `plasma-ring-${index}`;
         ring.rotation.set(index * 1.05, index * 0.7, index * 0.4);
         root.add(ring);
+        rings.push(ring);
       }
-      const tail = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.65, 10, 1, true), glow);
+      const tail = new THREE.Mesh(
+        this.sharedGeometry('projectile-plasma-tail', () => new THREE.ConeGeometry(0.16, 0.65, 10, 1, true)),
+        glow,
+      );
       tail.rotation.x = Math.PI * 0.5;
       tail.position.z = 0.37;
       root.add(tail);
       root.scale.setScalar(0.62);
+      root.userData.vfxParts = { shell, rings, arcs: [] };
+    } else {
+      const rotor = new THREE.Group();
+      rotor.name = 'disc-projectile-rotor';
+      const carbide = new THREE.MeshPhysicalMaterial({
+        color: 0x7d878b,
+        roughness: 0.2,
+        metalness: 1,
+        envMapIntensity: 0.78,
+        anisotropy: 1,
+      });
+
+      const cutterShape = new THREE.Shape();
+      const cutterTeeth = 40;
+      for (let index = 0; index < cutterTeeth; index += 1) {
+        const step = Math.PI * 2 / cutterTeeth;
+        const points: Array<[number, number]> = [
+          [index * step, 0.325],
+          [(index + 0.2) * step, 0.38],
+          [(index + 0.44) * step, 0.374],
+          [(index + 0.78) * step, 0.325],
+        ];
+        for (const [angle, radius] of points) {
+          const x = Math.cos(angle) * radius;
+          const y = Math.sin(angle) * radius;
+          if (index === 0 && angle === 0) cutterShape.moveTo(x, y);
+          else cutterShape.lineTo(x, y);
+        }
+      }
+      cutterShape.closePath();
+      const cutterGeometry = new THREE.ExtrudeGeometry(cutterShape, {
+        depth: 0.022,
+        steps: 1,
+        bevelEnabled: true,
+        bevelSize: 0.0015,
+        bevelThickness: 0.0015,
+        bevelSegments: 1,
+      });
+      cutterGeometry.translate(0, 0, -0.011);
+      cutterGeometry.computeVertexNormals();
+      const cutterBody = new THREE.Mesh(cutterGeometry, carbide);
+      cutterBody.name = 'disc-projectile-body';
+      rotor.add(cutterBody);
+      const armoredHub = new THREE.Mesh(new THREE.CylinderGeometry(0.125, 0.125, 0.085, 18, 1), carbide);
+      armoredHub.name = 'disc-projectile-hub';
+      armoredHub.rotation.x = Math.PI * 0.5;
+      rotor.add(armoredHub);
+      // The saw flies flat like the exposed blade in the launcher instead of
+      // turning face-on to the camera. Its local Z spin axis becomes world-up.
+      rotor.rotation.x = -Math.PI * 0.5;
+      root.add(rotor);
+      root.userData.vfxParts = { rotor };
     }
     root.traverse((object) => { object.frustumCulled = false; });
     return root;
@@ -613,7 +1228,9 @@ export class WeaponVfxSystem {
   }
 
   orientGrenade(root: THREE.Group, velocity: THREE.Vector3, elapsed: number): void {
-    if (velocity.lengthSq() > 0.04) root.quaternion.setFromUnitVectors(FORWARD, velocity.clone().normalize());
+    if (velocity.lengthSq() > 0.04) {
+      root.quaternion.setFromUnitVectors(FORWARD, this.tempDirection.copy(velocity).normalize());
+    }
     root.rotateZ(elapsed * 9.5);
     const cap = root.children.find((child) => child instanceof THREE.Mesh && child.position.y > 0.1);
     if (cap) cap.rotation.z = elapsed * 12;
@@ -626,6 +1243,7 @@ export class WeaponVfxSystem {
 
   rocketExplosion(position: THREE.Vector3, color: number): void {
     this.impact(position, color, 'rocket');
+    if (!this.hasTransientCapacity()) return;
     const root = new THREE.Group();
     root.name = 'rocket-blast-wave';
     root.position.copy(position);
@@ -638,11 +1256,12 @@ export class WeaponVfxSystem {
     wave.position.z = -0.02;
     root.add(core, wave);
     this.scene.add(root);
-    this.effects.push({
+    this.addEffect({
       root,
       age: 0,
       duration: 0.62,
       materials,
+      kind: 'impact',
       update: (progress) => {
         const envelope = Math.pow(1 - progress, 1.25);
         hot.opacity = envelope;
@@ -666,8 +1285,11 @@ export class WeaponVfxSystem {
       this.grappleRoot.renderOrder = 1000;
       const cableMaterial = additiveMaterial(0x6df4ff, 0.98, false);
       this.grappleMaterials.push(cableMaterial);
-      const initialRope = new THREE.CatmullRomCurve3([new THREE.Vector3(), new THREE.Vector3(0, 1, 0)]);
-      this.grappleCable = new THREE.Mesh(new THREE.TubeGeometry(initialRope, 8, 0.035, 6, false), cableMaterial);
+      for (let index = 0; index < this.grappleCurvePoints.length; index += 1) {
+        this.grappleCurvePoints[index].set(0, index / (this.grappleCurvePoints.length - 1), 0);
+      }
+      this.grappleCurve.updateArcLengths();
+      this.grappleCable = new THREE.Mesh(new THREE.TubeGeometry(this.grappleCurve, 8, 0.035, 6, false), cableMaterial);
       this.grappleCable.name = 'grapple-cable';
       this.grappleCable.frustumCulled = false;
       this.grappleCable.renderOrder = 1000;
@@ -693,26 +1315,30 @@ export class WeaponVfxSystem {
     // Starting exactly at the camera near plane makes even a thin cable's
     // cross-section balloon across the view. Pull it a short distance forward
     // so the cable visibly leaves the lower-left launcher without occluding the screen.
-    const cableStart = start.clone();
-    const cableDirection = end.clone().sub(start);
+    const cableStart = this.grappleCurvePoints[0].copy(start);
+    const cableDirection = this.tempDirection.copy(end).sub(start);
     if (cableDirection.lengthSq() > 0.01) cableStart.addScaledVector(cableDirection.normalize(), 0.38);
-    const ropeDirection = end.clone().sub(cableStart);
+    const ropeDirection = this.tempDirectionB.copy(end).sub(cableStart);
     const distance = ropeDirection.length();
-    const side = new THREE.Vector3().crossVectors(ropeDirection, UP);
+    const side = this.tempSide.crossVectors(ropeDirection, UP);
     if (side.lengthSq() < 0.001) side.set(1, 0, 0);
     else side.normalize();
     const sag = Math.min(0.7, distance * 0.055);
     const flex = Math.sin(this.ropePhase) * Math.min(0.24, distance * 0.018);
-    const points = [0.12, 0.34, 0.58, 0.82].map((t) => {
-      const point = cableStart.clone().lerp(end, t);
+    for (let index = 0; index < GRAPPLE_CURVE_AMOUNTS.length; index += 1) {
+      const t = GRAPPLE_CURVE_AMOUNTS[index];
+      const point = this.grappleCurvePoints[index + 1].copy(cableStart).lerp(end, t);
       point.y -= Math.sin(t * Math.PI) * sag;
       point.addScaledVector(side, Math.sin(t * Math.PI) * flex);
-      return point;
-    });
-    const ropeCurve = new THREE.CatmullRomCurve3([cableStart, ...points, end], false, 'catmullrom', 0.18);
-    const previousGeometry = cable.geometry;
-    cable.geometry = new THREE.TubeGeometry(ropeCurve, 18, 0.035, 6, false);
-    previousGeometry.dispose();
+    }
+    this.grappleCurvePoints[this.grappleCurvePoints.length - 1].copy(end);
+    if (this.grappleGeometryFrame === 0) {
+      this.grappleCurve.updateArcLengths();
+      const previousGeometry = cable.geometry;
+      cable.geometry = new THREE.TubeGeometry(this.grappleCurve, 18, 0.035, 6, false);
+      previousGeometry.dispose();
+    }
+    this.grappleGeometryFrame = (this.grappleGeometryFrame + 1) % 3;
     this.ropePhase += 0.055;
     hook.position.copy(end);
     if (this.grappleHookCore) this.grappleHookCore.position.copy(end);
@@ -720,42 +1346,75 @@ export class WeaponVfxSystem {
 
   clearGrapple(): void {
     if (this.grappleRoot) this.grappleRoot.visible = false;
+    this.grappleGeometryFrame = 0;
   }
 
   orientProjectile(root: THREE.Group, direction: THREE.Vector3, elapsed: number, weapon: WeaponId): void {
-    root.quaternion.setFromUnitVectors(FORWARD, direction.clone().normalize());
+    if (weapon === 'disc') {
+      const planarDirection = this.tempDirection.copy(direction).setY(0);
+      if (planarDirection.lengthSq() > 0.0001) {
+        planarDirection.normalize();
+        root.rotation.set(0, Math.atan2(-planarDirection.x, -planarDirection.z), 0);
+      }
+    } else {
+      root.quaternion.setFromUnitVectors(FORWARD, this.tempDirection.copy(direction).normalize());
+    }
     if (weapon === 'rocket') {
-      const spinRing = root.getObjectByName('rocket-spin-ring');
+      const parts = root.userData.vfxParts as {
+        spinRing?: THREE.Object3D;
+        fins?: THREE.Object3D[];
+        plume?: THREE.Object3D;
+        heatGlow?: THREE.Object3D;
+        pressureRing?: THREE.Object3D;
+      } | undefined;
+      const spinRing = parts?.spinRing ?? root.getObjectByName('rocket-spin-ring');
       if (spinRing) spinRing.rotation.z = elapsed * 9;
-      for (const child of root.children) {
-        if (child.name.startsWith('rocket-fin-')) {
-          const index = Number.parseInt(child.name.slice('rocket-fin-'.length), 10) || 0;
-          child.rotation.z = index * Math.PI * 2 / 3 + elapsed * 0.8;
+      if (parts?.fins) {
+        for (let index = 0; index < parts.fins.length; index += 1) {
+          parts.fins[index].rotation.z = index * Math.PI * 2 / 3 + elapsed * 0.8;
+        }
+      } else {
+        for (const child of root.children) {
+          if (child.name.startsWith('rocket-fin-')) {
+            const index = Number.parseInt(child.name.slice('rocket-fin-'.length), 10) || 0;
+            child.rotation.z = index * Math.PI * 2 / 3 + elapsed * 0.8;
+          }
         }
       }
+      const plume = parts?.plume ?? root.getObjectByName('rocket-exhaust-plume');
+      if (plume) plume.scale.set(0.9 + Math.sin(elapsed * 34) * 0.12, 0.9 + Math.sin(elapsed * 34) * 0.12, 0.82 + Math.sin(elapsed * 41) * 0.16);
+      const heatGlow = parts?.heatGlow ?? root.getObjectByName('rocket-exhaust-heat-glow');
+      if (heatGlow) heatGlow.scale.set(0.9 + Math.sin(elapsed * 28) * 0.1, 0.9 + Math.sin(elapsed * 28) * 0.1, 1.7 + Math.sin(elapsed * 35) * 0.22);
+      const pressureRing = parts?.pressureRing ?? root.getObjectByName('rocket-exhaust-pressure-ring');
+      if (pressureRing) pressureRing.scale.setScalar(0.88 + Math.sin(elapsed * 30) * 0.1);
     } else if (weapon === 'plasma') {
-      for (const child of root.children) {
-        if (child.name.startsWith('plasma-ring')) {
-          child.rotation.x += 0.08 + (child.id % 3) * 0.02;
-          child.rotation.z = elapsed * (1.8 + (child.id % 4) * 0.3);
-        } else if (child.name === 'plasma-shell') {
-          const pulse = 0.92 + Math.sin(elapsed * 22) * 0.12;
-          child.scale.setScalar(pulse);
-        }
+      const parts = root.userData.vfxParts as {
+        shell?: THREE.Object3D;
+        rings?: THREE.Object3D[];
+        arcs?: THREE.Object3D[];
+      } | undefined;
+      for (const ring of parts?.rings ?? []) {
+        ring.rotation.x += 0.08 + (ring.id % 3) * 0.02;
+        ring.rotation.z = elapsed * (1.8 + (ring.id % 4) * 0.3);
       }
+      const pulse = 0.92 + Math.sin(elapsed * 22) * 0.12;
+      parts?.shell?.scale.setScalar(pulse);
+      for (const arc of parts?.arcs ?? []) arc.rotation.z = elapsed * (2.2 + (arc.id % 3) * 0.55);
     }
   }
 
   update(delta: number): void {
+    this.trailSpawnTokens = Math.min(
+      TRAIL_BURST_ALLOWANCE,
+      this.trailSpawnTokens + Math.max(0, delta) * TRAIL_SPAWNS_PER_SECOND,
+    );
     for (let index = this.effects.length - 1; index >= 0; index -= 1) {
       const effect = this.effects[index];
       effect.age += delta;
       const progress = THREE.MathUtils.clamp(effect.age / effect.duration, 0, 1);
       effect.update(progress, delta);
       if (progress < 1) continue;
-      effect.root.parent?.remove(effect.root);
-      this.disposeRoot(effect.root, effect.materials);
-      this.effects.splice(index, 1);
+      this.removeEffect(index);
     }
     for (let index = this.marks.length - 1; index >= 0; index -= 1) {
       const mark = this.marks[index];
@@ -767,19 +1426,23 @@ export class WeaponVfxSystem {
     }
   }
 
-  dispose(): void {
-    for (const effect of this.effects) {
-      effect.root.parent?.remove(effect.root);
-      this.disposeRoot(effect.root, effect.materials);
-    }
-    this.effects.length = 0;
+  clearTransientEffects(): void {
+    while (this.effects.length) this.removeEffect(this.effects.length - 1);
     while (this.marks.length) this.removeMark(this.marks.length - 1);
+    this.trailSpawnTokens = TRAIL_BURST_ALLOWANCE;
+    this.stopContinuousLaser();
+  }
+
+  dispose(): void {
+    this.clearTransientEffects();
     if (this.continuousLaser) {
       this.scene.remove(this.continuousLaser.root);
       this.continuousLaser.coreGeometry.dispose();
       this.continuousLaser.haloGeometry.dispose();
+      for (const geometry of this.continuousLaser.flareGeometries) geometry.dispose();
       this.continuousLaser.coreMaterial.dispose();
       this.continuousLaser.haloMaterial.dispose();
+      this.continuousLaser.emitterMaterial.dispose();
       this.continuousLaser = undefined;
     }
     if (this.grappleRoot) {
@@ -791,6 +1454,9 @@ export class WeaponVfxSystem {
       this.grappleHookCore = undefined;
       this.grappleMaterials.length = 0;
     }
+    for (const geometry of this.sharedGeometries.values()) geometry.dispose();
+    this.sharedGeometries.clear();
+    this.sharedGeometrySet.clear();
   }
 
   get activeEffects(): number {
@@ -802,7 +1468,7 @@ export class WeaponVfxSystem {
   }
 
   get activeTracers(): number {
-    return this.effects.filter((effect) => effect.kind === 'tracer').length;
+    return this.countEffects('tracer');
   }
 
   get continuousLaserActive(): boolean {
@@ -813,14 +1479,66 @@ export class WeaponVfxSystem {
     return this.continuousLaserActive ? this.laserBend : 0;
   }
 
+  private hasTransientCapacity(): boolean {
+    return this.effects.length < MAX_TRANSIENT_EFFECTS;
+  }
+
+  private consumeTrailBudget(): boolean {
+    if (!this.hasTransientCapacity() || this.trailSpawnTokens < 1) return false;
+    if (this.countEffects('trail') >= MAX_TRAIL_EFFECTS) return false;
+    this.trailSpawnTokens -= 1;
+    return true;
+  }
+
+  private addEffect(effect: Effect): void {
+    if (effect.kind) {
+      while (this.countEffects(effect.kind) >= MAX_EFFECTS_BY_KIND[effect.kind]) {
+        const sameKindIndex = this.effects.findIndex((entry) => entry.kind === effect.kind);
+        if (sameKindIndex < 0) break;
+        this.removeEffect(sameKindIndex);
+      }
+    }
+    while (this.effects.length >= MAX_TRANSIENT_EFFECTS) {
+      const trailIndex = this.effects.findIndex((entry) => entry.kind === 'trail');
+      this.removeEffect(trailIndex >= 0 ? trailIndex : 0);
+    }
+    this.effects.push(effect);
+  }
+
+  private countEffects(kind: NonNullable<Effect['kind']>): number {
+    let count = 0;
+    for (const effect of this.effects) {
+      if (effect.kind === kind) count += 1;
+    }
+    return count;
+  }
+
+  private removeEffect(index: number): void {
+    const effect = this.effects[index];
+    if (!effect) return;
+    effect.root.parent?.remove(effect.root);
+    this.disposeRoot(effect.root, effect.materials);
+    this.effects.splice(index, 1);
+  }
+
+  private sharedGeometry<T extends THREE.BufferGeometry>(key: string, create: () => T): T {
+    const cached = this.sharedGeometries.get(key);
+    if (cached) return cached as T;
+    const geometry = create();
+    geometry.userData.sharedWeaponVfx = true;
+    this.sharedGeometries.set(key, geometry);
+    this.sharedGeometrySet.add(geometry);
+    return geometry;
+  }
+
   private createContinuousLaser(color: number): ContinuousLaser {
     const root = new THREE.Group();
     root.name = 'laser-continuous-beam';
     root.visible = false;
-    const coreMaterial = additiveMaterial(0xeafff1, 0.95);
+    const coreMaterial = additiveMaterial(0xf0fff5, 0.96);
     const haloMaterial = additiveMaterial(color, 0.3);
-    const coreGeometry = new THREE.CylinderGeometry(0.018, 0.012, 1, 8, 1, true);
-    const haloGeometry = new THREE.CylinderGeometry(0.085, 0.05, 1, 10, 1, true);
+    const coreGeometry = new THREE.CylinderGeometry(0.014, 0.01, 1, 8, 1, true);
+    const haloGeometry = new THREE.CylinderGeometry(0.068, 0.042, 1, 10, 1, true);
     const segments: ContinuousLaser['segments'] = [];
     for (let index = 0; index < this.laserPoints.length - 1; index += 1) {
       const halo = new THREE.Mesh(haloGeometry, haloMaterial);
@@ -832,8 +1550,39 @@ export class WeaponVfxSystem {
       root.add(halo, core);
       segments.push({ core, halo });
     }
+    const emitter = new THREE.Group();
+    emitter.name = 'laser-emitter-flare';
+    const emitterMaterial = additiveMaterial(color, 0.8, false);
+    const emitterCoreGeometry = new THREE.IcosahedronGeometry(0.075, 1);
+    const emitterRingGeometry = new THREE.TorusGeometry(0.105, 0.012, 6, 24);
+    const emitterBladeGeometry = new THREE.BoxGeometry(0.008, 0.22, 0.008);
+    const emitterCore = new THREE.Mesh(emitterCoreGeometry, coreMaterial);
+    emitterCore.name = 'laser-emitter-hot-core';
+    const emitterRing = new THREE.Mesh(emitterRingGeometry, emitterMaterial);
+    emitterRing.name = 'laser-emitter-bloom-ring';
+    emitter.add(emitterCore, emitterRing);
+    for (let index = 0; index < 4; index += 1) {
+      const blade = new THREE.Mesh(emitterBladeGeometry, emitterMaterial);
+      blade.name = `laser-emitter-blade-${index}`;
+      blade.rotation.z = index * Math.PI * 0.5;
+      emitter.add(blade);
+    }
+    root.add(emitter);
+    root.traverse((object) => { object.frustumCulled = false; });
     this.scene.add(root);
-    return { root, segments, coreGeometry, haloGeometry, coreMaterial, haloMaterial };
+    return {
+      root,
+      segments,
+      coreGeometry,
+      haloGeometry,
+      coreMaterial,
+      haloMaterial,
+      emitter,
+      emitterCore,
+      emitterRing,
+      emitterMaterial,
+      flareGeometries: [emitterCoreGeometry, emitterRingGeometry, emitterBladeGeometry],
+    };
   }
 
   private disposeRoot(root: THREE.Object3D, materials: THREE.Material[]): void {
@@ -842,7 +1591,9 @@ export class WeaponVfxSystem {
       const mesh = object as THREE.Mesh;
       if (mesh.geometry) geometries.add(mesh.geometry);
     });
-    for (const geometry of geometries) geometry.dispose();
+    for (const geometry of geometries) {
+      if (!this.sharedGeometrySet.has(geometry)) geometry.dispose();
+    }
     for (const material of new Set(materials)) material.dispose();
   }
 

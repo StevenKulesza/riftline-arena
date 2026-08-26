@@ -20,12 +20,13 @@ npm run inspect:canvas
 
 ## Audio assets
 
-Weapon, impact, confirmation, equip, dry-fire, and ammunition-pickup cues are pre-generated assets served from `public/assets/audio`. Runtime playback uses pooled variants, separate mix groups, positional enemy/world audio, and a procedural fallback if an asset cannot be decoded.
+Weapon, impact, confirmation, equip, dry-fire, ammunition-pickup, terrain, jetpack, tracer, grunt, and layered ambience cues are pre-generated assets served from `public/assets/audio`. Runtime playback uses pooled variants, separate music/ambience groups, positional enemy/world audio, and a procedural dirt layer for extra surface grit.
 
 To regenerate them, copy `.env.example` to `.env`, add an ElevenLabs API key, then run:
 
 ```bash
 ./scripts/generate-weapon-audio.sh
+./scripts/generate-environment-audio.sh
 ./scripts/master-weapon-audio.sh
 ```
 
@@ -42,7 +43,7 @@ The `.env` file is ignored by version control. It is used only by the local gene
 - Grenade: `Q`
 - Bunny hop: hold `Space`; press `Space` against a wall to wall-jump
 - Zoom sniper/rail: `C` or `Ctrl`
-- Weapons: `1`–`7` or mouse wheel
+- Weapons: `1`–`8` or mouse wheel
 - Pause/resume: `P` or `Esc`
 - Mute: `M`
 

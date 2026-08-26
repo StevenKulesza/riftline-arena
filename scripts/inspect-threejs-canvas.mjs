@@ -178,7 +178,7 @@ function checkRenderBudget(renderer, mode) {
   };
 }
 
-async function sampleCanvas(page, mode) {
+async function sampleCanvas(page, mode, screenshotPath) {
   const rect = await page.evaluate(() => {
     const canvas = document.querySelector('canvas');
     if (!canvas) return null;
@@ -189,7 +189,7 @@ async function sampleCanvas(page, mode) {
     return { ok: false, reason: 'canvas-too-small', rect };
   }
 
-  const buffer = await page.screenshot({ clip: rect });
+  const buffer = await page.screenshot({ clip: rect, path: screenshotPath, timeout: 120_000 });
   const png = PNG.sync.read(buffer);
   let min = 255;
   let max = 0;
@@ -252,7 +252,10 @@ async function main() {
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
-  await page.goto(args.url, { waitUntil: 'networkidle' });
+  // The game streams audio/texture requests during boot, so network-idle is
+  // not a meaningful readiness signal. DOM readiness plus the explicit
+  // canvas/hooks probe below is both faster and stricter for this harness.
+  await page.goto(args.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   try {
     await page.waitForFunction(() => {
       const canvas = document.querySelector('canvas');
@@ -264,7 +267,7 @@ async function main() {
         && style.display !== 'none' && style.visibility !== 'hidden'
         && Boolean(window.__THREE_GAME_TEST_HOOKS__)
         && Boolean(window.__THREE_GAME_DIAGNOSTICS__);
-    }, null, { timeout: 20_000, polling: 100 });
+    }, null, { timeout: 45_000, polling: 100 });
   } catch (error) {
     const bodyText = await page.locator('body').innerText().catch(() => '');
     const canvasState = await page.evaluate(() => {
@@ -283,7 +286,17 @@ async function main() {
       };
     }).catch(() => null);
     console.error(JSON.stringify({ consoleErrors, pageErrors, canvasState, bodyText: bodyText.slice(0, 1_000) }, null, 2));
-    throw error;
+    const fallbackReady = canvasState !== null
+      && canvasState.bounds.width >= 32
+      && canvasState.bounds.height >= 32
+      && canvasState.buffer.width >= 32
+      && canvasState.buffer.height >= 32
+      && canvasState.display !== 'none'
+      && canvasState.visibility !== 'hidden'
+      && canvasState.hasHooks
+      && canvasState.hasDiagnostics;
+    if (!fallbackReady) throw error;
+    console.error('warning: readiness polling timed out, but the direct canvas readiness probe passed; continuing.');
   }
 
   if (args.state || args.seed !== undefined) {
@@ -305,10 +318,9 @@ async function main() {
 
   const mode = args.mobile ? 'mobile' : 'desktop';
   const baseName = args.state ? `${mode}-${args.state}` : mode;
-  const gpu = await readGpuInfo(page);
-  const result = await sampleCanvas(page, mode);
   const screenshotPath = path.join(args.out, `${baseName}.png`);
-  await page.screenshot({ path: screenshotPath, fullPage: true });
+  const gpu = await readGpuInfo(page);
+  const result = await sampleCanvas(page, mode, screenshotPath);
 
   if (gpu.softwareRendered) {
     console.error(

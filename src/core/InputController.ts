@@ -20,6 +20,8 @@ export class InputController {
   private dashQueued = false;
   private grappleQueued = false;
   private grenadeQueued = false;
+  private altFireHeld = false;
+  private altFireQueued = false;
   private requestedWeapon: number | null = null;
   private weaponWheel = 0;
   private pauseQueued = false;
@@ -29,9 +31,13 @@ export class InputController {
   private dragLookActive = false;
   private lastDragX = 0;
   private lastDragY = 0;
-  private lockAllowed = true;
+  private lockAllowed = false;
   private lockRequestPending = false;
+  private lookSensitivity = 1;
   private hoverLookEnabled = false;
+  private touchLookPointer: number | null = null;
+  private touchLookX = 0;
+  private touchLookY = 0;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -42,6 +48,9 @@ export class InputController {
     private readonly skiButton: HTMLElement,
     private readonly grappleButton: HTMLElement,
     private readonly grenadeButton: HTMLElement,
+    private readonly dashButton: HTMLElement,
+    private readonly weaponButton: HTMLElement,
+    private readonly zoomButton: HTMLElement,
   ) {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -52,6 +61,8 @@ export class InputController {
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.addEventListener('pointerlockerror', this.onPointerLockError);
     this.canvas.addEventListener('pointerdown', this.onCanvasPointerDown);
+    this.canvas.addEventListener('pointermove', this.onCanvasPointerMove);
+    this.canvas.addEventListener('pointercancel', this.onPointerUp);
     window.addEventListener('pointerup', this.onPointerUp);
     this.canvas.addEventListener('contextmenu', this.onContextMenu);
     this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
@@ -72,6 +83,11 @@ export class InputController {
     this.grappleButton.addEventListener('pointerup', this.onGrappleUp);
     this.grappleButton.addEventListener('pointercancel', this.onGrappleUp);
     this.grenadeButton.addEventListener('pointerdown', this.onGrenadeDown);
+    this.dashButton.addEventListener('pointerdown', this.onDashDown);
+    this.weaponButton.addEventListener('pointerdown', this.onWeaponDown);
+    this.zoomButton.addEventListener('pointerdown', this.onZoomDown);
+    this.zoomButton.addEventListener('pointerup', this.onZoomUp);
+    this.zoomButton.addEventListener('pointercancel', this.onZoomUp);
   }
 
   readMovement(target: THREE.Vector2): THREE.Vector2 {
@@ -86,9 +102,13 @@ export class InputController {
   }
 
   consumeLook(target: THREE.Vector2): THREE.Vector2 {
-    target.copy(this.lookDelta);
+    target.copy(this.lookDelta).multiplyScalar(this.lookSensitivity);
     this.lookDelta.set(0, 0);
     return target;
+  }
+
+  setLookSensitivity(value: number): void {
+    this.lookSensitivity = THREE.MathUtils.clamp(value, 0.5, 2);
   }
 
   consumeJump(): boolean {
@@ -115,8 +135,18 @@ export class InputController {
     return value;
   }
 
+  consumeAltFire(): boolean {
+    const value = this.altFireQueued;
+    this.altFireQueued = false;
+    return value;
+  }
+
+  isAltFireHeld(): boolean {
+    return this.altFireHeld || this.keys.has('KeyC') || this.zoomButton.dataset.held === 'true';
+  }
+
   isGrappleHeld(): boolean {
-    return this.keys.has('KeyG') || this.keys.has('KeyE') || this.grappleButton.dataset.held === 'true';
+    return this.keys.has('KeyG') || this.grappleButton.dataset.held === 'true';
   }
 
   consumeWeaponRequest(): number | null {
@@ -158,7 +188,8 @@ export class InputController {
   }
 
   isZoomHeld(): boolean {
-    return this.keys.has('KeyC') || this.keys.has('ControlLeft') || this.keys.has('ControlRight');
+    return this.keys.has('KeyC') || this.keys.has('ControlLeft') || this.keys.has('ControlRight')
+      || this.isAltFireHeld();
   }
 
   interacted(): boolean {
@@ -211,6 +242,8 @@ export class InputController {
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     document.removeEventListener('pointerlockerror', this.onPointerLockError);
     this.canvas.removeEventListener('pointerdown', this.onCanvasPointerDown);
+    this.canvas.removeEventListener('pointermove', this.onCanvasPointerMove);
+    this.canvas.removeEventListener('pointercancel', this.onPointerUp);
     window.removeEventListener('pointerup', this.onPointerUp);
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     this.canvas.removeEventListener('wheel', this.onWheel);
@@ -231,6 +264,11 @@ export class InputController {
     this.grappleButton.removeEventListener('pointerup', this.onGrappleUp);
     this.grappleButton.removeEventListener('pointercancel', this.onGrappleUp);
     this.grenadeButton.removeEventListener('pointerdown', this.onGrenadeDown);
+    this.dashButton.removeEventListener('pointerdown', this.onDashDown);
+    this.weaponButton.removeEventListener('pointerdown', this.onWeaponDown);
+    this.zoomButton.removeEventListener('pointerdown', this.onZoomDown);
+    this.zoomButton.removeEventListener('pointerup', this.onZoomUp);
+    this.zoomButton.removeEventListener('pointercancel', this.onZoomUp);
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -242,11 +280,18 @@ export class InputController {
     }
     if (!event.repeat && event.code === 'KeyE') {
       this.dashQueued = true;
-      this.grappleQueued = true;
+    }
+    if (!event.repeat && event.code === 'CapsLock') {
+      event.preventDefault();
+      this.dashQueued = true;
     }
     if (!event.repeat && event.code === 'KeyG') this.grappleQueued = true;
     if (!event.repeat && event.code === 'KeyQ') this.grenadeQueued = true;
-    if (/^Digit[1-7]$/.test(event.code)) this.requestedWeapon = Number(event.code.slice(-1)) - 1;
+    if (!event.repeat && event.code === 'KeyC') {
+      event.preventDefault();
+      this.altFireQueued = true;
+    }
+    if (/^Digit[1-8]$/.test(event.code)) this.requestedWeapon = Number(event.code.slice(-1)) - 1;
     if (!event.repeat && (event.code === 'KeyP' || event.code === 'Escape')) this.pauseQueued = true;
     if (!event.repeat && event.code === 'KeyM') this.muteQueued = true;
 
@@ -263,8 +308,10 @@ export class InputController {
       if (this.pointerLocked() || document.hasFocus()) return;
       this.keys.clear();
       this.fireHeld = false;
+      this.altFireHeld = false;
       this.mousePrimaryHeld = false;
       this.dragLookActive = false;
+      this.touchLookPointer = null;
       this.touchMovement.set(0, 0);
       this.jumpButton.dataset.held = 'false';
       this.grappleQueued = false;
@@ -299,6 +346,13 @@ export class InputController {
   };
 
   private readonly onMouseDown = (event: MouseEvent): void => {
+    if (event.button === 2) {
+      this.altFireHeld = true;
+      this.altFireQueued = true;
+      this.hasInteracted = true;
+      this.requestGameplayPointerLock();
+      return;
+    }
     if (event.button !== 0) return;
     this.mousePrimaryHeld = true;
     this.hasInteracted = true;
@@ -309,6 +363,10 @@ export class InputController {
   };
 
   private readonly onMouseUp = (event: MouseEvent): void => {
+    if (event.button === 2) {
+      this.altFireHeld = false;
+      return;
+    }
     if (event.button !== 0) return;
     this.mousePrimaryHeld = false;
     this.dragLookActive = false;
@@ -323,6 +381,7 @@ export class InputController {
     }
     if (this.lockAllowed && this.hasInteracted) this.hoverLookEnabled = true;
     this.fireHeld = false;
+    this.altFireHeld = false;
     this.mousePrimaryHeld = false;
   };
 
@@ -334,6 +393,19 @@ export class InputController {
 
   private readonly onCanvasPointerDown = (event: PointerEvent): void => {
     this.hasInteracted = true;
+    if (event.pointerType === 'touch' || event.pointerType === 'pen') {
+      if (this.touchLookPointer !== null) return;
+      event.preventDefault();
+      this.touchLookPointer = event.pointerId;
+      this.touchLookX = event.clientX;
+      this.touchLookY = event.clientY;
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // Synthetic pointer events may not be capturable.
+      }
+      return;
+    }
     if (event.button === 0) {
       this.fireHeld = true;
       this.dragLookActive = true;
@@ -341,14 +413,36 @@ export class InputController {
       this.lastDragX = event.clientX;
       this.lastDragY = event.clientY;
     }
+    if (event.button === 2) {
+      this.altFireHeld = true;
+      this.altFireQueued = true;
+    }
     if (event.pointerType === 'mouse') this.requestGameplayPointerLock();
   };
 
+  private readonly onCanvasPointerMove = (event: PointerEvent): void => {
+    if (event.pointerId !== this.touchLookPointer) return;
+    event.preventDefault();
+    // Touch needs a little more gain than relative mouse input, but clamp
+    // individual samples so a browser gesture hand-off cannot whip the view.
+    const deltaX = THREE.MathUtils.clamp(event.clientX - this.touchLookX, -48, 48);
+    const deltaY = THREE.MathUtils.clamp(event.clientY - this.touchLookY, -48, 48);
+    this.lookDelta.x += deltaX * 1.35;
+    this.lookDelta.y += deltaY * 1.35;
+    this.touchLookX = event.clientX;
+    this.touchLookY = event.clientY;
+  };
+
   private readonly onPointerUp = (event: PointerEvent): void => {
+    if (event.pointerId === this.touchLookPointer) {
+      this.touchLookPointer = null;
+      return;
+    }
     if (event.button === 0) {
       this.fireHeld = false;
       this.dragLookActive = false;
     }
+    if (event.button === 2) this.altFireHeld = false;
   };
 
   private readonly onContextMenu = (event: MouseEvent): void => event.preventDefault();
@@ -437,6 +531,29 @@ export class InputController {
     event.preventDefault();
     this.hasInteracted = true;
     this.grenadeQueued = true;
+  };
+
+  private readonly onDashDown = (event: PointerEvent): void => {
+    event.preventDefault();
+    this.hasInteracted = true;
+    this.dashQueued = true;
+  };
+
+  private readonly onWeaponDown = (event: PointerEvent): void => {
+    event.preventDefault();
+    this.hasInteracted = true;
+    this.weaponWheel += 1;
+  };
+
+  private readonly onZoomDown = (event: PointerEvent): void => {
+    event.preventDefault();
+    this.hasInteracted = true;
+    this.zoomButton.dataset.held = 'true';
+    this.altFireQueued = true;
+  };
+
+  private readonly onZoomUp = (): void => {
+    this.zoomButton.dataset.held = 'false';
   };
 
   private updateStick(clientX: number, clientY: number): void {

@@ -81,6 +81,9 @@ generate_set weapons shotgun-fire 3 1.0 0.74 \
 generate_set weapons rocket-launch 3 0.8 0.72 \
   "shoulder-fired sci-fi rocket launch, sharp igniter snap, heavy tube concussion, fast propellant whoosh leaving the muzzle, short dry arena tail, no explosion, no music, no voice"
 
+generate_set weapons disc-launch 4 0.75 0.82 \
+  "short first-person heavy mechanical saw-disc sling release for a fast sci-fi arena game, one muted low-pitched steel thunk followed by a soft broad air shove and a very brief heavy disc pass, dull dense low-mid body, restrained mechanical latch, no motor, no drill, no spinning whine, no buzz, no screech, no ringing metal, no sharp treble, no laser, no gunshot, no explosion, no music, no voice, tail ends within 0.65 seconds"
+
 generate_set weapons plasma-fire 4 0.5 0.76 \
   "single futuristic plasma-bolt discharge, hard electrical transient, dense ionized pulse body, tiny descending energy tail, aggressive and compact, no impact, no music, no voice"
 

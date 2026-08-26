@@ -1,0 +1,127 @@
+/* Gameplay-specific overrides load after the art-direction stylesheet. */
+@media (pointer: coarse), (max-width: 760px) {
+  .match-ribbon {
+    grid-template-columns: 1fr auto 1fr;
+    gap: 5px;
+    text-align: left;
+  }
+
+  .match-ident .eyebrow,
+  .score-side span,
+  .weapon-copy > span,
+  .ammo-lockup > span,
+  .vital-copy > span,
+  .touch-caption {
+    display: none;
+  }
+
+  .score-lockup {
+    justify-content: flex-end;
+  }
+
+  .objective-cluster {
+    top: max(62px, calc(env(safe-area-inset-top) + 50px));
+    width: min(340px, calc(100vw - 24px));
+  }
+
+  #kill-feed {
+    top: max(112px, calc(env(safe-area-inset-top) + 100px));
+    font-size: 0.58rem;
+  }
+
+  .mobility-cluster {
+    display: none;
+  }
+
+  .vitals-cluster,
+  .weapon-cluster {
+    bottom: max(118px, calc(env(safe-area-inset-bottom) + 108px));
+  }
+
+  .vitals-cluster {
+    width: calc(50vw - 24px);
+  }
+
+  .weapon-cluster {
+    right: max(14px, env(safe-area-inset-right));
+    left: auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px;
+    min-width: 0;
+    width: calc(50vw - 24px);
+  }
+
+  .weapon-index,
+  #weapon-secondary {
+    display: none;
+  }
+
+  .ammo-lockup strong {
+    font-size: 1rem;
+  }
+
+  #touch-controls {
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(9px, env(safe-area-inset-bottom));
+    left: max(10px, env(safe-area-inset-left));
+    gap: 12px;
+  }
+
+  #touch-stick {
+    width: clamp(82px, 23vw, 104px);
+  }
+
+  .touch-actions {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(42px, 48px));
+    gap: 6px;
+  }
+
+  .touch-button {
+    width: 48px;
+    color: #e9fbff;
+    background: rgba(4, 20, 30, 0.86);
+    font-size: 0.52rem;
+  }
+
+  .touch-button--fire {
+    background: rgba(212, 35, 103, 0.92);
+  }
+
+  .touch-button--jump,
+  .touch-button--grenade {
+    color: #12170d;
+    background: rgba(244, 178, 55, 0.94);
+  }
+
+  .touch-button--ski {
+    color: #07170c;
+    background: rgba(101, 205, 91, 0.94);
+  }
+
+  .touch-button--grapple {
+    color: #07171c;
+    background: rgba(75, 216, 239, 0.94);
+  }
+
+  #start-overlay[data-mode="complete"] .deploy-meta,
+  #start-overlay[data-mode="complete"] .briefing-grid,
+  #start-overlay[data-mode="complete"] .loadout-strip {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) and (orientation: landscape), (max-height: 520px) and (max-width: 900px) {
+  .touch-actions {
+    grid-template-columns: repeat(4, 44px);
+  }
+
+  .touch-button {
+    width: 44px;
+  }
+
+  .vitals-cluster,
+  .weapon-cluster {
+    bottom: max(100px, calc(env(safe-area-inset-bottom) + 90px));
+  }
+}

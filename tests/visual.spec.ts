@@ -39,13 +39,20 @@ async function enterDeterministicActivePlay(page: Page): Promise<void> {
 }
 
 async function sampleCanvas(page: Page): Promise<CanvasSample> {
-  const canvas = page.locator('#game-canvas');
-  const box = await canvas.boundingBox();
+  const box = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas');
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  });
   if (!box || box.width < 32 || box.height < 32) {
     return { ok: false, reason: 'canvas-too-small' };
   }
 
-  const buffer = await canvas.screenshot();
+  // Locator screenshots wait for layout stability, which a continuously
+  // rendering WebGL canvas never reaches under SwiftShader. A clipped page
+  // capture samples the same pixels without that animation-stability gate.
+  const buffer = await page.screenshot({ clip: box, animations: 'disabled' });
   const png = PNG.sync.read(buffer);
   let min = 255;
   let max = 0;
@@ -122,7 +129,7 @@ async function dragTouchStick(page: Page): Promise<void> {
 test('renders a nonblank, responsive Riftline active-play canvas', async ({ page }, testInfo) => {
   // Screenshot readback is intentionally exercised here and can be slow under
   // Playwright's software WebGL fallback on CI hosts without a GPU.
-  test.setTimeout(75_000);
+  test.setTimeout(120_000);
   const errors = collectRuntimeErrors(page);
   await enterDeterministicActivePlay(page);
 
@@ -134,7 +141,7 @@ test('renders a nonblank, responsive Riftline active-play canvas', async ({ page
     targetScore: 20,
     weapon: 'machine',
     physics: {
-      engine: 'fixed-step-capsule-bsp-brush-patch-bvh',
+      engine: 'fixed-step-capsule-heightfield-bvh',
       timestep: 1 / 120,
     },
   });
@@ -144,8 +151,14 @@ test('renders a nonblank, responsive Riftline active-play canvas', async ({ page
   expect(diagnostics?.renderer.triangles).toBeGreaterThan(1_000);
   expect(diagnostics?.canvas.clientWidth).toBeGreaterThanOrEqual(320);
   expect(diagnostics?.canvas.clientHeight).toBeGreaterThanOrEqual(568);
-  expect(diagnostics?.canvas.width).toBeGreaterThanOrEqual(diagnostics?.canvas.clientWidth ?? Number.MAX_SAFE_INTEGER);
-  expect(diagnostics?.canvas.height).toBeGreaterThanOrEqual(diagnostics?.canvas.clientHeight ?? Number.MAX_SAFE_INTEGER);
+  const renderDpr = diagnostics?.canvas.dpr ?? 0;
+  expect(renderDpr).toBeGreaterThanOrEqual(0.24);
+  expect(diagnostics?.canvas.width).toBeGreaterThanOrEqual(
+    Math.floor((diagnostics?.canvas.clientWidth ?? Number.MAX_SAFE_INTEGER) * renderDpr) - 1,
+  );
+  expect(diagnostics?.canvas.height).toBeGreaterThanOrEqual(
+    Math.floor((diagnostics?.canvas.clientHeight ?? Number.MAX_SAFE_INTEGER) * renderDpr) - 1,
+  );
   expect(diagnostics?.canvas.dpr).toBeLessThanOrEqual(1.75);
 
   const sample = await sampleCanvas(page);

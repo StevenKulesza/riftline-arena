@@ -7,21 +7,35 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createWeaponViewModel, updateWeaponViewModel, type WeaponViewModel } from '../assets/WeaponViewModel';
+import { JetpackRig } from '../assets/JetpackRig';
 import { InputController } from '../core/InputController';
 import { Loop } from '../core/Loop';
 import { createRenderer, getRenderDpr, resizeRenderer } from '../core/Renderer';
 import { Bot } from '../entities/Bot';
 import { AudioSystem } from '../systems/AudioSystem';
+import { AdaptiveQualitySystem } from '../systems/AdaptiveQualitySystem';
+import { FluxCoreDirector, type FluxCoreAnchor } from '../systems/FluxCoreDirector';
 import { Hud } from '../systems/Hud';
+import { StyleSystem, type StyleEvent } from '../systems/StyleSystem';
+import {
+  SPEED_EFFECT_FULL_KMH,
+  SPEED_EFFECT_START_KMH,
+  SpeedTrailSystem,
+  speedEffectIntensity,
+  type SpeedTrailSource,
+} from '../systems/SpeedTrailSystem';
+import { WeatherGameplaySystem, type WeatherGameplaySnapshot } from '../systems/WeatherGameplaySystem';
 import { WeaponVfxSystem } from '../systems/WeaponVfxSystem';
 import { createSeededRandom } from '../utils/random';
-import { Arena, JUMP_PADS, type CapsuleContact } from './Arena';
+import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact } from './Arena';
 import { GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
+import { skiMomentumCurve, type SkiMomentumCurve } from './SkiMomentum';
 
 type GameMode = 'ready' | 'countdown' | 'running' | 'respawning' | 'paused' | 'complete';
 type Owner = 'player' | number;
-type PickupKind = 'health' | 'armor' | 'damage' | 'speed' | 'rail' | 'rocket' | 'plasma' | 'shotgun' | 'sniper' | 'laser';
+type PickupKind = 'health' | 'armor' | 'damage' | 'speed' | WeaponId;
 type CountdownCue = 'READY' | '3' | '2' | '1';
+type CoreAnchor = FluxCoreAnchor & { readonly position: THREE.Vector3 };
 
 type Projectile = {
   root: THREE.Group;
@@ -32,6 +46,19 @@ type Projectile = {
   splash: number;
   life: number;
   trailDistance: number;
+  bounces: number;
+  maxBounces: number;
+  restitution: number;
+  ownerSafeTime: number;
+  angularVelocity: number;
+};
+
+type ProjectileOptions = {
+  maxBounces?: number;
+  restitution?: number;
+  ownerSafeTime?: number;
+  angularVelocity?: number;
+  life?: number;
 };
 
 type GrenadeEntity = {
@@ -56,30 +83,57 @@ const MATCH_COUNTDOWN_DURATION = 4;
 const MATCH_COUNTDOWN_CUES: readonly CountdownCue[] = ['READY', '3', '2', '1'];
 // qfusion's standing view is origin + 30; origin sits 24 units above ground.
 const PLAYER_EYE = 54 / 56;
+const MAX_FIXED_STEPS_PER_FRAME = 4;
+const HUD_UPDATE_INTERVAL = 1 / 15;
+const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
+const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
+const WEAPON_VIEW_CLEARANCE = 0.1;
+const WEAPON_OBSTRUCTION_PROBE_LENGTH = 3.35;
+// Camera-to-muzzle reach includes each weapon's authored presentation scale,
+// side angle, and a small allowance for its visible muzzle cage. Keeping this
+// per weapon prevents the Longshot from forcing compact guns to tuck early.
+const WEAPON_VIEW_SAFE_REACH: Record<WeaponId, number> = {
+  disc: 1.68,
+  machine: 1.92,
+  shotgun: 2.08,
+  rocket: 2.38,
+  plasma: 2.02,
+  laser: 2.08,
+  sniper: 3.18,
+  rail: 2.28,
+};
 
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer;
   private inkPass!: ShaderPass;
-  private readonly shadowRefreshInterval = 30;
+  private readonly shadowRefreshInterval = 240;
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(84, 1, 0.08, 220);
+  private readonly speedTrails = new SpeedTrailSystem(this.scene, 4);
+  private readonly camera = new THREE.PerspectiveCamera(84, 1, 0.08, 1800);
   private readonly input: InputController;
-  private readonly arena: Arena;
+  private readonly arena: ArenaRuntime;
   private readonly audio = new AudioSystem();
   private readonly hud = new Hud();
   private readonly weaponVfx: WeaponVfxSystem;
+  private readonly playerJetpack = new JetpackRig({ firstPerson: true });
   private readonly mobileQuality = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 600;
   // The arena uses several full-screen post passes. Letting a high-DPI display
   // render them at 1.75x multiplies fragment work by more than 3x, which is
   // the dominant cause of the low-FPS reports on otherwise capable GPUs.
-  private readonly maxRenderDpr = this.mobileQuality ? 1 : 1.25;
+  private readonly maxRenderDpr: number;
+  private readonly adaptiveQuality: AdaptiveQualitySystem;
+  private renderDprCap: number;
+  private readonly softwareRenderer: boolean;
   private readonly bots: Bot[] = [];
   private readonly projectiles: Projectile[] = [];
   private readonly grenades: GrenadeEntity[] = [];
   private readonly pickups: PickupState[] = [];
+  private readonly botTargets = new Map<number, Owner>();
+  private readonly recentSpawnIndices: number[] = [];
   private readonly playerPosition = new THREE.Vector3();
   private readonly playerVelocity = new THREE.Vector3();
+  private readonly speedTrailSources: SpeedTrailSource[] = [];
   private readonly moveInput = new THREE.Vector2();
   private readonly lookInput = new THREE.Vector2();
   private readonly wishDirection = new THREE.Vector3();
@@ -92,9 +146,24 @@ export class Game {
   private weaponVisual?: WeaponViewModel;
   private muzzleSocket = new THREE.Object3D();
   private readonly coreGroup = new THREE.Group();
+  private readonly coreLight = new THREE.PointLight(0x3ee8ff, 6, 26, 2);
+  private readonly coreAnchors: readonly CoreAnchor[];
+  private readonly coreDirector: FluxCoreDirector<CoreAnchor>;
+  private readonly styleSystem = new StyleSystem();
+  private readonly weatherSystem: WeatherGameplaySystem;
   private readonly loop = new Loop((delta, elapsed) => this.update(delta, elapsed), () => this.render());
   private readonly ammo = new Map<WeaponId, number>();
   private readonly startButton: HTMLButtonElement;
+  private readonly playTab: HTMLButtonElement;
+  private readonly optionsTab: HTMLButtonElement;
+  private readonly playMenu: HTMLElement;
+  private readonly optionsMenu: HTMLElement;
+  private readonly sensitivityOption: HTMLInputElement;
+  private readonly sensitivityValue: HTMLOutputElement;
+  private readonly audioOption: HTMLButtonElement;
+  private readonly motionOption: HTMLButtonElement;
+  private readonly fullscreenOption: HTMLButtonElement;
+  private readonly optionsBack: HTMLButtonElement;
   private readonly physicsQaMode = new URLSearchParams(window.location.search).get('qa') === 'physics';
   private environmentTexture?: THREE.Texture;
 
@@ -116,7 +185,7 @@ export class Game {
   private selectedWeapon = 0;
   private weaponCooldown = 0;
   private grenadeCooldown = 0;
-  private grenadeAmmo = GRENADE.maxAmmo;
+  private grenadeAmmo: number = GRENADE.maxAmmo;
   private grappleActive = false;
   private grappleLength = 0;
   private laserHeat = 0;
@@ -124,28 +193,38 @@ export class Game {
   private coyote = 0;
   private grounded = false;
   private skiHeld = false;
+  private jetpackActive = false;
   private jumpPadCooldown = 0;
   private dashBuffer = 0;
   private dashCooldown = 0;
   private dashMomentumTimer = 0;
   private wallContactTimer = 0;
+  private ceilingContactTimer = 0;
   private yaw = 0;
   private pitch = -0.08;
   private trauma = 0;
   private fovPunch = 0;
   private recoil = 0;
+  private speedBlurIntensity = 0;
   private fps = 60;
   private damageBoost = 0;
   private speedBoost = 0;
   private respawnTimer = 0;
   private respawnCause = '';
   private spawnIndex = 0;
-  private coreCooldown: number = POWERUP.coreActivation;
+  private coreCooldown = 6;
   private coreProgress = 0;
   private coreOwner: Owner | null = null;
   private coreActive = false;
+  private coreContested = false;
+  private currentCoreAnchorName = 'RIFT NEXUS';
+  private weatherSnapshot: WeatherGameplaySnapshot;
+  private readonly recentPlayerKills: number[] = [];
   private reducedMotion = false;
   private pausedForScreenshot = false;
+  private screenshotArenaTime = 0;
+  private screenshotCameraFov = 84;
+  private weaponInspectionMode = false;
   private lastGroundImpact = 0;
   private lastDamageDirection = '';
   private muted = false;
@@ -158,10 +237,42 @@ export class Game {
   private readonly lastProjectileOrigin = new THREE.Vector3();
   private lastPelletCount = 0;
   private lastPelletSpread = 0;
+  private discBounceCount = 0;
+  private readonly lastDiscBouncePosition = new THREE.Vector3();
   private footstepDistance = 0;
   private weaponTuck = 0;
+  private weaponObstructionDistance = WEAPON_OBSTRUCTION_PROBE_LENGTH;
+  private weaponMuzzleDistance = 0;
+  private weaponMuzzleForwardDistance = 0;
+  private weaponMuzzleOccluded = false;
+  private scopeBlend = 0;
+  private scopeRange = 190;
+  private skiMomentumResistance = 0;
+  private skiGravityDriveScale = 1;
+  private skiDragAcceleration = 0;
+  private readonly skiMomentumScratch: SkiMomentumCurve = {
+    resistance: 0,
+    gravityDriveScale: 1,
+    dragAcceleration: 0,
+  };
   private weaponBobPhase = 0;
   private readonly weaponTurnSway = new THREE.Vector2();
+  private readonly cameraDirectionScratch = new THREE.Vector3();
+  private readonly audioDirectionScratch = new THREE.Vector3();
+  private readonly cameraEyeScratch = new THREE.Vector3();
+  private readonly cameraProbeScratch = new THREE.Vector3();
+  private readonly weaponProbeScratch = new THREE.Vector3();
+  private readonly cameraRightScratch = new THREE.Vector3();
+  private readonly cameraDownScratch = new THREE.Vector3();
+  private readonly cameraAimScratch = new THREE.Vector3();
+  private readonly cameraLocalAimScratch = new THREE.Vector3();
+  private readonly weaponBoreScratch = new THREE.Vector3();
+  private readonly weaponMuzzleScratch = new THREE.Vector3();
+  private readonly grappleOriginScratch = new THREE.Vector3();
+  private readonly movementStartScratch = new THREE.Vector3();
+  private readonly tangentGravityScratch = new THREE.Vector3();
+  private nextHudUpdateAt = 0;
+  private nextDiagnosticsUpdateAt = 0;
   private stepAttempts = 0;
   private stepSuccesses = 0;
   private lastStepReason = 'none';
@@ -172,19 +283,75 @@ export class Game {
   private lastStepRaisedSpeed = 0;
   private lastStepStartSpeed = 0;
   private lastStepFinalSpeed = 0;
+  private ccdSweeps = 0;
+  private ccdWallHits = 0;
+  private ccdCeilingHits = 0;
+  private ccdBoundaryHits = 0;
+  private overtime = false;
+  private overtimeBaselineScores: number[] = [];
+  private playerShots = 0;
+  private playerHits = 0;
+  private coreCaptures = 0;
+  private maxPlayerSpeed = 0;
 
   static async create(canvas: HTMLCanvasElement): Promise<Game> {
-    const arena = await Arena.load();
-    return new Game(canvas, arena);
+    return new Game(canvas, await Arena.load());
   }
 
-  private constructor(private readonly canvas: HTMLCanvasElement, arena: Arena) {
+  private constructor(
+    private readonly canvas: HTMLCanvasElement,
+    arena: ArenaRuntime,
+  ) {
     this.arena = arena;
+    const nexusName = arena.mapInfo.name === 'QuickSense' ? 'QUICKSENSE // RIFT NEXUS' : 'RIFT NEXUS';
+    this.coreAnchors = Object.freeze([
+      { name: nexusName, position: arena.corePosition.clone() },
+      { name: 'WEST ARMOR RELAY', position: arena.itemPoints.armor.clone() },
+      { name: 'SOUTH SPEED RING', position: arena.itemPoints.speed.clone() },
+      { name: 'EAST PLASMA RIDGE', position: arena.itemPoints.plasma.clone() },
+    ]);
+    this.coreDirector = new FluxCoreDirector(this.coreAnchors, { cooldownSeconds: POWERUP.coreRespawn });
+    this.coreCooldown = this.coreDirector.snapshot().secondsRemaining;
+    this.weatherSystem = new WeatherGameplaySystem({ seed: arena.mapInfo.seed });
+    this.weatherSnapshot = this.weatherSystem.snapshot();
+    this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
     this.renderer = createRenderer(canvas);
+    const gl = this.renderer.getContext();
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info') as { UNMASKED_RENDERER_WEBGL: number } | null;
+    const rendererName = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : '';
+    this.softwareRenderer = navigator.webdriver || /swiftshader|llvmpipe|software/i.test(rendererName);
+    const qaMode = new URLSearchParams(window.location.search).get('qa');
+    const diagnosticCapture = qaMode !== null;
+    const visualCapture = qaMode === 'visual' || qaMode === 'capture';
+    this.maxRenderDpr = this.softwareRenderer ? diagnosticCapture ? 0.75 : 0.25 : this.mobileQuality ? 1 : 1.25;
+    this.renderDprCap = this.maxRenderDpr;
+    this.adaptiveQuality = new AdaptiveQualitySystem({
+      minDpr: this.softwareRenderer ? this.maxRenderDpr : this.mobileQuality ? 0.7 : 0.75,
+      maxDpr: this.maxRenderDpr,
+      sampleWindowMs: 750,
+      dprStep: 0.25,
+      degradeCooldownMs: 750,
+    });
+    // Ordinary software-rendered play stays cheap, but explicit QA captures
+    // must retain the grounding/contact shadows being judged. Otherwise the
+    // screenshot path materially understates the real GPU presentation.
+    if (this.softwareRenderer && !visualCapture) this.renderer.shadowMap.enabled = false;
     this.renderer.info.autoReset = false;
-    this.renderer.toneMappingExposure = 0.72;
+    this.renderer.toneMappingExposure = new URLSearchParams(window.location.search).get('map') === 'quicksense'
+      ? 1.08
+      : 0.86;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.startButton = this.element<HTMLButtonElement>('#start-button');
+    this.playTab = this.element<HTMLButtonElement>('#play-tab');
+    this.optionsTab = this.element<HTMLButtonElement>('#options-tab');
+    this.playMenu = this.element('#play-menu');
+    this.optionsMenu = this.element('#options-menu');
+    this.sensitivityOption = this.element<HTMLInputElement>('#sensitivity-option');
+    this.sensitivityValue = this.element<HTMLOutputElement>('#sensitivity-value');
+    this.audioOption = this.element<HTMLButtonElement>('#audio-option');
+    this.motionOption = this.element<HTMLButtonElement>('#motion-option');
+    this.fullscreenOption = this.element<HTMLButtonElement>('#fullscreen-option');
+    this.optionsBack = this.element<HTMLButtonElement>('#options-back');
     this.input = new InputController(
       canvas,
       this.element('#touch-stick'),
@@ -194,22 +361,37 @@ export class Game {
       this.element('#ski-button'),
       this.element('#grapple-button'),
       this.element('#grenade-button'),
+      this.element('#dash-button'),
+      this.element('#weapon-button'),
+      this.element('#zoom-button'),
     );
     this.weaponVfx = new WeaponVfxSystem(this.scene, this.camera, () => this.rng());
     this.createScene();
     this.composer = this.createPostProcessing();
     this.createBots();
+    this.speedTrailSources.push({ position: this.playerPosition, velocity: this.playerVelocity, active: false });
+    for (const bot of this.bots) {
+      this.speedTrailSources.push({ position: bot.group.position, velocity: bot.velocity, active: bot.alive });
+    }
     this.createPickups();
     this.createCore();
     this.camera.add(this.weaponModel);
     this.grappleSocket.name = 'grapple-lower-left-socket';
     this.grappleSocket.position.set(-0.44, -0.34, -0.58);
     this.camera.add(this.grappleSocket);
+    this.camera.add(this.playerJetpack.root);
     this.scene.add(this.camera);
-    WEAPONS.forEach((weapon) => this.ammo.set(weapon.id, weapon.ammo));
+    this.resetPlayerLoadout();
     this.buildWeaponModel();
+    this.weaponVfx.prewarm(this.renderer);
     this.respawnPlayer(false);
     this.startButton.addEventListener('click', this.onStartClick);
+    this.applyMenuSettings();
+    document.addEventListener('rift:settings', this.onMenuSettings);
+    // Keep the legacy in-canvas menu adapters addressable while the shared
+    // settings event owns the active listener lifecycle.
+    void this.installMenuControls;
+    void this.removeMenuControls;
     resizeRenderer(this.renderer, this.camera, this.maxRenderDpr);
     this.resizePostProcessing();
     this.installTestHooks();
@@ -224,9 +406,12 @@ export class Game {
   dispose(): void {
     this.loop.stop();
     this.startButton.removeEventListener('click', this.onStartClick);
+    document.removeEventListener('rift:settings', this.onMenuSettings);
     this.input.dispose();
     this.audio.dispose();
     this.weaponVfx.dispose();
+    this.speedTrails.dispose();
+    this.playerJetpack.dispose();
     this.arena.dispose();
     for (const bot of this.bots) bot.dispose();
     for (const projectile of this.projectiles) this.disposeObject(projectile.root);
@@ -245,13 +430,115 @@ export class Game {
     this.beginMatch();
   };
 
+  private readonly onMenuSettings = (event: Event): void => {
+    const settings = (event as CustomEvent<{
+      sensitivity: number;
+      muted: boolean;
+      reducedMotion: boolean;
+    }>).detail;
+    if (!settings) return;
+    this.input.setLookSensitivity(settings.sensitivity);
+    this.muted = settings.muted;
+    this.audio.setMuted(this.muted);
+    this.reducedMotion = settings.reducedMotion;
+  };
+
+  private applyMenuSettings(): void {
+    const sensitivity = Number(localStorage.getItem('rift:sensitivity') ?? '1');
+    this.input.setLookSensitivity(Number.isFinite(sensitivity) ? sensitivity : 1);
+    this.muted = localStorage.getItem('rift:muted') === 'true';
+    this.reducedMotion = localStorage.getItem('rift:reduced-motion') === 'true'
+      || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.audio.setMuted(this.muted);
+  }
+
+  private readonly showPlayMenu = (): void => this.setMenuView('play');
+  private readonly showOptionsMenu = (): void => this.setMenuView('options');
+  private readonly onSensitivityChange = (): void => {
+    const sensitivity = Number(this.sensitivityOption.value);
+    this.input.setLookSensitivity(sensitivity);
+    this.sensitivityValue.value = `${sensitivity.toFixed(1)}×`;
+    localStorage.setItem('rift:sensitivity', String(sensitivity));
+  };
+  private readonly onAudioOption = (): void => {
+    this.muted = !this.muted;
+    this.audio.setMuted(this.muted);
+    this.updateMenuToggles();
+    localStorage.setItem('rift:muted', String(this.muted));
+  };
+  private readonly onMotionOption = (): void => {
+    this.reducedMotion = !this.reducedMotion;
+    this.updateMenuToggles();
+    localStorage.setItem('rift:reduced-motion', String(this.reducedMotion));
+  };
+  private readonly onFullscreenOption = (): void => {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void document.documentElement.requestFullscreen();
+  };
+  private readonly onFullscreenChange = (): void => this.updateMenuToggles();
+
+  private installMenuControls(): void {
+    const sensitivity = Number(localStorage.getItem('rift:sensitivity') ?? '1');
+    this.sensitivityOption.value = String(Number.isFinite(sensitivity) ? sensitivity : 1);
+    this.muted = localStorage.getItem('rift:muted') === 'true';
+    this.reducedMotion = localStorage.getItem('rift:reduced-motion') === 'true'
+      || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.audio.setMuted(this.muted);
+    this.onSensitivityChange();
+    this.updateMenuToggles();
+    this.playTab.addEventListener('click', this.showPlayMenu);
+    this.optionsTab.addEventListener('click', this.showOptionsMenu);
+    this.optionsBack.addEventListener('click', this.showPlayMenu);
+    this.sensitivityOption.addEventListener('input', this.onSensitivityChange);
+    this.audioOption.addEventListener('click', this.onAudioOption);
+    this.motionOption.addEventListener('click', this.onMotionOption);
+    this.fullscreenOption.addEventListener('click', this.onFullscreenOption);
+    document.addEventListener('fullscreenchange', this.onFullscreenChange);
+  }
+
+  private removeMenuControls(): void {
+    this.playTab.removeEventListener('click', this.showPlayMenu);
+    this.optionsTab.removeEventListener('click', this.showOptionsMenu);
+    this.optionsBack.removeEventListener('click', this.showPlayMenu);
+    this.sensitivityOption.removeEventListener('input', this.onSensitivityChange);
+    this.audioOption.removeEventListener('click', this.onAudioOption);
+    this.motionOption.removeEventListener('click', this.onMotionOption);
+    this.fullscreenOption.removeEventListener('click', this.onFullscreenOption);
+    document.removeEventListener('fullscreenchange', this.onFullscreenChange);
+  }
+
+  private setMenuView(view: 'play' | 'options'): void {
+    const options = view === 'options';
+    this.playMenu.classList.toggle('active', !options);
+    this.optionsMenu.classList.toggle('active', options);
+    this.optionsMenu.setAttribute('aria-hidden', String(!options));
+    this.playTab.classList.toggle('active', !options);
+    this.optionsTab.classList.toggle('active', options);
+    this.playTab.setAttribute('aria-selected', String(!options));
+    this.optionsTab.setAttribute('aria-selected', String(options));
+    (options ? this.sensitivityOption : this.startButton).focus({ preventScroll: true });
+  }
+
+  private updateMenuToggles(): void {
+    this.audioOption.textContent = this.muted ? 'Off' : 'On';
+    this.audioOption.setAttribute('aria-pressed', String(!this.muted));
+    this.motionOption.textContent = this.reducedMotion ? 'On' : 'Off';
+    this.motionOption.setAttribute('aria-pressed', String(this.reducedMotion));
+    const fullscreen = Boolean(document.fullscreenElement);
+    this.fullscreenOption.textContent = fullscreen ? 'Exit' : 'Enter';
+    this.fullscreenOption.setAttribute('aria-pressed', String(fullscreen));
+  }
+
   private update(delta: number, elapsed: number): void {
     this.frame += 1;
     this.elapsed = elapsed;
     this.fps += ((1 / Math.max(delta, 0.001)) - this.fps) * Math.min(1, delta * 3);
-    if (resizeRenderer(this.renderer, this.camera, this.maxRenderDpr)) this.resizePostProcessing();
+    const qualityChange = this.softwareRenderer ? null : this.adaptiveQuality.sampleFrame(delta * 1_000);
+    if (qualityChange) this.renderDprCap = qualityChange.dprCap;
+    if (resizeRenderer(this.renderer, this.camera, this.renderDprCap)) this.resizePostProcessing();
 
     this.input.consumeLook(this.lookInput);
+    if (this.sniperScopeRequested()) this.lookInput.multiplyScalar(0.28);
     this.yaw -= this.lookInput.x * 0.0018;
     this.pitch = THREE.MathUtils.clamp(this.pitch - this.lookInput.y * 0.0016, -1.28, 1.22);
     if (this.input.consumeJump()) this.jumpBuffer = MOVEMENT.jumpBuffer;
@@ -260,6 +547,7 @@ export class Game {
     if (this.input.consumeGrenade()) this.tryThrowGrenade();
     if (this.grappleActive && !this.input.isGrappleHeld()) this.detachGrapple();
     this.handleWeaponRequest();
+    if (this.input.consumeAltFire()) this.trySecondaryFire();
     if (this.input.consumeMute()) {
       this.muted = !this.muted;
       this.audio.setMuted(this.muted);
@@ -267,22 +555,62 @@ export class Game {
     }
     if (this.input.consumePause()) this.togglePause();
 
-    if (this.mode === 'ready' && this.input.interacted()) this.beginMatch();
     if (!this.pausedForScreenshot) {
-      this.accumulator += Math.min(delta, 0.05);
-      while (this.accumulator >= MOVEMENT.fixedStep) {
+      // Bound catch-up work so one slow render cannot trigger a spiral of
+      // increasingly expensive simulation frames. At 60 FPS this still runs
+      // the authored 120 Hz simulation twice per render; only overload debt is
+      // discarded.
+      this.accumulator = Math.min(
+        this.accumulator + Math.min(delta, 0.05),
+        MOVEMENT.fixedStep * MAX_FIXED_STEPS_PER_FRAME,
+      );
+      let fixedSteps = 0;
+      while (this.accumulator >= MOVEMENT.fixedStep && fixedSteps < MAX_FIXED_STEPS_PER_FRAME) {
         this.fixedUpdate(MOVEMENT.fixedStep);
         this.accumulator -= MOVEMENT.fixedStep;
+        fixedSteps += 1;
       }
     }
 
-    this.arena.update(elapsed, this.reducedMotion);
+    this.arena.setPlayerInfluence(this.playerPosition);
+    this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
+    this.arena.update(this.pausedForScreenshot ? this.screenshotArenaTime : elapsed, this.reducedMotion);
     this.updatePickupVisuals(delta, elapsed);
     this.updateEffects(this.pausedForScreenshot ? 0 : delta);
+    this.playerJetpack.update(this.jetpackActive, this.pausedForScreenshot ? 0 : delta, elapsed, this.reducedMotion);
+    this.audio.setJetpackActive(this.jetpackActive);
     this.updateCamera(delta);
-    this.audio.updateListener(this.camera.position, this.viewDirection());
-    this.updateHud();
-    this.publishDiagnostics();
+    this.updateSpeedEffects(this.pausedForScreenshot ? 0 : delta, elapsed);
+    this.audio.updateListener(this.camera.position, this.viewDirection(this.audioDirectionScratch));
+    if (elapsed >= this.nextHudUpdateAt) {
+      this.updateHud();
+      this.nextHudUpdateAt = elapsed + HUD_UPDATE_INTERVAL;
+    }
+    if (elapsed >= this.nextDiagnosticsUpdateAt) {
+      this.publishDiagnostics();
+      this.nextDiagnosticsUpdateAt = elapsed + DIAGNOSTICS_UPDATE_INTERVAL;
+    }
+  }
+
+  private updateSpeedEffects(delta: number, elapsed: number, snap = false): void {
+    const reducedMotionScale = this.reducedMotion ? 0.25 : 1;
+    const target = speedEffectIntensity(this.playerVelocity) * reducedMotionScale;
+    if (snap) {
+      this.speedBlurIntensity = target;
+    } else if (delta > 0) {
+      const response = target > this.speedBlurIntensity ? 7.5 : 3.25;
+      const blend = 1 - Math.exp(-delta * response);
+      this.speedBlurIntensity = THREE.MathUtils.lerp(this.speedBlurIntensity, target, blend);
+    }
+    this.inkPass.uniforms.speedBlur.value = this.speedBlurIntensity;
+
+    if (this.speedTrailSources.length > 0) {
+      this.speedTrailSources[0].active = this.mode === 'running' || this.mode === 'respawning';
+      for (let index = 0; index < this.bots.length; index += 1) {
+        this.speedTrailSources[index + 1].active = this.bots[index].alive;
+      }
+    }
+    this.speedTrails.update(this.speedTrailSources, elapsed, this.reducedMotion);
   }
 
   private fixedUpdate(delta: number): void {
@@ -292,6 +620,7 @@ export class Game {
     this.dashCooldown = Math.max(0, this.dashCooldown - delta);
     this.dashMomentumTimer = Math.max(0, this.dashMomentumTimer - delta);
     this.wallContactTimer = Math.max(0, this.wallContactTimer - delta);
+    this.ceilingContactTimer = Math.max(0, this.ceilingContactTimer - delta);
     this.weaponCooldown = Math.max(0, this.weaponCooldown - delta);
     this.grenadeCooldown = Math.max(0, this.grenadeCooldown - delta);
     this.jumpPadCooldown = Math.max(0, this.jumpPadCooldown - delta);
@@ -311,24 +640,73 @@ export class Game {
       const countdownComplete = this.updateMatchCountdown(delta);
       if (!countdownComplete) {
         this.weaponVfx.stopContinuousLaser();
+        this.audio.setLaserBeamActive(false);
         return;
       }
     }
 
     if (this.mode !== 'running') {
+      this.jetpackActive = false;
       this.weaponVfx.stopContinuousLaser();
+      this.audio.setLaserBeamActive(false);
       this.updateProjectiles(delta);
       this.updateGrenades(delta);
       return;
     }
 
     this.matchTime -= delta;
-    if (this.matchTime <= 0 || this.score >= SCORE_LIMIT || this.bots.some((bot) => bot.score >= SCORE_LIMIT)) {
+    let bestScore = this.score;
+    let leadersAtBestScore = 1;
+    let reachedScoreLimit = this.score >= SCORE_LIMIT;
+    let overtimeScoreChanged = this.overtime && this.overtimeBaselineScores[0] !== this.score;
+    for (let index = 0; index < this.bots.length; index += 1) {
+      const botScore = this.bots[index].score;
+      reachedScoreLimit ||= botScore >= SCORE_LIMIT;
+      overtimeScoreChanged ||= this.overtime && this.overtimeBaselineScores[index + 1] !== botScore;
+      if (botScore > bestScore) {
+        bestScore = botScore;
+        leadersAtBestScore = 1;
+      } else if (botScore === bestScore) {
+        leadersAtBestScore += 1;
+      }
+    }
+    if (overtimeScoreChanged) {
       this.completeMatch();
       return;
     }
+    if (reachedScoreLimit) {
+      this.completeMatch();
+      return;
+    }
+    if (this.matchTime <= 0) {
+      if (!this.overtime && leadersAtBestScore > 1) {
+        this.overtime = true;
+        this.overtimeBaselineScores = [this.score, ...this.bots.map((bot) => bot.score)];
+        this.matchTime = 60;
+        this.hud.message('OVERTIME · NEXT SCORE WINS');
+      } else if (this.overtime) {
+        this.matchTime = 60;
+        this.hud.message('OVERTIME EXTENDED · NEXT SCORE WINS');
+      } else {
+        this.completeMatch();
+        return;
+      }
+    }
+
+    this.styleSystem.update(delta);
+    const previousWeatherPhase = this.weatherSnapshot.phase;
+    this.weatherSnapshot = this.weatherSystem.update(delta);
+    if (this.weatherSnapshot.phase !== previousWeatherPhase) {
+      if (this.weatherSnapshot.phase === 'warning') this.hud.message(this.weatherSnapshot.label);
+      else if (this.weatherSnapshot.phase === 'monsoon') this.hud.message('MONSOON ACTIVE · TRACTION SHIFT');
+      else if (this.weatherSnapshot.phase === 'recovery') this.hud.message('WEATHER CLEARING');
+    }
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.density = 0.00146 / Math.max(0.82, this.weatherSnapshot.multipliers.visibilityMultiplier);
+    }
 
     this.updatePlayerMovement(delta);
+    this.maxPlayerSpeed = Math.max(this.maxPlayerSpeed, Math.hypot(this.playerVelocity.x, this.playerVelocity.z));
     this.updateGrapple(delta);
     if (!this.physicsQaMode) this.updateBots(delta);
     this.updateProjectiles(delta);
@@ -339,15 +717,17 @@ export class Game {
       if (WEAPONS[this.selectedWeapon].id === 'laser') this.fireContinuousLaserTick(delta);
       else {
         this.weaponVfx.stopContinuousLaser();
+        this.audio.setLaserBeamActive(false);
         this.tryFirePlayerWeapon();
       }
     } else {
       this.weaponVfx.stopContinuousLaser();
+      this.audio.setLaserBeamActive(false);
     }
   }
 
   private updatePlayerMovement(delta: number): void {
-    const movementStart = this.playerPosition.clone();
+    const movementStart = this.movementStartScratch.copy(this.playerPosition);
     this.input.readMovement(this.moveInput);
     this.skiHeld = this.input.isSkiHeld();
     this.coyote = this.grounded ? MOVEMENT.coyoteTime : Math.max(0, this.coyote - delta);
@@ -384,6 +764,8 @@ export class Game {
       this.audio.jump();
     }
 
+    this.jetpackActive = !this.grounded && this.input.isJumpHeld();
+
     if (this.grounded) {
       if (this.skiHeld) {
         if (this.terrainNormal.y > 0.05) {
@@ -392,29 +774,68 @@ export class Game {
             + this.terrainNormal.z * this.playerVelocity.z
           ) / this.terrainNormal.y;
         }
-        const tangentGravity = new THREE.Vector3(0, -MOVEMENT.gravity, 0)
-          .addScaledVector(this.terrainNormal, MOVEMENT.gravity * this.terrainNormal.y);
+        const skiMomentum = skiMomentumCurve(horizontalSpeed, this.skiMomentumScratch);
+        this.skiMomentumResistance = skiMomentum.resistance;
+        this.skiGravityDriveScale = skiMomentum.gravityDriveScale;
+        this.skiDragAcceleration = skiMomentum.dragAcceleration
+          * this.weatherSnapshot.multipliers.groundFrictionMultiplier;
+        const tangentGravity = this.tangentGravityScratch.set(0, -MOVEMENT.gravity, 0)
+          .addScaledVector(this.terrainNormal, MOVEMENT.gravity * this.terrainNormal.y)
+          .multiplyScalar(MOVEMENT.skiGravityScale * skiMomentum.gravityDriveScale);
         this.playerVelocity.addScaledVector(tangentGravity, delta);
         this.applySkiCarve(this.wishDirection, this.terrainNormal, delta);
-        const skiFriction = Math.max(0, 1 - MOVEMENT.skiFriction * delta);
-        this.playerVelocity.x *= skiFriction;
-        this.playerVelocity.z *= skiFriction;
+        const tangentSpeed = this.playerVelocity.length();
+        if (tangentSpeed > 0.001) {
+          const nextSpeed = Math.max(0, tangentSpeed - this.skiDragAcceleration * delta);
+          this.playerVelocity.multiplyScalar(nextSpeed / tangentSpeed);
+        }
+        // Ski input supplies only a small shove and steering authority. Race
+        // speed has to come from choosing a downhill line and carrying that
+        // momentum through the next transition.
+        this.accelerateOnSurface(
+          this.wishDirection,
+          this.terrainNormal,
+          MOVEMENT.skiPushAcceleration,
+          MOVEMENT.skiPushWishSpeed * (this.speedBoost > 0 ? 1.2 : 1),
+          delta,
+        );
       } else if (horizontalSpeed > 0 && this.dashMomentumTimer <= 0) {
         const control = Math.max(MOVEMENT.stopSpeed, horizontalSpeed);
-        const nextSpeed = Math.max(0, horizontalSpeed - control * MOVEMENT.groundFriction * delta);
+        const nextSpeed = Math.max(
+          0,
+          horizontalSpeed
+            - control * MOVEMENT.groundFriction * this.weatherSnapshot.multipliers.groundFrictionMultiplier * delta,
+        );
         const scale = nextSpeed / horizontalSpeed;
         this.playerVelocity.x *= scale;
         this.playerVelocity.z *= scale;
       }
-      this.accelerate(this.wishDirection, MOVEMENT.groundAcceleration, MOVEMENT.wishSpeed * (this.speedBoost > 0 ? 1.25 : 1), delta);
+      if (!this.skiHeld) {
+        this.skiMomentumResistance = 0;
+        this.skiGravityDriveScale = 1;
+        this.skiDragAcceleration = 0;
+        this.accelerate(
+          this.wishDirection,
+          MOVEMENT.groundAcceleration * this.weatherSnapshot.multipliers.groundTractionMultiplier,
+          MOVEMENT.wishSpeed * (this.speedBoost > 0 ? 1.25 : 1),
+          delta,
+        );
+      }
     } else {
+      this.skiMomentumResistance = 0;
+      this.skiGravityDriveScale = 1;
+      this.skiDragAcceleration = 0;
       const wishSpeed = MOVEMENT.wishSpeed * (this.speedBoost > 0 ? 1.25 : 1);
       const movingAgainstVelocity = this.playerVelocity.x * this.wishDirection.x
         + this.playerVelocity.z * this.wishDirection.z < 0;
       const pureStrafe = Math.abs(this.moveInput.x) > 0.01 && Math.abs(this.moveInput.y) < 0.01;
       this.accelerate(
         this.wishDirection,
-        pureStrafe ? MOVEMENT.strafeAcceleration : movingAgainstVelocity ? MOVEMENT.airDeceleration : MOVEMENT.airAcceleration,
+        (pureStrafe
+          ? MOVEMENT.strafeAcceleration
+          : movingAgainstVelocity
+            ? MOVEMENT.airDeceleration
+            : MOVEMENT.airAcceleration) * this.weatherSnapshot.multipliers.airControlMultiplier,
         pureStrafe ? MOVEMENT.strafeWishSpeed : wishSpeed,
         delta,
       );
@@ -422,7 +843,16 @@ export class Game {
       this.applyAirCarve(this.wishDirection, delta);
     }
 
-    if (!this.grounded) this.playerVelocity.y -= MOVEMENT.gravity * delta;
+    if (!this.grounded) {
+      if (this.jetpackActive) {
+        this.playerVelocity.y = Math.min(
+          MOVEMENT.jetpackMaxRiseSpeed,
+          this.playerVelocity.y + MOVEMENT.jetpackAcceleration * delta,
+        );
+        this.fovPunch = Math.max(this.fovPunch, 1.2);
+      }
+      this.playerVelocity.y -= MOVEMENT.gravity * delta;
+    }
     const speed3d = this.playerVelocity.length();
     if (speed3d > MOVEMENT.maxSpeed) this.playerVelocity.multiplyScalar(MOVEMENT.maxSpeed / speed3d);
     const distance = this.playerVelocity.length() * delta;
@@ -445,17 +875,27 @@ export class Game {
     const stride = THREE.MathUtils.clamp(2.15 - speed * 0.035, 1.12, 2.05);
     if (this.footstepDistance < stride) return;
     this.footstepDistance %= stride;
-    this.audio.footstep(this.noise(this.elapsed, 37) * 0.5);
+    const surface = this.arena.surfaceAt(this.playerPosition.x, this.playerPosition.z, this.playerPosition.y + 0.35);
+    this.audio.footstep(this.noise(this.elapsed, 37) * 0.5, surface);
+    if (surface === 'soil') this.arena.addFootTrack(this.playerPosition, this.playerVelocity, this.elapsed);
   }
 
   private movePlayerSubstep(delta: number): void {
     const startPosition = this.playerPosition.clone();
     const startVelocity = this.playerVelocity.clone();
     const wasGrounded = this.grounded;
-    this.playerPosition.addScaledVector(this.playerVelocity, delta);
+    const intendedPosition = this.playerPosition.clone().addScaledVector(this.playerVelocity, delta);
+    const sweptContact = this.sweepPlayerMotion(startPosition, intendedPosition);
+    this.playerPosition.copy(intendedPosition);
     const impact = -this.playerVelocity.y;
     const blockedPosition = this.playerPosition.clone();
     let contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+    if (sweptContact.wallNormal) {
+      contact.wallContact = true;
+      contact.wallNormal.copy(sweptContact.wallNormal);
+      contact.contacts += 1;
+    }
+    if (sweptContact.ceilingNormal) contact.contacts += 1;
     blockedPosition.copy(this.playerPosition);
 
     const intendedHorizontalDistance = Math.hypot(startVelocity.x, startVelocity.z) * delta;
@@ -465,7 +905,7 @@ export class Game {
     );
     const horizontallyBlocked = intendedHorizontalDistance > 1e-4
       && resolvedHorizontalDistance < intendedHorizontalDistance * 0.9;
-    if (wasGrounded && (contact.wallContact || horizontallyBlocked)) {
+    if (wasGrounded && sweptContact.wallNormal === null && (contact.wallContact || horizontallyBlocked)) {
       const steppedContact = this.tryStepMove(
         startPosition,
         startVelocity,
@@ -486,11 +926,120 @@ export class Game {
       }
     } else if (contact.contacts === 0) {
       this.terrainNormal.set(0, 1, 0);
-    } else if (contact.wallContact) {
-      this.wallContactTimer = 0.1;
     }
+    // A grounded capsule can touch floor and wall in the same substep. Keep
+    // wall feedback independent from the ground-contact branch so diagnostics,
+    // steering recovery, and tests observe the actual compound contact.
+    if (contact.wallContact) this.wallContactTimer = 0.1;
+    if (sweptContact.ceilingNormal) this.ceilingContactTimer = 0.1;
     this.lastGroundImpact = Math.max(0, this.lastGroundImpact - delta);
-    if (this.playerPosition.y < -14 && this.mode === 'running') this.damagePlayer(999, 'player', 'FELL INTO THE VOID');
+    if (this.playerPosition.y < this.arena.killY && this.mode === 'running') this.damagePlayer(999, 'player', 'FELL INTO THE VOID');
+  }
+
+  /**
+   * Conservative CCD guard for the custom character controller.
+   *
+   * Arena.resolvePlayerCapsule owns penetration recovery and grounding, but an
+   * overlap-only endpoint can land beyond a thin wall/roof after a dash,
+   * grapple pull, or frame spike. These offset BVH rays approximate the swept
+   * capsule's leading face, stop just before first impact, and project velocity
+   * onto the contact plane. Walkable upward-facing terrain is deliberately
+   * ignored so ski and ramp flow still use the authored heightfield solver.
+   */
+  private sweepPlayerMotion(
+    start: THREE.Vector3,
+    intended: THREE.Vector3,
+  ): { wallNormal: THREE.Vector3 | null; ceilingNormal: THREE.Vector3 | null } {
+    const displacement = intended.clone().sub(start);
+    const distance = displacement.length();
+    let wallNormal: THREE.Vector3 | null = null;
+    let ceilingNormal: THREE.Vector3 | null = null;
+    if (distance >= MOVEMENT.sweepMinDistance) {
+      this.ccdSweeps += 1;
+      const horizontal = new THREE.Vector3(displacement.x, 0, displacement.z);
+      const horizontalDistance = horizontal.length();
+      const offsets: THREE.Vector3[] = [];
+      if (horizontalDistance > 1e-5) {
+        const forward = horizontal.multiplyScalar(1 / horizontalDistance);
+        const side = new THREE.Vector3(-forward.z, 0, forward.x);
+        const front = forward.multiplyScalar(MOVEMENT.playerRadius);
+        const halfSide = side.multiplyScalar(MOVEMENT.playerRadius * 0.68);
+        const height = MOVEMENT.playerHeight * 0.5;
+        offsets.push(
+          front.clone().setY(height),
+          front.clone().add(halfSide).setY(height),
+          front.clone().sub(halfSide).setY(height),
+        );
+      }
+
+      type SweepCandidate = { fraction: number; normal: THREE.Vector3; kind: 'wall' | 'ceiling' };
+      const candidates: SweepCandidate[] = [];
+      const consider = (offset: THREE.Vector3, kind: SweepCandidate['kind']): void => {
+        const rayStart = start.clone().add(offset);
+        const rayEnd = intended.clone().add(offset);
+        const hit = this.arena.segmentHitDetails(rayStart, rayEnd);
+        if (!hit || hit.distance <= 1e-5) return;
+        const qualifies = kind === 'wall'
+          ? hit.normal.y < MOVEMENT.maxSlopeCosine && hit.normal.y > -0.55
+          : hit.normal.y < -0.42;
+        if (!qualifies) return;
+        const fraction = THREE.MathUtils.clamp(
+          (hit.distance - MOVEMENT.collisionSkin) / distance,
+          0,
+          1,
+        );
+        candidates.push({ fraction, normal: hit.normal.clone(), kind });
+      };
+
+      for (const offset of offsets) consider(offset, 'wall');
+      if (displacement.y > 0.001) {
+        const radial = MOVEMENT.playerRadius * 0.72;
+        const horizontalDirection = new THREE.Vector2(displacement.x, displacement.z);
+        const sideX = horizontalDirection.lengthSq() > 1e-6 ? -horizontalDirection.y / horizontalDirection.length() : 1;
+        const sideZ = horizontalDirection.lengthSq() > 1e-6 ? horizontalDirection.x / horizontalDirection.length() : 0;
+        for (const [x, z] of [[0, 0], [sideX * radial, sideZ * radial], [-sideX * radial, -sideZ * radial]]) {
+          consider(new THREE.Vector3(x, MOVEMENT.playerHeight, z), 'ceiling');
+        }
+      }
+
+      const closest = candidates.sort((left, right) => left.fraction - right.fraction)[0];
+      if (closest !== undefined) {
+        intended.copy(start).addScaledVector(displacement, closest.fraction);
+        const intoSurface = this.playerVelocity.dot(closest.normal);
+        if (intoSurface < 0) this.playerVelocity.addScaledVector(closest.normal, -intoSurface);
+        if (closest.kind === 'wall') {
+          wallNormal = closest.normal;
+          this.ccdWallHits += 1;
+        } else {
+          ceilingNormal = closest.normal;
+          this.ccdCeilingHits += 1;
+        }
+      }
+    }
+
+    const halfWidth = this.arena.mapInfo.bounds.width * 0.5
+      - MOVEMENT.playerRadius
+      - MOVEMENT.arenaBoundaryInset;
+    const halfDepth = this.arena.mapInfo.bounds.depth * 0.5
+      - MOVEMENT.playerRadius
+      - MOVEMENT.arenaBoundaryInset;
+    const clampedX = THREE.MathUtils.clamp(intended.x, -halfWidth, halfWidth);
+    const clampedZ = THREE.MathUtils.clamp(intended.z, -halfDepth, halfDepth);
+    if (clampedX !== intended.x || clampedZ !== intended.z) {
+      const boundaryNormal = new THREE.Vector3(
+        clampedX !== intended.x ? -Math.sign(intended.x) : 0,
+        0,
+        clampedZ !== intended.z ? -Math.sign(intended.z) : 0,
+      ).normalize();
+      intended.x = clampedX;
+      intended.z = clampedZ;
+      const intoBoundary = this.playerVelocity.dot(boundaryNormal);
+      if (intoBoundary < 0) this.playerVelocity.addScaledVector(boundaryNormal, -intoBoundary);
+      wallNormal = boundaryNormal;
+      this.ccdBoundaryHits += 1;
+    }
+
+    return { wallNormal, ceilingNormal };
   }
 
   private tryStepMove(
@@ -616,6 +1165,22 @@ export class Game {
     }
   }
 
+  private accelerateOnSurface(
+    direction: THREE.Vector3,
+    normal: THREE.Vector3,
+    acceleration: number,
+    wishSpeed: number,
+    delta: number,
+  ): void {
+    if (direction.lengthSq() < 0.0001 || normal.y < 0.05) return;
+    const tangentWish = direction.clone().addScaledVector(normal, -direction.dot(normal));
+    if (tangentWish.lengthSq() < 0.0001) return;
+    tangentWish.normalize();
+    const current = this.playerVelocity.dot(tangentWish);
+    const add = Math.min(acceleration * wishSpeed * delta, wishSpeed - current);
+    if (add > 0) this.playerVelocity.addScaledVector(tangentWish, add);
+  }
+
   private applyWarsowAirControl(direction: THREE.Vector3, delta: number): void {
     // qfusion's forward-air-control equation: rotate the horizontal velocity
     // toward forward/back input while preserving its magnitude and vertical arc.
@@ -627,7 +1192,12 @@ export class Game {
     horizontal.multiplyScalar(1 / speed);
     const dot = horizontal.dot(direction);
     if (dot <= 0) return;
-    const control = 32 * MOVEMENT.airControl * dot * dot * delta;
+    const control = 32
+      * MOVEMENT.airControl
+      * this.weatherSnapshot.multipliers.airControlMultiplier
+      * dot
+      * dot
+      * delta;
     horizontal.multiplyScalar(speed).addScaledVector(direction, control).normalize().multiplyScalar(speed);
     this.playerVelocity.set(horizontal.x, verticalSpeed, horizontal.z);
   }
@@ -643,7 +1213,10 @@ export class Game {
     const angle = Math.acos(dot);
     if (angle < 1e-4) return;
     const speedPenalty = 1 + Math.max(0, speed - MOVEMENT.wishSpeed) / MOVEMENT.wishSpeed * 0.82;
-    const maxTurn = MOVEMENT.airCarveRate * delta / speedPenalty;
+    const maxTurn = MOVEMENT.airCarveRate
+      * this.weatherSnapshot.multipliers.airControlMultiplier
+      * delta
+      / speedPenalty;
     const turn = Math.min(angle, maxTurn);
     const cross = heading.x * target.z - heading.z * target.x;
     const sign = Math.sign(cross) || 1;
@@ -671,7 +1244,7 @@ export class Game {
 
   private checkJumpPads(): void {
     if (this.jumpPadCooldown > 0) return;
-    for (const pad of JUMP_PADS) {
+    for (const pad of this.arena.jumpPads) {
       const distanceSq = this.playerPosition.distanceToSquared(pad.position);
       if (distanceSq < pad.radius * pad.radius) {
         const preserved = Math.max(18, Math.hypot(this.playerVelocity.x, this.playerVelocity.z));
@@ -687,55 +1260,81 @@ export class Game {
   }
 
   private updateBots(delta: number): void {
-    const playerTarget = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE * 0.72, 0));
-    const routePoints = [...this.arena.spawnPoints, ...Object.values(this.arena.itemPoints)];
     for (const bot of this.bots) {
       if (bot.readyToRespawn()) {
-        const spawn = this.arena.spawnPoints[(bot.id + this.spawnIndex + 1) % this.arena.spawnPoints.length];
-        bot.respawn(spawn);
+        bot.respawn(this.selectSafeSpawn(bot.id));
       }
+      if (!bot.alive) {
+        bot.update(delta, this.elapsed, bot.group.position, this.arena.corePosition, false);
+        continue;
+      }
+      if (bot.consumeRecoveryRequest()) {
+        bot.respawn(this.selectSafeSpawn(bot.id, bot.navigationTarget));
+        bot.collisionRecoveries += 1;
+      }
+
+      const targetOwner = this.chooseBotTarget(bot);
+      bot.targetOwner = targetOwner;
+      if (targetOwner !== null) this.botTargets.set(bot.id, targetOwner);
+      else this.botTargets.delete(bot.id);
       const botEye = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-      const canSeePlayer = this.arena.hasLineOfSight(botEye, playerTarget);
-      const routePhase = Math.floor((this.elapsed + bot.id * 2.35) / 6.25);
-      let routeIndex = (bot.id * 7 + routePhase * 5) % routePoints.length;
-      if (bot.group.position.distanceToSquared(routePoints[routeIndex]) < 5.5) {
-        routeIndex = (routeIndex + 3 + bot.id) % routePoints.length;
-      }
-      bot.update(delta, this.elapsed, playerTarget, routePoints[routeIndex], canSeePlayer);
-      if (bot.wantsToThrowGrenade) this.botThrowGrenade(bot);
-      if (bot.wantsToFire) this.botFire(bot);
+      const target = targetOwner === null ? this.arena.corePosition : this.ownerPosition(targetOwner, 1.05);
+      const visibilityRange = 155 * this.weatherSnapshot.multipliers.visibilityMultiplier;
+      const canSeeTarget = targetOwner !== null
+        && botEye.distanceToSquared(target) <= visibilityRange * visibilityRange
+        && this.arena.hasLineOfSight(botEye, target, 0.3);
+      const objective = this.chooseBotObjective(bot, target, canSeeTarget);
+      bot.update(delta, this.elapsed, target, objective, canSeeTarget);
+      if (bot.wantsToThrowGrenade && targetOwner !== null) this.botThrowGrenade(bot, targetOwner);
+      if (bot.wantsToFire && targetOwner !== null) this.botFire(bot, targetOwner);
     }
   }
 
-  private botFire(bot: Bot): void {
+  private botFire(bot: Bot, targetOwner: Owner): void {
+    if (!this.ownerAlive(targetOwner) || targetOwner === bot.id) return;
     const origin = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-    const target = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE * 0.65, 0));
+    const target = this.ownerPosition(targetOwner, 0.95);
     // Fire-time LOS closes the reaction/update race: neither hitscan nor a
     // projectile may be emitted once the target has moved behind BSP/patch cover.
     if (!this.arena.hasLineOfSight(origin, target)) return;
-    if (bot.weapon === 'rocket' || bot.weapon === 'plasma') {
+    if (bot.weapon === 'rocket' || bot.weapon === 'plasma' || bot.weapon === 'disc') {
       const definition = this.weapon(bot.weapon);
       this.spawnProjectile(origin, bot.aimDirection, bot.id, definition);
       this.audio.weaponWorld(bot.weapon, origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
       return;
     }
-    const bulletEnd = origin.clone().addScaledVector(bot.aimDirection, 80);
+    const definition = this.weapon(bot.weapon);
+    const range = definition.range ?? (bot.weapon === 'shotgun' ? 34 : 110);
+    const bulletEnd = origin.clone().addScaledVector(bot.aimDirection, range);
     const worldHit = this.arena.segmentHit(origin, bulletEnd);
     const visibleEnd = worldHit ?? bulletEnd;
-    this.weaponVfx.beam(origin, visibleEnd, 'machine', 0xff5f73, 0.065);
+    const visualWeapon = bot.weapon === 'laser' || bot.weapon === 'rail' || bot.weapon === 'sniper' ? bot.weapon : 'machine';
+    this.weaponVfx.beam(origin, visibleEnd, visualWeapon, definition.color, bot.weapon === 'rail' ? 0.13 : 0.065);
     const toTarget = target.sub(origin);
     const along = toTarget.dot(bot.aimDirection);
     const closest = origin.clone().addScaledVector(bot.aimDirection, along);
-    const worldDistance = worldHit ? origin.distanceTo(worldHit) : 80;
-    if (along > 0 && along <= worldDistance + 0.02 && closest.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0))) < 1.1) {
-      this.damagePlayer(8, bot.id, 'MACHINE GUN');
+    const worldDistance = worldHit ? origin.distanceTo(worldHit) : range;
+    const hitRadius = bot.weapon === 'shotgun' ? 1.75 : bot.weapon === 'machine' ? 1.08 : 0.82;
+    let targetHit = false;
+    if (along > 0 && along <= worldDistance + 0.02 && closest.distanceTo(this.ownerPosition(targetOwner, 0.9)) < hitRadius) {
+      targetHit = true;
+      let damage = definition.damage;
+      if (bot.weapon === 'shotgun') {
+        const falloff = THREE.MathUtils.clamp(1 - Math.max(0, along - 5) / 30, 0.12, 1);
+        const pelletHits = Math.max(2, Math.round((definition.pellets ?? 10) * falloff * 0.62));
+        damage *= pelletHits;
+      }
+      if (bot.damageBoost > 0) damage *= 1.35;
+      this.applyDamageToOwner(targetOwner, damage, bot.id, definition.name, origin);
     }
-    this.audio.weaponWorld('machine', origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
+    const tracerPosition = origin.clone().lerp(visibleEnd, 0.55);
+    this.audio.tracerPass(tracerPosition, !targetHit, (bot.id - 1) * 0.2, `bot-${bot.id}`);
+    this.audio.weaponWorld(bot.weapon, origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
   }
 
-  private botThrowGrenade(bot: Bot): void {
+  private botThrowGrenade(bot: Bot, targetOwner: Owner): void {
     const origin = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-    const target = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE * 0.55, 0));
+    const target = this.ownerPosition(targetOwner, 0.9);
     const direction = target.sub(origin).normalize();
     const root = this.weaponVfx.createGrenade(0xff607d);
     root.position.copy(origin);
@@ -744,6 +1343,106 @@ export class Game {
     velocity.y += GRENADE.upwardImpulse * 0.9;
     this.grenades.push({ root, velocity, owner: bot.id, fuse: GRENADE.fuse, trailDistance: 0, bounces: 0 });
     this.audio.weaponWorld('rocket', origin, `bot-${bot.id}-grenade`, (bot.id - 1) * 0.16);
+  }
+
+  private chooseBotTarget(bot: Bot): Owner | null {
+    const candidates: Owner[] = ['player', ...this.bots.filter((candidate) => candidate.id !== bot.id).map((candidate) => candidate.id)];
+    const eye = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+    let best: { owner: Owner; score: number } | null = null;
+    for (const owner of candidates) {
+      if (!this.ownerAlive(owner)) continue;
+      const target = this.ownerPosition(owner, 1.05);
+      const distance = eye.distanceTo(target);
+      const visibilityRange = 155 * this.weatherSnapshot.multipliers.visibilityMultiplier;
+      const visible = distance <= visibilityRange && this.arena.hasLineOfSight(eye, target, 0.3);
+      const threatScore = owner === 'player' ? this.score : this.bots[owner]?.score ?? 0;
+      const pressureBias = bot.getObjectiveUtility('player');
+      const score = distance
+        - (visible ? 52 * pressureBias : 0)
+        - threatScore * 2.2 * bot.archetypeTuning.aggression
+        + (this.botTargets.get(bot.id) === owner ? -9 : 0);
+      if (!best || score < best.score) best = { owner, score };
+    }
+    return best?.owner ?? null;
+  }
+
+  private chooseBotObjective(bot: Bot, target: THREE.Vector3, targetVisible: boolean): THREE.Vector3 {
+    const playerPressure = bot.getObjectiveUtility('player');
+    const corePressure = bot.getObjectiveUtility('core');
+    const chaseRange = 62 * THREE.MathUtils.clamp(playerPressure / Math.max(0.45, corePressure), 0.7, 1.3);
+    if (targetVisible && bot.group.position.distanceToSquared(target) < chaseRange * chaseRange) return target;
+    if (this.coreActive && (corePressure >= playerPressure || !targetVisible)) return this.arena.corePosition;
+
+    let bestPickup: { point: THREE.Vector3; score: number } | null = null;
+    for (const pickup of this.pickups) {
+      if (!pickup.active) continue;
+      let utility = 8;
+      if (pickup.kind === 'health') {
+        if (bot.health >= 95) continue;
+        utility = bot.health < 45 ? 58 : 28;
+      } else if (pickup.kind === 'armor') {
+        if (bot.armor >= 95) continue;
+        utility = bot.armor < 35 ? 52 : 25;
+      }
+      else if (pickup.kind === 'damage' || pickup.kind === 'speed') utility = 38;
+      else if (pickup.kind === 'rail' || pickup.kind === 'rocket' || pickup.kind === 'sniper' || pickup.kind === 'disc') utility = 32;
+      else utility = 22;
+      utility *= 0.55 + bot.getPickupUtility(pickup.kind);
+      const score = bot.group.position.distanceTo(pickup.group.position) - utility;
+      if (!bestPickup || score < bestPickup.score) bestPickup = { point: pickup.group.position, score };
+    }
+    if (bestPickup && bestPickup.score < 132) return bestPickup.point;
+    const routePoints = [...this.arena.spawnPoints, ...Object.values(this.arena.itemPoints), this.arena.corePosition];
+    const phase = Math.floor((this.elapsed + bot.id * 3.1) / 8.5);
+    return routePoints[(bot.id * 5 + phase * 3) % routePoints.length];
+  }
+
+  private ownerAlive(owner: Owner): boolean {
+    return owner === 'player' ? this.mode === 'running' && this.health > 0 : Boolean(this.bots[owner]?.alive);
+  }
+
+  private ownerPosition(owner: Owner, centerY = 0.9): THREE.Vector3 {
+    return owner === 'player'
+      ? this.playerPosition.clone().add(new THREE.Vector3(0, centerY, 0))
+      : this.bots[owner].group.position.clone().add(new THREE.Vector3(0, centerY, 0));
+  }
+
+  private applyDamageToOwner(owner: Owner, damage: number, attacker: Owner, cause: string, hitOrigin?: THREE.Vector3): void {
+    if (owner === 'player') this.damagePlayer(damage, attacker, cause.toUpperCase(), hitOrigin);
+    else this.applyDamageToBot(this.bots[owner], damage, attacker, cause);
+  }
+
+  private selectSafeSpawn(excludedBotId?: number, recoveryObjective?: THREE.Vector3): THREE.Vector3 {
+    const opponents = [
+      ...(this.mode === 'running' || this.mode === 'respawning' ? [this.playerPosition] : []),
+      ...this.bots.filter((bot) => bot.alive && bot.id !== excludedBotId).map((bot) => bot.group.position),
+    ];
+    let best: { point: THREE.Vector3; score: number; index: number } | null = null;
+    for (let index = 0; index < this.arena.spawnPoints.length; index += 1) {
+      const authored = this.arena.spawnPoints[index];
+      const point = this.arena.safeSpawnPoint(authored);
+      if (!point) continue;
+      const minDistance = opponents.length ? Math.min(...opponents.map((opponent) => point.distanceTo(opponent))) : 100;
+      const eye = point.clone().add(new THREE.Vector3(0, 1.05, 0));
+      const exposed = opponents.filter((opponent) => this.arena.hasLineOfSight(eye, opponent.clone().add(new THREE.Vector3(0, 1, 0)))).length;
+      const recentPenalty = this.recentSpawnIndices.includes(index) ? 24 : 0;
+      const separation = Math.min(minDistance, recoveryObjective ? 72 : 105);
+      const objectiveBias = recoveryObjective
+        ? -point.distanceTo(recoveryObjective) * 0.72
+        : -point.distanceTo(this.arena.corePosition) * 0.035;
+      const score = separation * (recoveryObjective ? 0.38 : 1) + objectiveBias - exposed * 18 - recentPenalty;
+      if (!best || score > best.score) best = { point, score, index };
+    }
+    if (!best) {
+      const fallbackIndex = this.spawnIndex++ % this.arena.spawnPoints.length;
+      const fallback = this.arena.spawnPoints[fallbackIndex].clone();
+      const floor = this.arena.floorHeightAt(fallback.x, fallback.z, Number.POSITIVE_INFINITY);
+      if (floor !== null) fallback.y = floor;
+      return fallback;
+    }
+    this.recentSpawnIndices.push(best.index);
+    if (this.recentSpawnIndices.length > 5) this.recentSpawnIndices.shift();
+    return best.point;
   }
 
   private tryFirePlayerWeapon(): void {
@@ -760,7 +1459,8 @@ export class Game {
       this.audio.dryFire(definition.id);
       return;
     }
-    this.weaponCooldown = definition.cooldown;
+    const focusedMachine = definition.id === 'machine' && this.input.isAltFireHeld();
+    this.weaponCooldown = definition.cooldown * (focusedMachine ? 0.84 : 1);
     this.recoil = Math.min(1, this.recoil + definition.recoil);
     this.trauma = Math.min(1, this.trauma + definition.trauma);
     this.ammo.set(definition.id, Math.max(0, ammo - 1));
@@ -799,6 +1499,7 @@ export class Game {
         if (!trace.first && trace.worldHit) {
           this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), definition.id, definition.color);
           if (pellet % 3 === 0) this.weaponVfx.impact(trace.worldHit, definition.color, definition.id, trace.worldNormal ?? undefined);
+          if (pellet % 3 === 0) this.registerConcreteTraceImpact(trace, definition.damage * 2.4);
         }
       }
       for (const [bot, damage] of hits) this.applyDamageToBot(bot, damage * this.damageMultiplier(), 'player', definition.name);
@@ -806,7 +1507,10 @@ export class Game {
       const range = definition.range ?? 120;
       const piercing = definition.id === 'rail';
       const hitscanDirection = definition.id === 'machine'
-        ? this.spreadDirection(direction, (definition.spread ?? 0) * (1 + Math.min(2, this.playerVelocity.length() / 24)))
+        ? this.spreadDirection(
+          direction,
+          (definition.spread ?? 0) * (focusedMachine ? 0.18 : 1) * (1 + Math.min(2, this.playerVelocity.length() / 24)),
+        )
         : direction;
       const trace = this.traceBotShot(origin, hitscanDirection, range, piercing, definition.damage * this.damageMultiplier(), definition.name, definition.id);
       const end = piercing ? trace.end : trace.first?.point ?? trace.end;
@@ -814,6 +1518,7 @@ export class Game {
       if (!trace.first && trace.worldHit) {
         this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), definition.id, definition.color);
         this.weaponVfx.impact(trace.worldHit, definition.color, definition.id, trace.worldNormal ?? undefined);
+        this.registerConcreteTraceImpact(trace, definition.damage);
       }
       if (trace.first && definition.id === 'machine') {
         this.weaponVfx.stickTracer(trace.first.bot.group, trace.first.point, hitscanDirection, definition.color);
@@ -826,9 +1531,12 @@ export class Game {
   private fireContinuousLaserTick(delta: number, forced = false): void {
     const definition = this.weapon('laser');
     const ammo = this.ammo.get('laser') ?? 0;
-    if ((!forced && !this.input.isFireHeld()) || ammo <= 0 || this.laserHeat >= 1) {
+    const focused = this.input.isAltFireHeld();
+    const ammoCost = focused ? 2 : 1;
+    if ((!forced && !this.input.isFireHeld()) || ammo < ammoCost || this.laserHeat >= 1) {
       this.weaponVfx.stopContinuousLaser();
-      if ((ammo <= 0 || this.laserHeat >= 1) && this.weaponCooldown <= 0) {
+      this.audio.setLaserBeamActive(false);
+      if ((ammo < ammoCost || this.laserHeat >= 1) && this.weaponCooldown <= 0) {
         this.weaponCooldown = 0.25;
         this.audio.dryFire('laser');
       }
@@ -843,25 +1551,124 @@ export class Game {
     const botHit = trace.first;
     const botVisible = botHit !== null;
     const end = botVisible ? botHit.point : trace.end;
+    this.audio.setLaserBeamActive(true);
     this.weaponVfx.updateContinuousLaser(origin, end, definition.color, delta);
     this.recordPlayerShot('laser', origin);
-    this.laserHeat = Math.min(1.1, this.laserHeat + delta * 0.7);
+    this.laserHeat = Math.min(1.1, this.laserHeat + delta * (focused ? 1.08 : 0.7));
 
     if (!wasActive) this.weaponVfx.muzzle('laser', definition.color, this.muzzleSocket);
     if (this.weaponCooldown > 0) return;
 
-    this.weaponCooldown = definition.cooldown;
-    this.ammo.set('laser', Math.max(0, ammo - 1));
+    this.weaponCooldown = definition.cooldown * (focused ? 1.35 : 1);
+    this.ammo.set('laser', Math.max(0, ammo - ammoCost));
     this.recoil = Math.min(0.34, this.recoil + definition.recoil);
     this.trauma = Math.min(0.22, this.trauma + definition.trauma);
     if (botVisible && botHit) {
-      this.applyDamageToBot(botHit.bot, definition.damage * this.damageMultiplier(), 'player', definition.name);
+      this.applyDamageToBot(
+        botHit.bot,
+        definition.damage * (focused ? 1.8 : 1) * this.damageMultiplier(),
+        'player',
+        focused ? 'HELIX CUTTING FOCUS' : definition.name,
+      );
     } else if (trace.worldHit) {
       this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), 'laser', definition.color);
       this.weaponVfx.impact(trace.worldHit, definition.color, 'laser', trace.worldNormal ?? undefined);
+      this.registerConcreteTraceImpact(trace, definition.damage * (focused ? 1.6 : 0.72));
     }
     this.applyWeaponRecoil(definition);
-    this.audio.weaponPlayer('laser', this.rng() - 0.5);
+  }
+
+  private trySecondaryFire(): void {
+    if (this.mode !== 'running') return;
+    const definition = WEAPONS[this.selectedWeapon];
+    if (definition.id === 'machine' || definition.id === 'laser' || definition.id === 'sniper') return;
+    if (this.weaponCooldown > 0) return;
+
+    const ammo = this.ammo.get(definition.id) ?? 0;
+    const cost = definition.id === 'disc' ? 1
+      : definition.id === 'shotgun' || definition.id === 'rail' ? 2
+      : definition.id === 'rocket' ? 3
+        : 5;
+    if (ammo < cost) {
+      this.weaponCooldown = 0.25;
+      this.audio.dryFire(definition.id);
+      return;
+    }
+
+    this.ammo.set(definition.id, ammo - cost);
+    const origin = this.weaponMuzzleWorldPosition();
+    const direction = this.shotDirectionFromMuzzle(origin, 220);
+    this.recordPlayerShot(definition.id, origin);
+    this.weaponVfx.muzzle(definition.id, definition.color, this.muzzleSocket);
+
+    if (definition.id === 'shotgun') {
+      this.weaponCooldown = 1.15;
+      const trace = this.traceBotShot(
+        origin,
+        direction,
+        95,
+        false,
+        92 * this.damageMultiplier(),
+        'SCATTER SABOT',
+        'shotgun',
+      );
+      const end = trace.first?.point ?? trace.end;
+      this.weaponVfx.beam(origin, end, 'shotgun', 0xffe2a6, 0.16);
+      if (!trace.first && trace.worldHit) {
+        this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), 'shotgun', 0xffe2a6);
+        this.weaponVfx.impact(trace.worldHit, 0xffe2a6, 'shotgun', trace.worldNormal ?? undefined);
+        this.registerConcreteTraceImpact(trace, 110);
+      }
+    } else if (definition.id === 'rocket') {
+      this.weaponCooldown = 1.4;
+      const right = direction.clone().cross(new THREE.Vector3(0, 1, 0)).normalize();
+      const salvoDefinition: WeaponDefinition = { ...definition, damage: 68, splash: 4.3, projectileSpeed: 34 };
+      for (const offset of [-0.045, 0, 0.045]) {
+        this.spawnProjectile(origin, direction.clone().addScaledVector(right, offset).normalize(), 'player', salvoDefinition);
+      }
+    } else if (definition.id === 'plasma') {
+      this.weaponCooldown = 1.05;
+      const orbDefinition: WeaponDefinition = { ...definition, damage: 58, splash: 4.1, projectileSpeed: 22 };
+      this.spawnProjectile(origin, direction, 'player', orbDefinition);
+    } else if (definition.id === 'rail') {
+      this.weaponCooldown = 2.25;
+      const trace = this.traceBotShot(
+        origin,
+        direction,
+        220,
+        true,
+        175 * this.damageMultiplier(),
+        'APEX OVERCHARGE',
+        'rail',
+      );
+      this.weaponVfx.beam(origin, trace.end, 'rail', 0xffffff, 0.34);
+      if (!trace.first && trace.worldHit) {
+        this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), 'rail', definition.color);
+        this.weaponVfx.impact(trace.worldHit, definition.color, 'rail', trace.worldNormal ?? undefined);
+        this.registerConcreteTraceImpact(trace, 175);
+      }
+    } else if (definition.id === 'disc') {
+      this.weaponCooldown = 1.12;
+      const overdriveDefinition: WeaponDefinition = {
+        ...definition,
+        damage: 68,
+        projectileSpeed: 92,
+      };
+      this.spawnProjectile(origin, direction, 'player', overdriveDefinition, {
+        maxBounces: 8,
+        restitution: 0.94,
+        ownerSafeTime: 0.32,
+        angularVelocity: 68,
+        life: 8,
+      });
+    }
+
+    this.recoil = Math.min(1, this.recoil + Math.max(0.45, definition.recoil));
+    this.trauma = Math.min(1, this.trauma + Math.max(0.12, definition.trauma));
+    this.fovPunch = Math.max(this.fovPunch, definition.id === 'rail' ? 7 : 4.5);
+    this.applyWeaponRecoil(definition);
+    this.audio.weaponPlayer(definition.id, this.rng() - 0.5);
+    this.hud.message(`${definition.secondary.toUpperCase()} DEPLOYED`);
   }
 
   private applyWeaponRecoil(definition: WeaponDefinition): void {
@@ -908,6 +1715,7 @@ export class Game {
   }
 
   private recordPlayerShot(weapon: WeaponId, origin: THREE.Vector3): void {
+    this.playerShots += 1;
     this.lastShotWeapon = weapon;
     this.lastShotOrigin.copy(origin);
     this.lastMuzzlePosition.copy(origin);
@@ -925,6 +1733,7 @@ export class Game {
     first: { bot: Bot; point: THREE.Vector3; t: number; zone: 'body' | 'head' } | null;
     worldHit: THREE.Vector3 | null;
     worldNormal: THREE.Vector3 | null;
+    worldSurface: ArenaSurface | null;
     end: THREE.Vector3;
   } {
     const rangeEnd = origin.clone().addScaledVector(direction, range);
@@ -960,11 +1769,37 @@ export class Game {
         this.applyDamageToBot(hit.bot, damage * criticalMultiplier, 'player', weaponName);
       }
     }
-    return { first: hits[0] ?? null, worldHit, worldNormal: surfaceHit?.normal ?? null, end: worldHit ?? rangeEnd };
+    return {
+      first: hits[0] ?? null,
+      worldHit,
+      worldNormal: surfaceHit?.normal ?? null,
+      worldSurface: surfaceHit?.surface ?? null,
+      end: worldHit ?? rangeEnd,
+    };
   }
 
-  private spawnProjectile(origin: THREE.Vector3, direction: THREE.Vector3, owner: Owner, definition: WeaponDefinition): void {
-    const projectileWeapon = definition.id === 'rocket' ? 'rocket' : 'plasma';
+  private registerConcreteTraceImpact(
+    trace: {
+      worldHit: THREE.Vector3 | null;
+      worldNormal: THREE.Vector3 | null;
+      worldSurface: ArenaSurface | null;
+    },
+    strength: number,
+  ): void {
+    if (trace.worldSurface !== 'concrete' || !trace.worldHit || !trace.worldNormal) return;
+    this.arena.registerSurfaceImpact(trace.worldHit, trace.worldNormal, strength, this.elapsed);
+  }
+
+  private spawnProjectile(
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    owner: Owner,
+    definition: WeaponDefinition,
+    options: ProjectileOptions = {},
+  ): void {
+    const projectileWeapon = definition.id === 'rocket' || definition.id === 'plasma' || definition.id === 'disc'
+      ? definition.id
+      : 'plasma';
     const root = this.weaponVfx.createProjectile(projectileWeapon, definition.color);
     root.position.copy(origin);
     if (owner === 'player') this.lastProjectileOrigin.copy(root.position);
@@ -977,8 +1812,13 @@ export class Game {
       weapon: definition.id,
       damage: definition.damage * (owner === 'player' ? this.damageMultiplier() : 1),
       splash: definition.splash ?? 0,
-      life: definition.id === 'rocket' ? 4 : 2.4,
+      life: options.life ?? (definition.id === 'disc' ? 6.5 : definition.id === 'rocket' ? 4 : 2.4),
       trailDistance: 0,
+      bounces: 0,
+      maxBounces: options.maxBounces ?? (definition.id === 'disc' ? 5 : 0),
+      restitution: options.restitution ?? (definition.id === 'disc' ? 0.88 : 0),
+      ownerSafeTime: options.ownerSafeTime ?? (definition.id === 'disc' ? 0.24 : Number.POSITIVE_INFINITY),
+      angularVelocity: options.angularVelocity ?? (definition.id === 'disc' ? 54 : 0),
     });
   }
 
@@ -1066,6 +1906,8 @@ export class Game {
     for (let index = this.grenades.length - 1; index >= 0; index -= 1) {
       const grenade = this.grenades[index];
       grenade.fuse -= delta;
+      grenade.velocity.x += this.weatherSnapshot.modifiers.wind.x * delta;
+      grenade.velocity.z += this.weatherSnapshot.modifiers.wind.z * delta;
       const distance = grenade.velocity.length() * delta;
       grenade.trailDistance += distance;
       const steps = Math.max(1, Math.ceil(distance / 0.14));
@@ -1078,6 +1920,16 @@ export class Game {
         if (!surfaceHit) continue;
         grenade.root.position.copy(surfaceHit.point).addScaledVector(surfaceHit.normal, GRENADE.radius * 0.72);
         const normalSpeed = grenade.velocity.dot(surfaceHit.normal);
+        if (normalSpeed < -2.5) {
+          this.audio.surfaceImpact(
+            surfaceHit.surface,
+            surfaceHit.point,
+            Math.min(1.25, Math.abs(normalSpeed) / 18),
+          );
+        }
+        if (surfaceHit.surface === 'concrete' && normalSpeed < -7.5) {
+          this.arena.registerSurfaceImpact(surfaceHit.point, surfaceHit.normal, Math.abs(normalSpeed) * 2.2, this.elapsed);
+        }
         if (normalSpeed < 0) {
           grenade.velocity.addScaledVector(surfaceHit.normal, -normalSpeed * (1 + GRENADE.restitution));
           grenade.velocity.multiplyScalar(GRENADE.tangentialDamping);
@@ -1103,18 +1955,16 @@ export class Game {
     const color = 0xffb84a;
     this.weaponVfx.grenadeExplosion(position, color);
     this.audio.projectileImpact('rocket', position, this.rng() - 0.5);
-    if (grenade.owner === 'player') {
-      for (const bot of this.bots) {
-        if (!bot.alive) continue;
-        const target = bot.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
-        const distance = target.distanceTo(position);
-        if (distance >= GRENADE.splash || !this.explosionHasLineOfSight(position, target)) continue;
-        const falloff = THREE.MathUtils.clamp(1 - distance / GRENADE.splash, 0, 1);
-        this.applyDamageToBot(bot, GRENADE.damage * (falloff * 0.3 + falloff * falloff * 0.7), 'player', 'FRAG GRENADE');
-        const impulse = target.sub(position).normalize().multiplyScalar(falloff * 7.5);
-        bot.velocity.add(impulse);
-        bot.velocity.y = Math.max(bot.velocity.y, impulse.y + 2.2);
-      }
+    for (const bot of this.bots) {
+      if (!bot.alive || grenade.owner === bot.id) continue;
+      const target = bot.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
+      const distance = target.distanceTo(position);
+      if (distance >= GRENADE.splash || !this.explosionHasLineOfSight(position, target)) continue;
+      const falloff = THREE.MathUtils.clamp(1 - distance / GRENADE.splash, 0, 1);
+      this.applyDamageToBot(bot, GRENADE.damage * (falloff * 0.3 + falloff * falloff * 0.7), grenade.owner, 'FRAG GRENADE');
+      const impulse = target.sub(position).normalize().multiplyScalar(falloff * 7.5);
+      bot.velocity.add(impulse);
+      bot.velocity.y = Math.max(bot.velocity.y, impulse.y + 2.2);
     }
     const playerCenter = this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0));
     const playerDistance = playerCenter.distanceTo(position);
@@ -1122,7 +1972,11 @@ export class Game {
       const falloff = THREE.MathUtils.clamp(1 - playerDistance / GRENADE.splash, 0, 1);
       const damageScale = grenade.owner === 'player' ? 0.34 : 0.78;
       const damage = GRENADE.damage * damageScale * (falloff * 0.3 + falloff * falloff * 0.7);
-      if (damage > 1) this.damagePlayer(damage, grenade.owner, 'FRAG GRENADE SPLASH');
+      if (damage > 1) this.damagePlayer(damage, grenade.owner, 'FRAG GRENADE SPLASH', position);
+      const impulse = playerCenter.clone().sub(position).normalize().multiplyScalar(falloff * 6.2);
+      this.playerVelocity.add(impulse);
+      this.playerVelocity.y = Math.max(this.playerVelocity.y, impulse.y + 2.4);
+      this.grounded = false;
     }
     this.trauma = Math.min(1, this.trauma + Math.max(0, 0.48 - playerDistance * 0.06));
     this.removeGrenade(index);
@@ -1132,6 +1986,9 @@ export class Game {
     for (let index = this.projectiles.length - 1; index >= 0; index -= 1) {
       const projectile = this.projectiles[index];
       projectile.life -= delta;
+      projectile.ownerSafeTime = Math.max(0, projectile.ownerSafeTime - delta);
+      projectile.velocity.x += this.weatherSnapshot.modifiers.wind.x * delta;
+      projectile.velocity.z += this.weatherSnapshot.modifiers.wind.z * delta;
       const distance = projectile.velocity.length() * delta;
       projectile.trailDistance += distance;
       const steps = Math.max(1, Math.ceil(distance / 0.24));
@@ -1143,46 +2000,101 @@ export class Game {
         const surfaceHit = this.arena.segmentHitDetails(previousPosition, projectile.root.position);
         if (surfaceHit) {
           projectile.root.position.copy(surfaceHit.point);
-          this.explodeProjectile(projectile, undefined, false, true, surfaceHit.normal);
-          remove = true;
-          break;
-        }
-        if (projectile.owner === 'player') {
-          for (const bot of this.bots) {
-            if (bot.alive && projectile.root.position.distanceTo(bot.group.position.clone().add(new THREE.Vector3(0, 0.9, 0))) < 0.88) {
-              this.applyDamageToBot(bot, projectile.damage, 'player', this.weapon(projectile.weapon).name);
-              if (projectile.splash > 0) this.explodeProjectile(projectile, bot);
-              else if (projectile.weapon === 'plasma') {
-                this.weaponVfx.impact(projectile.root.position, this.weapon('plasma').color, 'plasma');
-                this.audio.projectileImpact('plasma', projectile.root.position, this.rng() - 0.5);
-              }
+          if (surfaceHit.surface === 'concrete') {
+            this.arena.registerSurfaceImpact(
+              surfaceHit.point,
+              surfaceHit.normal,
+              projectile.weapon === 'rocket' ? 92 : projectile.weapon === 'disc' ? 58 : 42,
+              this.elapsed,
+            );
+          }
+          if (projectile.weapon === 'disc') {
+            // BSP triangle winding can expose either side of a thin surface.
+            // Always orient the contact normal against the incoming disc, then
+            // separate along both that normal and the reflected travel vector.
+            // The latter prevents a very fast disc from immediately re-hitting
+            // the same coplanar face and consuming its bounce budget in one tick.
+            const impactNormal = surfaceHit.normal.clone();
+            if (projectile.velocity.dot(impactNormal) > 0) impactNormal.negate();
+            this.discBounceCount += 1;
+            this.lastDiscBouncePosition.copy(surfaceHit.point);
+            projectile.bounces += 1;
+            // Saw Sling ricochets use physical motion and positional audio as
+            // feedback; additive ring/spark VFX were removed for clarity and
+            // to keep multi-bounce volleys cheap.
+            this.audio.projectileImpact('disc', surfaceHit.point, this.rng() - 0.5);
+            this.audio.surfaceImpact(surfaceHit.surface, surfaceHit.point, 0.72);
+            if (projectile.bounces >= projectile.maxBounces || projectile.velocity.lengthSq() < 18 * 18) {
               remove = true;
               break;
             }
+            projectile.velocity.reflect(impactNormal).multiplyScalar(projectile.restitution);
+            projectile.root.position
+              .addScaledVector(impactNormal, 0.08)
+              .addScaledVector(projectile.velocity.clone().normalize(), 0.035);
+            projectile.angularVelocity *= -1;
+            continue;
           }
-        } else {
-          if (this.mode === 'running' && projectile.root.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0))) < 0.9) {
-            this.damagePlayer(projectile.damage, projectile.owner, this.weapon(projectile.weapon).name);
-              if (projectile.splash > 0) this.explodeProjectile(projectile, undefined, true);
-            else if (projectile.weapon === 'plasma') {
-              this.weaponVfx.impact(projectile.root.position, this.weapon('plasma').color, 'plasma');
-              this.audio.projectileImpact('plasma', projectile.root.position, this.rng() - 0.5);
-            }
-            remove = true;
+          this.explodeProjectile(projectile, undefined, false, true, surfaceHit.normal, surfaceHit.surface);
+          remove = true;
+          break;
+        }
+        for (const bot of this.bots) {
+          if (!bot.alive || (projectile.owner === bot.id && (projectile.weapon !== 'disc' || projectile.ownerSafeTime > 0))) continue;
+          const botCenter = bot.group.position.clone().add(new THREE.Vector3(0, 0.9, 0));
+          if (projectile.root.position.distanceTo(botCenter) >= 0.88) continue;
+          this.applyDamageToBot(bot, projectile.damage, projectile.owner, this.weapon(projectile.weapon).name);
+          if (projectile.weapon === 'rocket') {
+            const impulse = projectile.velocity.clone().normalize().multiplyScalar(6.8);
+            bot.velocity.add(impulse);
+            bot.velocity.y = Math.max(bot.velocity.y, 4.1);
           }
+          if (projectile.splash > 0 || projectile.weapon === 'disc') this.explodeProjectile(projectile, bot);
+          else if (projectile.weapon === 'plasma') {
+            this.weaponVfx.impact(projectile.root.position, this.weapon('plasma').color, 'plasma');
+            this.audio.projectileImpact('plasma', projectile.root.position, this.rng() - 0.5);
+          }
+          remove = true;
+          break;
+        }
+        if (!remove && (projectile.owner !== 'player' || (projectile.weapon === 'disc' && projectile.ownerSafeTime <= 0)) && this.mode === 'running'
+          && projectile.root.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0))) < 0.9) {
+          const impactSource = projectile.root.position.clone().addScaledVector(projectile.velocity.clone().normalize(), -1.5);
+          this.damagePlayer(
+            projectile.damage * (projectile.owner === 'player' ? 0.42 : 1),
+            projectile.owner,
+            this.weapon(projectile.weapon).name,
+            impactSource,
+          );
+          if (projectile.weapon === 'rocket') {
+            this.playerVelocity.addScaledVector(projectile.velocity.clone().normalize(), 6.4);
+            this.playerVelocity.y = Math.max(this.playerVelocity.y, 4.2);
+            this.grounded = false;
+          }
+          if (projectile.splash > 0 || projectile.weapon === 'disc') this.explodeProjectile(projectile, undefined, true);
+          else if (projectile.weapon === 'plasma') {
+            this.weaponVfx.impact(projectile.root.position, this.weapon('plasma').color, 'plasma');
+            this.audio.projectileImpact('plasma', projectile.root.position, this.rng() - 0.5);
+          }
+          remove = true;
         }
       }
       if (!remove) {
-        const trailSpacing = projectile.weapon === 'rocket' ? 0.32 : 0.24;
-        if (projectile.trailDistance >= trailSpacing) {
+        const trailSpacing = projectile.weapon === 'rocket' ? 0.32 : projectile.weapon === 'disc' ? 0.5 : 0.24;
+        if (projectile.weapon !== 'disc' && projectile.trailDistance >= trailSpacing) {
           projectile.trailDistance %= trailSpacing;
-          this.weaponVfx.projectileTrail(
-            projectile.root.position,
-            projectile.weapon === 'rocket' ? 'rocket' : 'plasma',
-            this.weapon(projectile.weapon).color,
-          );
+            this.weaponVfx.projectileTrail(
+              projectile.root.position,
+              projectile.weapon === 'rocket' ? 'rocket' : 'plasma',
+              this.weapon(projectile.weapon).color,
+            );
         }
         this.weaponVfx.orientProjectile(projectile.root, projectile.velocity, this.elapsed, projectile.weapon);
+        if (projectile.weapon === 'disc') {
+          const rotor = (projectile.root.userData.vfxParts as { rotor?: THREE.Object3D } | undefined)?.rotor
+            ?? projectile.root.getObjectByName('disc-projectile-rotor');
+          if (rotor) rotor.rotation.z += projectile.angularVelocity * delta;
+        }
       }
       if (remove) this.removeProjectile(index);
     }
@@ -1194,6 +2106,7 @@ export class Game {
     directlyHitPlayer = false,
     worldImpact = false,
     surfaceNormal?: THREE.Vector3,
+    surface?: 'grass' | 'soil' | 'rock' | 'metal' | 'concrete' | 'water',
   ): void {
     const position = projectile.root.position.clone();
     const color = this.weapon(projectile.weapon).color;
@@ -1201,12 +2114,15 @@ export class Game {
     else this.weaponVfx.impact(position, color, projectile.weapon, surfaceNormal);
     if (worldImpact) this.weaponVfx.mark(position, surfaceNormal ?? new THREE.Vector3(0, 1, 0), projectile.weapon, color);
     this.spawnBurst(position, color, projectile.weapon === 'rocket' ? 24 : 7);
-    if (projectile.weapon === 'rocket' || projectile.weapon === 'plasma') {
+    if (projectile.weapon === 'rocket' || projectile.weapon === 'plasma' || projectile.weapon === 'disc') {
       this.audio.projectileImpact(projectile.weapon, position, this.rng() - 0.5);
+      if (worldImpact && surface) {
+        this.audio.surfaceImpact(surface, position, projectile.weapon === 'rocket' ? 1.2 : 0.8);
+      }
     }
     if (projectile.splash <= 0) return;
     for (const bot of this.bots) {
-      if (!bot.alive || bot === directlyHit) continue;
+      if (!bot.alive || bot === directlyHit || projectile.owner === bot.id) continue;
       const target = bot.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
       const distance = target.distanceTo(position);
       if (distance < projectile.splash && this.explosionHasLineOfSight(position, target)) {
@@ -1228,7 +2144,13 @@ export class Game {
         const selfScale = projectile.owner === 'player' ? 0.55 : 0.78;
         const falloff = 1 - playerDistance / projectile.splash;
         const damage = projectile.damage * selfScale * (falloff * 0.3 + falloff * falloff * 0.7);
-        if (damage > 1) this.damagePlayer(damage, projectile.owner, `${this.weapon(projectile.weapon).name.toUpperCase()} SPLASH`);
+        if (damage > 1) this.damagePlayer(damage, projectile.owner, `${this.weapon(projectile.weapon).name.toUpperCase()} SPLASH`, position);
+        if (projectile.owner !== 'player' && projectile.weapon === 'rocket') {
+          const impulse = playerCenter.clone().sub(position).normalize().multiplyScalar(falloff * 7.8);
+          this.playerVelocity.add(impulse);
+          this.playerVelocity.y = Math.max(this.playerVelocity.y, impulse.y + 3.2);
+          this.grounded = false;
+        }
       }
       if (selfRocketJump) {
         this.applyRocketJump(position, playerDistance);
@@ -1278,32 +2200,80 @@ export class Game {
   }
 
   private applyDamageToBot(bot: Bot, damage: number, owner: Owner, weaponName: string): void {
+    const coreDenial = this.coreActive && this.coreOwner === bot.id && this.coreProgress >= 0.25;
+    const eliminationDistance = this.playerPosition.distanceTo(bot.group.position);
+    const eliminationSpeed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
     const killed = bot.takeDamage(damage);
-    this.hud.hitMarker(killed);
-    this.audio.hit(killed ? 1.4 : 0.8);
+    if (owner === 'player') {
+      this.playerHits += 1;
+      this.hud.hitMarker(killed);
+      this.audio.hit(killed ? 1.4 : 0.8);
+    }
     this.spawnBurst(bot.group.position.clone().add(new THREE.Vector3(0, 1.2, 0)), killed ? 0xffffff : 0xff4f75, killed ? 11 : 4);
+    if (!killed) {
+      this.audio.grunt(bot.group.position, Math.min(1.35, damage / 34), `bot-${bot.id}`);
+    }
     if (!killed) return;
     if (owner === 'player') {
       this.score += 1;
       if (!this.grounded) this.airborneKills += 1;
-      this.hud.message(`YOU FRAGGED VECTOR-${bot.id + 1} · ${weaponName.toUpperCase()}`);
+      this.awardEliminationStyle({
+        airborne: !this.grounded || !bot.grounded,
+        coreDenial,
+        distance: eliminationDistance,
+        grappled: this.grappleActive,
+        speed: eliminationSpeed,
+      });
+      this.hud.message(`YOU FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`);
     } else {
       const shooter = this.bots[owner];
-      if (shooter) shooter.score += 1;
+      if (shooter) {
+        shooter.score += 1;
+        this.hud.message(`${shooter.displayName} FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`);
+      }
     }
     this.fovPunch = Math.max(this.fovPunch, 4);
     this.trauma = Math.min(1, this.trauma + 0.3);
   }
 
-  private damagePlayer(amount: number, owner: Owner, cause: string): void {
+  private awardEliminationStyle(context: {
+    airborne: boolean;
+    coreDenial: boolean;
+    distance: number;
+    grappled: boolean;
+    speed: number;
+  }): void {
+    let event: StyleEvent | null = null;
+    if (context.coreDenial) event = { type: 'core-denial' };
+    else if (context.grappled) event = { type: 'grapple-elimination' };
+    else if (context.airborne) event = { type: 'air-frag' };
+    else if (context.speed >= 24) event = { type: 'high-speed-elimination', speedMetersPerSecond: context.speed };
+    else if (context.distance >= 35) event = { type: 'long-range-elimination', distanceMeters: context.distance };
+
+    const results = event ? [this.styleSystem.register(event)] : [];
+    this.recentPlayerKills.push(this.elapsed);
+    while (this.recentPlayerKills.length > 0 && this.elapsed - this.recentPlayerKills[0] > 5) {
+      this.recentPlayerKills.shift();
+    }
+    if (this.recentPlayerKills.length >= 2) {
+      results.push(this.styleSystem.register({ type: 'multikill', killCount: this.recentPlayerKills.length }));
+    }
+    const awarded = results.filter((result) => result.accepted).at(-1);
+    if (awarded?.medal) {
+      this.hud.message(`${awarded.medal.label} · +${Math.round(awarded.styleGain)} STYLE`);
+    }
+  }
+
+  private damagePlayer(amount: number, owner: Owner, cause: string, hitOrigin?: THREE.Vector3): void {
     if (this.mode !== 'running') return;
     const armored = this.armor > 0;
     const absorbed = Math.min(this.armor, amount * 0.66);
     this.armor -= absorbed;
     this.health -= amount - absorbed;
-    this.lastDamageDirection = owner === 'player' ? 'SELF' : `VECTOR-${owner + 1}`;
+    this.lastDamageDirection = this.resolveDamageDirection(owner, hitOrigin);
     this.hud.damage(this.lastDamageDirection);
     this.audio.damage(armored);
+    this.audio.grunt(undefined, Math.min(1.35, amount / 42), 'player');
     this.trauma = Math.min(1, this.trauma + Math.min(0.55, amount * 0.009));
     if (this.health <= 0) {
       this.health = 0;
@@ -1314,8 +2284,23 @@ export class Game {
       if (owner === 'player') this.score = Math.max(-5, this.score - 1);
       else this.bots[owner].score += 1;
       this.audio.death();
-      this.hud.message(owner === 'player' ? `SELF-DESTRUCT · ${cause}` : `VECTOR-${owner + 1} FRAGGED YOU · ${cause}`);
+      this.hud.message(owner === 'player' ? `SELF-DESTRUCT · ${cause}` : `${this.bots[owner].displayName} FRAGGED YOU · ${cause}`);
     }
+  }
+
+  private resolveDamageDirection(owner: Owner, hitOrigin?: THREE.Vector3): string {
+    if (owner === 'player') return 'self';
+    const source = hitOrigin ?? this.bots[owner]?.group.position;
+    if (!source) return 'front';
+    const incoming = source.clone().sub(this.playerPosition).setY(0);
+    if (incoming.lengthSq() < 0.001) return 'front';
+    incoming.normalize();
+    const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const forwardDot = incoming.dot(forward);
+    const rightDot = incoming.dot(right);
+    if (Math.abs(rightDot) > Math.abs(forwardDot)) return rightDot > 0 ? 'right' : 'left';
+    return forwardDot > 0 ? 'front' : 'back';
   }
 
   private updatePickups(delta: number): void {
@@ -1328,8 +2313,12 @@ export class Game {
         }
         continue;
       }
-      if (pickup.group.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.8, 0))) > 1.75) continue;
-      this.collectPickup(pickup);
+      if (pickup.group.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.8, 0))) <= 1.75) {
+        this.collectPickup(pickup);
+        continue;
+      }
+      const bot = this.bots.find((candidate) => candidate.alive && candidate.group.position.distanceTo(pickup.group.position) <= 1.55);
+      if (bot) this.collectBotPickup(pickup, bot);
     }
   }
 
@@ -1349,14 +2338,10 @@ export class Game {
         break;
       case 'rail':
         this.ammo.set('rail', 3);
-        this.selectedWeapon = 6;
-        this.buildWeaponModel();
         break;
       default: {
         const definition = this.weapon(pickup.kind);
         this.ammo.set(pickup.kind, Math.min(definition.ammo, (this.ammo.get(pickup.kind) ?? 0) + Math.ceil(definition.ammo * 0.45)));
-        this.selectedWeapon = WEAPONS.findIndex((weapon) => weapon.id === pickup.kind);
-        this.buildWeaponModel();
       }
     }
     pickup.active = false;
@@ -1369,6 +2354,7 @@ export class Game {
       || pickup.kind === 'shotgun'
       || pickup.kind === 'sniper'
       || pickup.kind === 'laser'
+      || pickup.kind === 'disc'
     ) {
       this.audio.ammoPickup(pickup.kind, this.rng() - 0.5);
     } else {
@@ -1379,21 +2365,57 @@ export class Game {
     this.trauma = Math.min(1, this.trauma + 0.12);
   }
 
+  private collectBotPickup(pickup: PickupState, bot: Bot): void {
+    bot.collectPickup(pickup.kind);
+    pickup.active = false;
+    pickup.group.visible = false;
+    pickup.cooldown = pickup.respawn;
+    this.audio.pickup(pickup.kind === 'rail' || pickup.kind === 'rocket' || pickup.kind === 'plasma'
+      || pickup.kind === 'shotgun' || pickup.kind === 'sniper' || pickup.kind === 'laser' || pickup.kind === 'disc' ? 'core' : pickup.kind);
+    this.hud.message(`${bot.displayName} TOOK ${pickup.kind.toUpperCase()}`);
+    this.spawnBurst(pickup.group.position, this.weaponColorForPickup(pickup.kind), 7);
+  }
+
   private updateCore(delta: number): void {
+    const wasActive = this.coreActive;
+    this.coreDirector.update(delta);
+    const directorState = this.coreDirector.snapshot();
+    const targetAnchor = directorState.active ? directorState.currentAnchor : directorState.nextAnchor;
+    if (targetAnchor) this.positionCoreAt(targetAnchor);
+    this.coreActive = directorState.active;
+    this.coreCooldown = directorState.active ? 0 : directorState.secondsRemaining;
+
     if (!this.coreActive) {
-      this.coreCooldown -= delta;
-      if (this.coreCooldown <= 0) {
-        this.coreActive = true;
-        this.coreGroup.visible = true;
-        this.hud.message('FLUX CORE ACTIVE');
-      }
+      this.coreProgress = 0;
+      this.coreOwner = null;
+      this.coreContested = false;
+      const telegraphing = directorState.phase === 'telegraph';
+      this.coreGroup.visible = telegraphing;
+      this.coreGroup.scale.setScalar(telegraphing ? 0.68 : 1);
+      this.coreLight.visible = telegraphing;
+      this.coreLight.intensity = telegraphing ? 2.2 : 6;
       return;
     }
-    const playerInside = this.playerPosition.distanceTo(this.arena.corePosition) <= POWERUP.coreRadius;
-    const insideBots = this.bots.filter((bot) => bot.alive && bot.group.position.distanceTo(this.arena.corePosition) <= POWERUP.coreRadius);
+
+    this.coreGroup.visible = true;
+    this.coreGroup.scale.setScalar(1);
+    this.coreLight.visible = true;
+    this.coreLight.intensity = 6;
+    if (!wasActive) this.hud.message(`FLUX CORE ACTIVE · ${this.currentCoreAnchorName}`);
+
+    const coreRadiusSq = POWERUP.coreRadius * POWERUP.coreRadius;
+    const playerInside = this.playerPosition.distanceToSquared(this.arena.corePosition) <= coreRadiusSq;
+    let insideBotCount = 0;
+    let soleBotOwner: number | null = null;
+    for (const bot of this.bots) {
+      if (!bot.alive || bot.group.position.distanceToSquared(this.arena.corePosition) > coreRadiusSq) continue;
+      insideBotCount += 1;
+      soleBotOwner = bot.id;
+    }
     let owner: Owner | null = null;
-    if (playerInside && insideBots.length === 0) owner = 'player';
-    if (!playerInside && insideBots.length === 1) owner = insideBots[0].id;
+    if (playerInside && insideBotCount === 0) owner = 'player';
+    if (!playerInside && insideBotCount === 1) owner = soleBotOwner;
+    this.coreContested = (playerInside && insideBotCount > 0) || insideBotCount > 1;
     if (owner === null) {
       this.coreProgress = Math.max(0, this.coreProgress - delta * 0.65);
       this.coreOwner = null;
@@ -1405,19 +2427,31 @@ export class Game {
     if (this.coreProgress < 1) return;
     if (owner === 'player') {
       this.score += 3;
-      this.hud.message('FLUX CORE CAPTURED · +3');
+      this.coreCaptures += 1;
+      this.hud.message(`FLUX CORE CAPTURED · ${this.currentCoreAnchorName} · +3`);
     } else {
       this.bots[owner].score += 3;
-      this.hud.message(`VECTOR-${owner + 1} CAPTURED THE CORE`);
+      this.hud.message(`${this.bots[owner].displayName} CAPTURED ${this.currentCoreAnchorName}`);
     }
     this.audio.pickup('core');
     this.hud.pulseObjective();
     this.spawnBurst(this.coreGroup.position, 0x43e8ff, 18);
-    this.coreActive = false;
+    this.coreDirector.captured(owner);
+    const cooldownState = this.coreDirector.snapshot();
+    this.coreActive = cooldownState.active;
     this.coreGroup.visible = false;
-    this.coreCooldown = POWERUP.coreRespawn;
+    this.coreLight.visible = false;
+    this.coreCooldown = cooldownState.secondsRemaining;
     this.coreProgress = 0;
     this.coreOwner = null;
+    this.coreContested = false;
+  }
+
+  private positionCoreAt(anchor: CoreAnchor): void {
+    this.currentCoreAnchorName = anchor.name;
+    this.arena.corePosition.copy(anchor.position);
+    this.coreGroup.position.set(anchor.position.x, anchor.position.y + 2.4, anchor.position.z);
+    this.coreLight.position.set(anchor.position.x, anchor.position.y + 6, anchor.position.z);
   }
 
   private updatePickupVisuals(delta: number, elapsed: number): void {
@@ -1454,9 +2488,41 @@ export class Game {
     this.weaponVfx.update(delta);
   }
 
+  private applyWeaponViewPose(
+    aimPointLocal: THREE.Vector3,
+    walkSwayX: number,
+    walkSwayY: number,
+    jumpLag: number,
+    strafeRoll: number,
+    downwardAim: number,
+    bob: number,
+  ): void {
+    // At full obstruction the parent crosses behind the camera while the
+    // visible nose folds out of the lower viewport. This range is large enough
+    // to clear the longest launcher, rather than merely nudging its receiver.
+    this.weaponModel.position.set(
+      0.3 + this.weaponTurnSway.x + walkSwayX,
+      -0.54 - this.recoil * 0.08 - this.weaponTuck * 0.52 - this.scopeBlend * 1.25
+        + this.weaponTurnSway.y + walkSwayY + jumpLag + bob,
+      -0.5 + this.recoil * 0.1 + this.weaponTuck * WEAPON_VIEW_RETRACT_DISTANCE,
+    );
+    const boreDirection = this.weaponBoreScratch.copy(aimPointLocal).sub(this.weaponModel.position).normalize();
+    const boreYaw = Math.atan2(-boreDirection.x, -boreDirection.z);
+    const borePitch = Math.asin(THREE.MathUtils.clamp(boreDirection.y, -1, 1));
+    // A wall lets the nose fold down slightly. Looking into terrain reverses
+    // that fold so the barrel retreats upward and back instead of being driven
+    // through the floor by the camera pitch.
+    const obstructionPitch = THREE.MathUtils.lerp(-0.18, 0.2, downwardAim);
+    this.weaponModel.rotation.x = borePitch + this.recoil * 0.15
+      + this.weaponTuck * obstructionPitch - jumpLag * 0.45;
+    this.weaponModel.rotation.y = boreYaw - this.weaponTurnSway.x * 0.72 - walkSwayX * 0.36;
+    this.weaponModel.rotation.z = strafeRoll - this.weaponTurnSway.x * 0.18;
+  }
+
   private updateCamera(delta: number): void {
-    const direction = this.viewDirection();
-    const eye = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0));
+    const direction = this.viewDirection(this.cameraDirectionScratch);
+    const eye = this.cameraEyeScratch.copy(this.playerPosition);
+    eye.y += PLAYER_EYE;
     this.camera.position.copy(eye);
     this.camera.rotation.order = 'YXZ';
     this.camera.rotation.y = this.yaw;
@@ -1474,9 +2540,18 @@ export class Game {
     }
 
     const speed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
-    const baseFov = this.input.isZoomHeld() && ['sniper', 'rail'].includes(WEAPONS[this.selectedWeapon].id) ? 42 : 84;
+    const scopeRequested = this.sniperScopeRequested();
+    const scopeDelta = Math.max(delta, MOVEMENT.fixedStep);
+    this.scopeBlend = THREE.MathUtils.lerp(
+      this.scopeBlend,
+      scopeRequested ? 1 : 0,
+      1 - Math.exp(-scopeDelta * (scopeRequested ? 14 : 18)),
+    );
+    if (this.scopeBlend < 0.001) this.scopeBlend = 0;
+    const unscopedFov = Math.min(104, this.pausedForScreenshot ? this.screenshotCameraFov : 84 + speed * 0.31 + this.fovPunch);
+    const baseFov = THREE.MathUtils.lerp(unscopedFov, 24, this.scopeBlend);
     this.fovPunch *= Math.exp(-delta / 0.2);
-    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, Math.min(104, baseFov + speed * 0.31 + this.fovPunch), 1 - Math.exp(-delta * 12));
+    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, baseFov, 1 - Math.exp(-scopeDelta * 12));
     this.camera.updateProjectionMatrix();
     this.recoil *= Math.exp(-delta * 11);
     const motionDelta = Math.max(delta, MOVEMENT.fixedStep);
@@ -1490,34 +2565,72 @@ export class Game {
     const walkSwayY = -Math.abs(Math.cos(this.weaponBobPhase)) * 0.014 * walkWeight;
     const jumpLag = THREE.MathUtils.clamp(-this.playerVelocity.y * 0.0065, -0.072, 0.072);
     const strafeRoll = THREE.MathUtils.clamp(-this.moveInput.x * speed * 0.00125, -0.028, 0.028);
-    const wallProbeEnd = eye.clone().addScaledVector(direction, 2.15);
-    const wallHit = this.arena.segmentHit(eye, wallProbeEnd);
-    const wallDistance = wallHit?.distanceTo(eye) ?? 2.15;
-    const tuckTarget = 1 - THREE.MathUtils.smoothstep(wallDistance, 0.42, 1.72);
-    this.weaponTuck = THREE.MathUtils.lerp(this.weaponTuck, tuckTarget, 1 - Math.exp(-motionDelta * 18));
-    this.weaponModel.position.set(
-      0.2 + this.weaponTurnSway.x + walkSwayX,
-      -0.59 - this.recoil * 0.08 - this.weaponTuck * 0.42 + this.weaponTurnSway.y + walkSwayY + jumpLag,
-      -0.47 + this.recoil * 0.1 + this.weaponTuck * 0.24,
-    );
-    const aimPointWorld = this.arena.segmentHit(eye, eye.clone().addScaledVector(direction, 190))
-      ?? eye.clone().addScaledVector(direction, 190);
     this.camera.updateMatrixWorld(true);
-    const aimPointLocal = this.camera.worldToLocal(aimPointWorld.clone());
-    const boreDirection = aimPointLocal.sub(this.weaponModel.position).normalize();
-    const boreYaw = Math.atan2(-boreDirection.x, -boreDirection.z);
-    const borePitch = Math.asin(THREE.MathUtils.clamp(boreDirection.y, -1, 1));
-    this.weaponModel.rotation.x = borePitch + this.recoil * 0.15 - this.weaponTuck * 0.52 - jumpLag * 0.45;
-    this.weaponModel.rotation.y = boreYaw - this.weaponTurnSway.x * 0.72 - walkSwayX * 0.36;
-    this.weaponModel.rotation.z = strafeRoll - this.weaponTurnSway.x * 0.18;
-    if (!this.reducedMotion) {
-      const bob = Math.sin(this.elapsed * Math.min(18, 5 + speed)) * Math.min(0.025, speed * 0.0008);
-      this.weaponModel.position.y += bob;
+    const probeOrigin = this.camera.position;
+    const probeLength = WEAPON_OBSTRUCTION_PROBE_LENGTH;
+    const wallProbeEnd = this.cameraProbeScratch.copy(probeOrigin).addScaledVector(direction, probeLength);
+    const centerObstruction = this.arena.segmentHitDetails(probeOrigin, wallProbeEnd);
+    // The FPS weapon sits low/right, so a center ray alone misses wall edges
+    // and sloped terrain already intersecting the visible barrel envelope.
+    this.cameraRightScratch.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    this.cameraDownScratch.set(0, -1, 0).applyQuaternion(this.camera.quaternion);
+    const weaponProbeEnd = this.weaponProbeScratch.copy(wallProbeEnd)
+      .addScaledVector(this.cameraRightScratch, 0.38)
+      .addScaledVector(this.cameraDownScratch, 0.3);
+    const weaponObstruction = this.arena.segmentHitDetails(probeOrigin, weaponProbeEnd);
+    this.weaponObstructionDistance = Math.min(
+      centerObstruction?.distance ?? probeLength,
+      weaponObstruction?.distance ?? probeLength,
+    );
+    const downwardAim = THREE.MathUtils.smoothstep(-direction.y, 0.34, 0.94);
+    const safeReach = WEAPON_VIEW_SAFE_REACH[WEAPONS[this.selectedWeapon].id];
+    const tuckTarget = THREE.MathUtils.clamp(
+      (safeReach + WEAPON_VIEW_CLEARANCE - this.weaponObstructionDistance) / WEAPON_VIEW_RETRACT_DISTANCE,
+      0,
+      1,
+    );
+    // Contact entry is immediate so a sprint cannot produce a one-frame clip;
+    // release is eased to avoid the weapon snapping back into its idle pose.
+    this.weaponTuck = tuckTarget >= this.weaponTuck
+      ? tuckTarget
+      : THREE.MathUtils.lerp(this.weaponTuck, tuckTarget, 1 - Math.exp(-motionDelta * 14));
+    const aimRayEnd = this.cameraAimScratch.copy(eye).addScaledVector(direction, 190);
+    const aimPointWorld = this.arena.segmentHit(eye, aimRayEnd) ?? aimRayEnd;
+    this.scopeRange = eye.distanceTo(aimPointWorld);
+    this.hud.setSniperScope(this.scopeBlend, this.scopeRange, 84 / Math.max(24, this.camera.fov));
+    this.camera.updateMatrixWorld(true);
+    const aimPointLocal = this.camera.worldToLocal(this.cameraLocalAimScratch.copy(aimPointWorld));
+    const bob = this.reducedMotion
+      ? 0
+      : Math.sin(this.elapsed * Math.min(18, 5 + speed)) * Math.min(0.025, speed * 0.0008);
+    this.applyWeaponViewPose(aimPointLocal, walkSwayX, walkSwayY, jumpLag, strafeRoll, downwardAim, bob);
+
+    // Verify the authored muzzle against real map geometry. This is diagnostic
+    // only: feeding it back into weaponTuck caused the old full-tuck latch,
+    // where a partially restored barrel could keep re-hiding itself forever.
+    this.weaponModel.updateWorldMatrix(true, true);
+    this.muzzleSocket.getWorldPosition(this.weaponMuzzleScratch);
+    this.weaponMuzzleDistance = probeOrigin.distanceTo(this.weaponMuzzleScratch);
+    this.weaponMuzzleForwardDistance = (
+      (this.weaponMuzzleScratch.x - probeOrigin.x) * direction.x
+      + (this.weaponMuzzleScratch.y - probeOrigin.y) * direction.y
+      + (this.weaponMuzzleScratch.z - probeOrigin.z) * direction.z
+    );
+    const muzzleObstruction = this.arena.segmentHitDetails(probeOrigin, this.weaponMuzzleScratch);
+    this.weaponMuzzleOccluded = Boolean(
+      this.weaponMuzzleForwardDistance > this.camera.near + 0.03
+      && muzzleObstruction
+      && muzzleObstruction.distance < this.weaponMuzzleDistance - 0.055,
+    );
+    if (this.weaponInspectionMode) {
+      this.weaponModel.position.set(0, 0, -3.15);
+      this.weaponModel.rotation.set(0, Math.PI * 0.5, 0);
+      this.weaponModel.scale.setScalar(1);
     }
     if (this.weaponVisual) updateWeaponViewModel(this.weaponVisual, this.elapsed, this.recoil, this.laserHeat, this.reducedMotion);
     this.forward.copy(direction);
     const grappleOrigin = this.grappleActive
-      ? this.grappleSocket.getWorldPosition(new THREE.Vector3())
+      ? this.grappleSocket.getWorldPosition(this.grappleOriginScratch)
       : this.camera.position;
     this.weaponVfx.updateGrapple(grappleOrigin, this.grappleAnchor, this.grappleActive);
   }
@@ -1525,26 +2638,39 @@ export class Game {
   private updateHud(): void {
     const definition = WEAPONS[this.selectedWeapon];
     const botLead = Math.max(...this.bots.map((bot) => bot.score));
+    const coreDirectorState = this.coreDirector.snapshot();
+    const coreLocation = coreDirectorState.active
+      ? coreDirectorState.currentAnchor?.name ?? this.currentCoreAnchorName
+      : coreDirectorState.nextAnchor?.name ?? this.currentCoreAnchorName;
     const coreStatus = this.coreActive
-      ? this.coreOwner === null
+      ? this.coreContested
+        ? 'CORE CONTESTED'
+        : this.coreOwner === null
         ? 'CORE UNCONTESTED'
         : this.coreOwner === 'player'
           ? 'CAPTURING CORE'
-          : 'ENEMY CAPTURING'
-      : `CORE IN ${Math.max(0, Math.ceil(this.coreCooldown))}s`;
+          : `${this.bots[this.coreOwner]?.displayName ?? 'ENEMY'} CAPTURING`
+      : coreDirectorState.phase === 'telegraph'
+        ? `CORE LOCKING · ${Math.max(0, Math.ceil(this.coreCooldown))}s`
+        : `CORE RELOCATING · ${Math.max(0, Math.ceil(this.coreCooldown))}s`;
     const matchStatus = this.mode === 'complete'
-      ? this.score >= botLead ? 'MATCH WON' : 'MATCH LOST'
+      ? this.score > botLead ? 'MATCH WON' : this.score === botLead ? 'MATCH DRAWN' : 'MATCH LOST'
       : this.mode === 'ready'
         ? 'CLICK TO ENTER'
-        : this.mode === 'countdown' ? 'WEAPONS LOCKED' : `FIRST TO ${SCORE_LIMIT}`;
+        : this.mode === 'countdown' ? 'WEAPONS LOCKED' : this.overtime ? 'OVERTIME · NEXT SCORE' : `FIRST TO ${SCORE_LIMIT}`;
     const resolvedMatchStatus = this.mode === 'paused' ? 'MATCH PAUSED' : matchStatus;
     const powerups: string[] = [];
     if (this.damageBoost > 0) powerups.push(`DAMAGE ${Math.ceil(this.damageBoost)}s`);
     if (this.speedBoost > 0) powerups.push(`SPEED ${Math.ceil(this.speedBoost)}s`);
     if (definition.id === 'laser' && this.laserHeat > 0.65) powerups.push(`HEAT ${Math.round(this.laserHeat * 100)}%`);
     powerups.push(this.grappleActive ? 'GRAPPLE ANCHORED' : 'GRAPPLE READY');
+    powerups.push(this.dashCooldown > 0 ? `DASH ${this.dashCooldown.toFixed(1)}s` : 'DASH READY');
+    if (this.jetpackActive) powerups.push('JET THRUST');
     powerups.push(this.grenadeCooldown > 0 ? `FRAG ${this.grenadeAmmo} · ${this.grenadeCooldown.toFixed(1)}s` : `FRAG GRENADES ${this.grenadeAmmo}`);
     const rail = this.pickups.find((pickup) => pickup.kind === 'rail');
+    const style = this.styleSystem.snapshot();
+    const scores = [this.score, ...this.bots.map((bot) => bot.score)];
+    const leadingScore = Math.max(...scores);
     this.hud.update({
       health: this.health,
       armor: this.armor,
@@ -1553,6 +2679,7 @@ export class Game {
       botLead,
       timeRemaining: this.matchTime,
       weapon: definition.name,
+      secondary: definition.secondary.toUpperCase(),
       ammo: this.ammo.get(definition.id) ?? 0,
       coreProgress: this.coreProgress,
       coreStatus,
@@ -1560,6 +2687,31 @@ export class Game {
       fps: this.fps,
       powerups,
       railTimer: rail?.active ? 0 : rail?.cooldown ?? 0,
+      standings: [
+        { callsign: 'RIFT-01', score: this.score, isPlayer: true, isLeader: this.score === leadingScore },
+        ...this.bots.map((bot) => ({
+          callsign: bot.displayName,
+          score: bot.score,
+          isLeader: bot.score === leadingScore,
+        })),
+      ],
+      objective: {
+        location: coreLocation,
+        phase: this.coreActive ? this.coreContested ? 'CONTESTED' : 'CAPTURE' : coreDirectorState.phase.toUpperCase(),
+        contestState: coreStatus,
+        nextEventLabel: this.coreActive ? 'CAPTURE LIVE' : coreDirectorState.phase === 'telegraph' ? 'CORE ONLINE' : 'NEXT LOCK',
+        nextEventSeconds: this.coreActive ? 0 : this.coreCooldown,
+      },
+      style: style.meter > 0 || style.lastMedal
+        ? {
+          medal: style.lastMedal?.label ?? `FLOW ×${style.comboMultiplier.toFixed(2)}`,
+          meter: style.meter / 100,
+        }
+        : null,
+      weather: {
+        phase: String(this.weatherSnapshot.phase).toUpperCase(),
+        detail: this.weatherSnapshot.label,
+      },
     });
     this.hud.setRespawn(this.mode === 'respawning' ? this.respawnTimer : 0, this.respawnCause);
   }
@@ -1591,6 +2743,7 @@ export class Game {
     this.audio.setPaused(false);
     this.input.setPointerLockAllowed(true);
     this.input.requestGameplayPointerLock();
+    this.publishDiagnostics();
 
     // The four tiny voice clips are loaded ahead of the combat bank. READY
     // holds the arena lock until that priority load settles, so the first cue
@@ -1613,7 +2766,7 @@ export class Game {
       this.countdownArmed = false;
       this.mode = 'running';
       this.hud.hideCountdown();
-      this.hud.message('WEAPONS FREE');
+      this.hud.message('WEAPONS FREE · E DASH · G HOOK · HOLD SPACE FOR JET');
       return true;
     }
     const cueIndex = Math.min(
@@ -1652,11 +2805,23 @@ export class Game {
     this.cancelMatchCountdown();
     this.mode = 'complete';
     const botLead = Math.max(...this.bots.map((bot) => bot.score));
-    this.hud.message(this.score >= botLead ? 'RIFT DOMINATED' : 'MATCH LOST · RE-ENTER');
+    const won = this.score > botLead;
+    this.hud.message(won ? 'RIFT DOMINATED' : this.score === botLead ? 'MATCH DRAWN' : 'MATCH LOST · RE-ENTER');
     this.input.setPointerLockAllowed(false);
     this.audio.reset();
     this.audio.setPaused(true);
     this.hud.showStart('complete');
+    const accuracy = this.playerShots > 0 ? Math.min(100, Math.round(this.playerHits / this.playerShots * 100)) : 0;
+    const style = this.styleSystem.snapshot();
+    this.hud.showMatchReport(won ? 'RIFT DOMINATED' : this.score === botLead ? 'STALEMATE' : 'RIFT LOST', [
+      ['Score', `${this.score} / ${botLead}`],
+      ['Accuracy', `${accuracy}%`],
+      ['Deaths', String(this.deaths)],
+      ['Core captures', String(this.coreCaptures)],
+      ['Air frags', String(this.airborneKills)],
+      ['Style', `${Math.round(style.meter)} · ×${style.comboMultiplier.toFixed(2)}`],
+      ['Top speed', `${Math.round(this.maxPlayerSpeed * 3.6)} km/h`],
+    ]);
     this.startButton.textContent = 'RESTART MATCH';
   }
 
@@ -1666,17 +2831,48 @@ export class Game {
     this.deaths = 0;
     this.airborneKills = 0;
     this.rocketJumpCount = 0;
-    this.grenadeAmmo = GRENADE.maxAmmo;
+    this.grenadeAmmo = 3;
     this.grenadeCooldown = 0;
+    this.damageBoost = 0;
+    this.speedBoost = 0;
     this.detachGrapple();
     this.clearGrenades();
+    for (let index = this.projectiles.length - 1; index >= 0; index -= 1) this.removeProjectile(index);
     this.matchTime = MATCH_DURATION;
-    this.coreCooldown = POWERUP.coreActivation;
+    this.overtime = false;
+    this.overtimeBaselineScores = [];
+    this.playerShots = 0;
+    this.playerHits = 0;
+    this.discBounceCount = 0;
+    this.lastDiscBouncePosition.set(0, 0, 0);
+    this.coreCaptures = 0;
+    this.maxPlayerSpeed = 0;
+    this.coreDirector.reset();
+    const openingCore = this.coreDirector.snapshot();
+    if (openingCore.nextAnchor) this.positionCoreAt(openingCore.nextAnchor);
+    this.coreCooldown = openingCore.secondsRemaining;
     this.coreProgress = 0;
     this.coreActive = false;
+    this.coreContested = false;
     this.coreGroup.visible = false;
-    for (const bot of this.bots) bot.score = 0;
-    WEAPONS.forEach((weapon) => this.ammo.set(weapon.id, weapon.ammo));
+    this.coreGroup.scale.setScalar(1);
+    this.coreLight.visible = false;
+    this.styleSystem.reset();
+    this.recentPlayerKills.length = 0;
+    this.weatherSnapshot = this.weatherSystem.reset();
+    this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
+    if (this.scene.fog instanceof THREE.FogExp2) this.scene.fog.density = 0.00146;
+    for (const pickup of this.pickups) {
+      pickup.active = true;
+      pickup.cooldown = 0;
+      pickup.group.visible = true;
+    }
+    for (const bot of this.bots) {
+      bot.score = 0;
+      bot.respawn(this.selectSafeSpawn(bot.id));
+    }
+    this.resetPlayerLoadout();
+    this.hud.clearMatchReport();
     this.audio.reset();
     this.mode = 'ready';
     this.respawnPlayer(false);
@@ -1686,17 +2882,19 @@ export class Game {
   private respawnPlayer(showMessage: boolean): void {
     this.detachGrapple();
     this.clearGrenades();
-    const spawn = this.arena.spawnPoints[this.spawnIndex % this.arena.spawnPoints.length];
-    this.spawnIndex += 1;
+    const spawn = this.selectSafeSpawn();
     this.playerPosition.copy(spawn);
     this.playerVelocity.set(0, 0, 0);
+    this.jetpackActive = false;
     this.dashBuffer = 0;
     this.dashCooldown = 0;
     this.dashMomentumTimer = 0;
     this.wallContactTimer = 0;
+    this.ceilingContactTimer = 0;
     this.terrainNormal.set(0, 1, 0);
     this.health = 100;
     this.armor = 50;
+    this.grenadeAmmo = Math.max(this.grenadeAmmo, 3);
     this.mode = this.mode === 'ready' ? 'ready' : 'running';
     this.respawnTimer = 0;
     this.respawnCause = '';
@@ -1710,35 +2908,41 @@ export class Game {
   }
 
   private createScene(): void {
-    this.scene.background = new THREE.Color(0x070b15);
-    this.scene.fog = new THREE.FogExp2(0x070b15, 0.0085);
+    const quickSense = this.arena.mapInfo.name === 'QuickSense';
+    this.scene.background = this.arena.skyTexture ?? new THREE.Color(quickSense ? 0x9ab7c4 : 0x8fcddd);
+    this.scene.backgroundIntensity = quickSense ? 1.05 : 0.78;
+    this.scene.backgroundBlurriness = 0.035;
+    this.scene.fog = new THREE.FogExp2(quickSense ? 0x687e8a : 0x7293a0, quickSense ? 0.00088 : 0.00146);
     const environmentGenerator = new THREE.PMREMGenerator(this.renderer);
+    // Keep the 4K panorama as the authored background. A compact PMREM studio
+    // provides predictable PBR fill without prefiltering that large image on
+    // startup (which is especially costly on integrated and software GPUs).
     this.environmentTexture = environmentGenerator.fromScene(new RoomEnvironment(), 0.03).texture;
     this.scene.environment = this.environmentTexture;
+    this.scene.environmentIntensity = quickSense ? 0.94 : 0.72;
     environmentGenerator.dispose();
-    this.scene.add(this.createSky());
-    this.scene.add(new THREE.AmbientLight(0x52708d, 0.2));
-    const hemisphere = new THREE.HemisphereLight(0xbdefff, 0x120d24, 0.62);
+    if (!this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
+    this.scene.add(new THREE.AmbientLight(0x5d7888, quickSense ? 0.2 : 0.11));
+    const hemisphere = new THREE.HemisphereLight(0xb4d7e3, 0x263825, quickSense ? 0.98 : 0.76);
     this.scene.add(hemisphere);
-    const sun = new THREE.DirectionalLight(0xe7f8ff, 1.55);
-    sun.position.set(-30, 48, 20);
+    const sun = new THREE.DirectionalLight(0xffe2b7, quickSense ? 2.25 : 1.86);
+    sun.position.set(135, 190, 105);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.near = 1;
-    sun.shadow.camera.far = 130;
-    sun.shadow.camera.left = -62;
-    sun.shadow.camera.right = 62;
-    sun.shadow.camera.top = 62;
-    sun.shadow.camera.bottom = -62;
+    sun.shadow.camera.near = 20;
+    sun.shadow.camera.far = 520;
+    sun.shadow.camera.left = -210;
+    sun.shadow.camera.right = 210;
+    sun.shadow.camera.top = 210;
+    sun.shadow.camera.bottom = -210;
+    sun.shadow.bias = -0.00035;
+    sun.shadow.normalBias = 0.035;
     this.scene.add(sun);
-    const coreLight = new THREE.PointLight(0x3ee8ff, 8, 34, 2);
-    coreLight.position.copy(this.arena.corePosition).add(new THREE.Vector3(0, 6, 0));
-    this.scene.add(coreLight);
-    const magentaLight = new THREE.PointLight(0xff328c, 6, 26, 2);
-    magentaLight.position.copy(this.arena.itemPoints.rail).add(new THREE.Vector3(0, 5, 0));
-    this.scene.add(magentaLight);
-    const rim = new THREE.DirectionalLight(0xff4f9d, 0.42);
-    rim.position.set(36, 20, -42);
+    this.coreLight.position.copy(this.arena.corePosition).add(new THREE.Vector3(0, 6, 0));
+    this.coreLight.visible = false;
+    this.scene.add(this.coreLight);
+    const rim = new THREE.DirectionalLight(0x5d86ab, quickSense ? 0.82 : 0.56);
+    rim.position.set(-90, 70, -120);
     this.scene.add(rim);
     this.scene.add(this.arena.group);
   }
@@ -1746,13 +2950,14 @@ export class Game {
   private createPostProcessing(): EffectComposer {
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    composer.addPass(new UnrealBloomPass(new THREE.Vector2(1, 1), 0.24, 0.38, 1.18));
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(1, 1), this.mobileQuality ? 0.12 : 0.28, 0.34, 1.08));
     this.inkPass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
         resolution: { value: new THREE.Vector2(1, 1) },
-        edgeStrength: { value: 0.34 },
-        vignette: { value: 0.23 },
+        edgeStrength: { value: this.mobileQuality ? 0.08 : 0.115 },
+        vignette: { value: 0.16 },
+        speedBlur: { value: 0 },
       },
       vertexShader: `varying vec2 vUv;
         void main() {
@@ -1763,6 +2968,7 @@ export class Game {
         uniform vec2 resolution;
         uniform float edgeStrength;
         uniform float vignette;
+        uniform float speedBlur;
         varying vec2 vUv;
         float luma(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
         void main() {
@@ -1779,8 +2985,19 @@ export class Game {
           float gy = tl + 2.0 * tc + tr - bl - 2.0 * bc - br;
           float edge = smoothstep(0.09, 0.28, length(vec2(gx, gy)));
           vec3 color = texture2D(tDiffuse, vUv).rgb;
+          if (speedBlur > 0.001) {
+            vec2 centered = vUv - 0.5;
+            vec2 aspect = vec2(resolution.x / max(resolution.y, 1.0), 1.0);
+            float peripheral = smoothstep(0.38, 0.77, length(centered * aspect));
+            vec2 radialDirection = centered / max(length(centered), 0.001);
+            vec2 blurOffset = radialDirection * px * (2.0 + speedBlur * 9.0);
+            vec3 blurNear = texture2D(tDiffuse, clamp(vUv - blurOffset, 0.0, 1.0)).rgb;
+            vec3 blurFar = texture2D(tDiffuse, clamp(vUv - blurOffset * 2.15, 0.0, 1.0)).rgb;
+            vec3 speedColor = color * 0.54 + blurNear * 0.31 + blurFar * 0.15;
+            color = mix(color, speedColor, peripheral * speedBlur * 0.54);
+          }
           color *= 1.0 - edge * edgeStrength;
-          color = mix(vec3(luma(color)), color, 1.13);
+          color = mix(vec3(luma(color)), color, 1.065);
           float radial = smoothstep(0.92, 0.2, length(vUv - 0.5));
           color *= mix(1.0 - vignette, 1.0, radial);
           gl_FragColor = vec4(color, 1.0);
@@ -1794,7 +3011,7 @@ export class Game {
   private resizePostProcessing(): void {
     const width = Math.max(1, this.canvas.clientWidth);
     const height = Math.max(1, this.canvas.clientHeight);
-    const dpr = getRenderDpr(this.maxRenderDpr);
+    const dpr = getRenderDpr(this.renderDprCap);
     // Post-processing is fill-rate bound and does not benefit materially from
     // the extra 1.25x canvas samples. Keep the final canvas crisp while using
     // a 1x intermediate buffer for bloom, ink, and tone/output passes.
@@ -1804,16 +3021,17 @@ export class Game {
     this.inkPass.uniforms.resolution.value.set(width * postDpr, height * postDpr);
   }
 
-  private createSky(): THREE.Mesh {
+  private createSky(bright = false): THREE.Mesh {
     const uniforms = {
-      uTop: { value: new THREE.Color(0x10173e) },
-      uHorizon: { value: new THREE.Color(0x2a5875) },
-      uLower: { value: new THREE.Color(0x080813) },
-      uSunColor: { value: new THREE.Color(0xff8fbd) },
-      uSunDir: { value: new THREE.Vector3(-0.45, 0.2, 0.72).normalize() },
+      uTop: { value: new THREE.Color(bright ? 0x5f8292 : 0x152a43) },
+      uHorizon: { value: new THREE.Color(bright ? 0xc4dfe1 : 0x83a8b6) },
+      uLower: { value: new THREE.Color(bright ? 0x648c8e : 0x2d5567) },
+      uStorm: { value: new THREE.Color(bright ? 0x3a5566 : 0x101c31) },
+      uSunColor: { value: new THREE.Color(0xffd7a4) },
+      uSunDir: { value: new THREE.Vector3(0.62, 0.22, 0.55).normalize() },
     };
     const sky = new THREE.Mesh(
-      new THREE.SphereGeometry(190, 32, 18),
+      new THREE.SphereGeometry(850, 40, 22),
       new THREE.ShaderMaterial({
         side: THREE.BackSide,
         depthWrite: false,
@@ -1821,15 +3039,25 @@ export class Game {
         vertexShader: `varying vec3 vDir;
           void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
         fragmentShader: `varying vec3 vDir;
-          uniform vec3 uTop, uHorizon, uLower, uSunColor, uSunDir;
+          uniform vec3 uTop, uHorizon, uLower, uStorm, uSunColor, uSunDir;
+          float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+          float noise(vec2 p){
+            vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+            return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+          }
           void main(){
             float h = clamp(vDir.y * 0.5 + 0.5, 0.0, 1.0);
-            vec3 upper = mix(uHorizon, uTop, pow(h, 0.72));
+            vec3 upper = mix(uHorizon, uTop, pow(h, 0.68));
             vec3 col = mix(uLower, upper, smoothstep(0.08, 0.48, h));
+            float azimuth = atan(vDir.z, vDir.x);
+            float cloudNoise = noise(vec2(azimuth * 2.8, vDir.y * 7.0)) * 0.62
+              + noise(vec2(azimuth * 6.2 + 4.0, vDir.y * 13.0)) * 0.38;
+            float stormSide = smoothstep(-0.3, 0.68, -vDir.x - vDir.z * 0.38);
+            float clouds = smoothstep(0.42, 0.76, cloudNoise + stormSide * 0.28)
+              * smoothstep(0.28, 0.62, h);
+            col = mix(col, uStorm, clouds * 0.88);
             float d = clamp(dot(normalize(vDir), normalize(uSunDir)), 0.0, 1.0);
-            col += uSunColor * (pow(d, 720.0) + pow(d, 7.0) * 0.22);
-            float bands = smoothstep(0.48, 0.5, fract(atan(vDir.z, vDir.x) * 5.1));
-            col += vec3(0.05, 0.16, 0.22) * bands * smoothstep(0.2, 0.55, h) * (1.0 - smoothstep(0.55, 0.82, h));
+            col += uSunColor * (pow(d, 760.0) * 1.7 + pow(d, 10.0) * 0.32);
             gl_FragColor = vec4(col, 1.0);
           }`,
       }),
@@ -1841,14 +3069,14 @@ export class Game {
 
   private createBots(): void {
     for (let id = 0; id < 3; id += 1) {
-      const bot = new Bot(id, BOT_COLORS[id], this.arena.spawnPoints[id + 1], this.arena);
+      const bot = new Bot(id, BOT_COLORS[id], this.selectSafeSpawn(id), this.arena);
       this.bots.push(bot);
       this.scene.add(bot.group);
     }
   }
 
   private createPickups(): void {
-    const definitions: Array<[PickupKind, string, number]> = [
+    const definitions: Array<[PickupKind, string, number, offset?: readonly [number, number]]> = [
       ['health', 'health-a', 20],
       ['health', 'health-b', 20],
       ['armor', 'armor', 30],
@@ -1856,14 +3084,16 @@ export class Game {
       ['speed', 'speed', POWERUP.respawn],
       ['rail', 'rail', POWERUP.railRespawn],
       ['rocket', 'rocket', 25],
+      ['disc', 'rocket', 28, [3.2, -1.8]],
       ['plasma', 'plasma', 25],
       ['shotgun', 'shotgun', 25],
       ['sniper', 'sniper', 30],
       ['laser', 'laser', 25],
     ];
-    definitions.forEach(([kind, point, respawn], index) => {
+    definitions.forEach(([kind, point, respawn, offset], index) => {
       const group = this.createPickupModel(kind);
-      const authored = this.arena.itemPoints[point];
+      const authored = this.arena.itemPoints[point].clone();
+      if (offset) authored.add(new THREE.Vector3(offset[0], 0, offset[1]));
       const floor = this.arena.floorHeightAt(authored.x, authored.z, authored.y + 4) ?? authored.y - 0.9;
       group.position.set(authored.x, floor + 0.012, authored.z);
       group.userData.baseY = floor + 0.012;
@@ -1913,9 +3143,9 @@ export class Game {
     group.add(rotor);
 
     const isWeapon = kind === 'rail' || kind === 'rocket' || kind === 'plasma'
-      || kind === 'shotgun' || kind === 'sniper' || kind === 'laser';
+      || kind === 'shotgun' || kind === 'sniper' || kind === 'laser' || kind === 'disc';
     if (isWeapon) {
-      const visual = createWeaponViewModel(this.weapon(kind));
+      const visual = createWeaponViewModel(this.weapon(kind), false);
       visual.root.scale.multiplyScalar(kind === 'rail' || kind === 'sniper' ? 0.54 : 0.6);
       visual.root.rotation.set(-0.08, Math.PI * 0.5, kind === 'rocket' ? -0.08 : 0);
       visual.root.position.set(0, 0.49, 0);
@@ -2079,14 +3309,20 @@ export class Game {
 
   private buildWeaponModel(): void {
     this.weaponVfx.stopContinuousLaser();
+    this.audio.setLaserBeamActive(false);
     this.disposeObject(this.weaponModel);
     this.weaponModel.clear();
     const definition = WEAPONS[this.selectedWeapon];
-    this.weaponVisual = createWeaponViewModel(definition);
+    this.weaponVisual = createWeaponViewModel(definition, !this.weaponInspectionMode, !this.weaponInspectionMode);
+    if (this.weaponInspectionMode) {
+      const bounds = new THREE.Box3().setFromObject(this.weaponVisual.root);
+      const center = bounds.getCenter(new THREE.Vector3());
+      this.weaponVisual.root.position.sub(center);
+    }
     this.muzzleSocket = this.weaponVisual.muzzleSocket;
     this.weaponModel.add(this.weaponVisual.root);
     this.weaponModel.scale.setScalar(1);
-    this.weaponModel.position.set(0.16, -0.59, -0.47);
+    this.weaponModel.position.set(0.3, -0.54, -0.5);
     this.weaponModel.rotation.set(0, 0, 0);
   }
 
@@ -2119,17 +3355,34 @@ export class Game {
     const previousWeapon = this.selectedWeapon;
     if (request === 100 || request === -100) {
       const step = request > 0 ? 1 : -1;
-      this.selectedWeapon = (this.selectedWeapon + step + WEAPONS.length) % WEAPONS.length;
+      for (let offset = 1; offset <= WEAPONS.length; offset += 1) {
+        const candidate = (this.selectedWeapon + step * offset + WEAPONS.length * 2) % WEAPONS.length;
+        if ((this.ammo.get(WEAPONS[candidate].id) ?? 0) !== 0) {
+          this.selectedWeapon = candidate;
+          break;
+        }
+      }
     } else {
-      this.selectedWeapon = THREE.MathUtils.clamp(request, 0, WEAPONS.length - 1);
+      const candidate = THREE.MathUtils.clamp(request, 0, WEAPONS.length - 1);
+      if ((this.ammo.get(WEAPONS[candidate].id) ?? 0) === 0) {
+        this.hud.message(`${WEAPONS[candidate].shortName} AMMO REQUIRED`);
+        return;
+      }
+      this.selectedWeapon = candidate;
     }
     this.buildWeaponModel();
     if (this.selectedWeapon !== previousWeapon) this.audio.weaponSwitch(WEAPONS[this.selectedWeapon].id);
   }
 
-  private viewDirection(): THREE.Vector3 {
+  private sniperScopeRequested(): boolean {
+    return this.mode === 'running'
+      && WEAPONS[this.selectedWeapon].id === 'sniper'
+      && this.input.isZoomHeld();
+  }
+
+  private viewDirection(target = new THREE.Vector3()): THREE.Vector3 {
     const cosPitch = Math.cos(this.pitch);
-    return new THREE.Vector3(-Math.sin(this.yaw) * cosPitch, Math.sin(this.pitch), -Math.cos(this.yaw) * cosPitch).normalize();
+    return target.set(-Math.sin(this.yaw) * cosPitch, Math.sin(this.pitch), -Math.cos(this.yaw) * cosPitch).normalize();
   }
 
   private damageMultiplier(): number {
@@ -2140,6 +3393,16 @@ export class Game {
     const definition = WEAPONS.find((candidate) => candidate.id === id);
     if (!definition) throw new Error(`Missing weapon definition: ${id}`);
     return definition;
+  }
+
+  private resetPlayerLoadout(): void {
+    for (const weapon of WEAPONS) {
+      // Rail used zero as its pickup-only sentinel; the default all-guns
+      // loadout grants a compact three-shot reserve while every other weapon
+      // starts at its authored full ammo value.
+      this.ammo.set(weapon.id, weapon.id === 'rail' ? 3 : weapon.ammo);
+    }
+    this.selectedWeapon = 0;
   }
 
   private weaponColorForPickup(kind: PickupKind): number {
@@ -2162,12 +3425,15 @@ export class Game {
       },
       setState: (name: string) => {
         this.cancelMatchCountdown();
+        this.pausedForScreenshot = false;
+        this.screenshotArenaTime = 0;
+        this.screenshotCameraFov = 84;
+        this.weaponModel.visible = true;
         this.input.consumeJump();
         this.input.consumeDash();
         for (const bot of this.bots) bot.movementLocked = false;
         if (name.startsWith('view-')) {
           const spawnIndex = THREE.MathUtils.clamp(Number.parseInt(name.slice(5), 10) || 0, 0, this.arena.spawnPoints.length - 1);
-          const sourceAngles = [90, -180, 0, 0, 90, 0, -180, 0, -45, -90, -90, 90, -90, 90, -90];
           this.mode = 'running';
           this.audio.setPaused(false);
           this.hud.hideStart();
@@ -2177,8 +3443,9 @@ export class Game {
           this.coyote = 0;
           this.dashBuffer = 0;
           this.dashMomentumTimer = 0;
-          this.yaw = THREE.MathUtils.degToRad(sourceAngles[spawnIndex] - 90);
-          this.pitch = -0.04;
+          const toCore = this.arena.corePosition.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-toCore.x, -toCore.z);
+          this.pitch = THREE.MathUtils.clamp(Math.asin(toCore.y) - 0.025, -0.34, 0.18);
           // Test-view spawns are also live movement states. Resolve their
           // authored floor contact before input so stair-route checks exercise
           // ground acceleration rather than accidentally starting airborne.
@@ -2198,7 +3465,7 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(false);
           this.hud.hideStart();
-          this.playerPosition.copy(this.arena.spawnPoints[13]);
+          this.playerPosition.copy(this.arena.spawnPoints[Math.min(13, this.arena.spawnPoints.length - 1)]);
           const floor = this.arena.floorHeightAt(this.playerPosition.x, this.playerPosition.z, this.playerPosition.y + 3);
           if (floor !== null) this.playerPosition.y = floor;
           this.playerVelocity.set(0, 0, 0);
@@ -2206,9 +3473,8 @@ export class Game {
           this.coyote = 0;
           this.dashBuffer = 0;
           this.dashMomentumTimer = 0;
-          // Long southbound lane: leaves enough runway for multi-cycle bhop and
-          // air-carve telemetry without colliding with the room's north wall.
-          this.yaw = 0;
+          const toCore = this.arena.corePosition.clone().sub(this.playerPosition).setY(0).normalize();
+          this.yaw = Math.atan2(-toCore.x, -toCore.z);
           this.pitch = -0.04;
           const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = contact.grounded;
@@ -2217,13 +3483,18 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(false);
           this.hud.hideStart();
-          this.playerPosition.set(4, 3.5715, -17.2);
-          this.playerVelocity.set(14, 0, 0);
+          const floor = this.arena.floorHeightAt(-148, 76, Number.POSITIVE_INFINITY) ?? 0;
+          this.playerPosition.set(-148, floor, 76);
+          // Aim the deterministic descent at the low edge of the west launch.
+          // The old route target cut across its skirt instead of following the
+          // visible ramp line, which made a clean downhill run look snagged.
+          const downhill = new THREE.Vector3(-119, floor, 58).sub(this.playerPosition).setY(0).normalize();
+          this.playerVelocity.copy(downhill).multiplyScalar(14);
           this.jumpBuffer = 0;
           this.coyote = 0;
           this.dashBuffer = 0;
           this.dashMomentumTimer = 0;
-          this.yaw = -Math.PI / 2;
+          this.yaw = Math.atan2(-downhill.x, -downhill.z);
           this.pitch = -0.08;
           const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = contact.grounded;
@@ -2236,14 +3507,13 @@ export class Game {
           // tests. Spawn 7 sits above a brush seam that has no capsule contact,
           // which made deterministic active play begin airborne and produced
           // false input/softlock failures.
-          this.playerPosition.copy(this.arena.spawnPoints[13]);
+          this.playerPosition.copy(this.arena.spawnPoints[Math.min(13, this.arena.spawnPoints.length - 1)]);
           const floor = this.arena.floorHeightAt(this.playerPosition.x, this.playerPosition.z, this.playerPosition.y + 3);
           if (floor !== null) this.playerPosition.y = floor;
           this.playerVelocity.set(0, 0, 0);
-          // Face down the open lane so the active-play evidence includes the
-          // arena depth, bots, and authored set dressing instead of a wall.
-          this.yaw = 0;
-          this.pitch = -0.04;
+          const toCore = this.arena.corePosition.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-toCore.x, -toCore.z);
+          this.pitch = THREE.MathUtils.clamp(Math.asin(toCore.y) - 0.03, -0.28, 0.12);
           const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = contact.grounded;
           this.terrainNormal.copy(contact.contactNormal);
@@ -2257,18 +3527,185 @@ export class Game {
           this.playerVelocity.set(0, 0, 0);
           this.yaw = 0;
           this.pitch = 0.045;
-          this.selectedWeapon = 0;
+          this.selectedWeapon = WEAPONS.findIndex((weapon) => weapon.id === 'machine');
           this.weaponCooldown = 0;
           this.ammo.set('machine', this.weapon('machine').ammo);
           this.buildWeaponModel();
           const playerContact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = playerContact.grounded;
           const botPosition = this.playerPosition.clone().add(new THREE.Vector3(0, 0, -4));
-          this.bots[0].respawn(botPosition);
+          this.bots[0].respawn(botPosition, false);
           this.bots[0].health = 35;
           this.bots[0].armor = 0;
           this.bots[1].respawn(this.arena.spawnPoints[1]);
           this.bots[2].respawn(this.arena.spawnPoints[2]);
+        } else if (name === 'monsoon-overlook') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.playerPosition.set(-168, 84, 166);
+          this.playerVelocity.set(0, 0, 0);
+          const toCore = this.arena.corePosition.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-toCore.x, -toCore.z);
+          this.pitch = Math.asin(toCore.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'monsoon-grassland') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          const target = new THREE.Vector3(-158, this.arena.floorHeightAt(-158, 10) ?? 0, 10);
+          const floor = this.arena.floorHeightAt(-149, 18) ?? target.y;
+          this.playerPosition.set(-149, floor + 0.04, 18);
+          this.playerVelocity.set(0, 0, 0);
+          const view = target.clone().add(new THREE.Vector3(0, 1.05, 0)).sub(
+            this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)),
+          ).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'monsoon-structure') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          const floor = this.arena.floorHeightAt(-101, 108) ?? 0;
+          this.playerPosition.set(-101, floor + 0.04, 108);
+          this.playerVelocity.set(0, 0, 0);
+          const target = new THREE.Vector3(-132, (this.arena.floorHeightAt(-132, 111) ?? floor) + 3.2, 111);
+          const view = target.sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'monsoon-ramp') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          const floor = this.arena.floorHeightAt(-132, 66) ?? 0;
+          this.playerPosition.set(-132, floor + 0.04, 66);
+          this.playerVelocity.set(0, 0, 0);
+          const target = new THREE.Vector3(-98, (this.arena.floorHeightAt(-98, 45) ?? floor) + 2.1, 45);
+          const view = target.sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'monsoon-damage') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          const wallTop = this.arena.floorHeightAt(-132, 102, Number.POSITIVE_INFINITY) ?? 30;
+          const wallPoint = new THREE.Vector3(-132, wallTop - 3.5, 101.43);
+          const normal = new THREE.Vector3(0, 0, -1);
+          const offsets = [
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(-1.25, 0.55, 0),
+            new THREE.Vector3(1.05, -0.42, 0),
+            new THREE.Vector3(1.8, 0.7, 0),
+          ];
+          offsets.forEach((offset, index) => {
+            this.arena.registerSurfaceImpact(wallPoint.clone().add(offset), normal, 40 + index * 24, 0);
+          });
+          const floor = this.arena.floorHeightAt(-132, 91) ?? wallTop - 8;
+          this.playerPosition.set(-132, floor + 0.04, 91);
+          this.playerVelocity.set(0, 0, 0);
+          const view = wallPoint.clone().sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'monsoon-weather') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotArenaTime = 65;
+          this.playerPosition.set(-176, 68, -142);
+          this.playerVelocity.set(0, 0, 0);
+          const target = new THREE.Vector3(-55, 18, -42);
+          const view = target.sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-overlook') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 45;
+          this.playerPosition.set(0, 150, 50);
+          this.playerVelocity.set(0, 0, 0);
+          const view = new THREE.Vector3(0, 5, 0).sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-depth') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 62;
+          this.playerPosition.set(-86, 30, 86);
+          this.playerVelocity.set(0, 0, 0);
+          const view = new THREE.Vector3(0, 15, 4).sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-ramp') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 68;
+          this.playerPosition.set(0, 7, -57);
+          this.playerVelocity.set(0, 0, 0);
+          const view = new THREE.Vector3(0, 12, -14).sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-flow') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          const floor = this.arena.floorHeightAt(0, -30) ?? 5.8;
+          this.playerPosition.set(0, floor, -30);
+          this.playerVelocity.set(0, 0, 14);
+          this.yaw = 0;
+          this.pitch = 0.03;
+          const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          this.grounded = contact.grounded;
+          this.terrainNormal.copy(contact.contactNormal);
+        } else if (name === 'quicksense-grapple') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          this.playerPosition.set(0, 5.833, -30);
+          this.playerVelocity.set(0, 0, 0);
+          this.yaw = -3;
+          this.pitch = 0.3;
+          this.grounded = false;
+          this.toggleGrapple();
+        } else if (name === 'quicksense-bounce') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          const pad = this.arena.jumpPads[0];
+          this.playerPosition.copy(pad.position);
+          this.playerVelocity.set(0, 0, 0);
+          this.jumpPadCooldown = 0;
+          this.yaw = Math.atan2(-pad.direction.x, -pad.direction.z);
+          this.pitch = Math.asin(pad.direction.y) * 0.42;
+          this.checkJumpPads();
+          this.grounded = false;
+        } else if (name === 'jump-pad-0') {
+          this.mode = 'running';
+          this.audio.setPaused(false);
+          this.hud.hideStart();
+          const pad = this.arena.jumpPads[0];
+          this.playerPosition.copy(pad.position);
+          this.playerVelocity.set(0, 0, 0);
+          this.jumpPadCooldown = 0;
+          this.yaw = Math.atan2(-pad.direction.x, -pad.direction.z);
+          this.pitch = Math.asin(pad.direction.y) * 0.4;
+          const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          this.grounded = contact.grounded;
+          this.terrainNormal.copy(contact.contactNormal);
         } else if (name === 'fail') {
           this.mode = 'respawning';
           this.health = 0;
@@ -2290,7 +3727,15 @@ export class Game {
             );
           }
         }
+        if (name.startsWith('monsoon-') || ['quicksense-overlook', 'quicksense-depth', 'quicksense-ramp'].includes(name)) {
+          this.pausedForScreenshot = true;
+          this.hud.hideStart();
+          for (const selector of ['#hud', '#crosshair', '#touch-controls']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
+        }
         this.updateCamera(0);
+        this.updateSpeedEffects(0, this.elapsed, true);
         this.publishDiagnostics();
       },
       setAmmo: (weapon: WeaponId, amount: number) => {
@@ -2323,9 +3768,11 @@ export class Game {
         this.hud.hideStart();
         this.playerPosition.set(player.x, player.y, player.z);
         this.playerVelocity.set(0, 0, 0);
-        this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+        const playerContact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+        this.grounded = playerContact.grounded;
+        this.terrainNormal.copy(playerContact.contactNormal);
         const bot = this.bots[0];
-        bot.respawn(new THREE.Vector3(botPosition.x, botPosition.y, botPosition.z));
+        bot.respawn(new THREE.Vector3(botPosition.x, botPosition.y, botPosition.z), false);
         bot.movementLocked = lockBot;
         this.arena.resolvePlayerCapsule(bot.group.position, bot.velocity);
         const facing = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE * 0.72, 0))
@@ -2340,6 +3787,11 @@ export class Game {
         this.tryFirePlayerWeapon();
         this.publishDiagnostics();
       },
+      fireSecondary: () => {
+        this.weaponCooldown = 0;
+        this.trySecondaryFire();
+        this.publishDiagnostics();
+      },
       throwGrenade: () => {
         this.tryThrowGrenade();
         this.publishDiagnostics();
@@ -2352,6 +3804,37 @@ export class Game {
       setPausedForScreenshot: (paused: boolean) => {
         this.pausedForScreenshot = paused;
       },
+      setWeaponInspectionMode: (enabled: boolean) => {
+        this.weaponInspectionMode = enabled;
+        this.buildWeaponModel();
+        this.updateCamera(0);
+        this.publishDiagnostics();
+      },
+      setWeaponHandsVisible: (visible: boolean) => {
+        const armature = this.weaponVisual?.root.getObjectByName('first-person-armature');
+        if (armature) armature.visible = visible;
+      },
+      parkBotsForScreenshot: () => {
+        const spawns = [...this.arena.spawnPoints]
+          .sort((left, right) => right.distanceToSquared(this.playerPosition) - left.distanceToSquared(this.playerPosition));
+        this.bots.forEach((bot, index) => {
+          bot.respawn(spawns[index % spawns.length], false);
+          bot.movementLocked = true;
+          bot.velocity.set(0, 0, 0);
+        });
+      },
+      resetWeaponCaptureState: () => {
+        this.recoil = 0;
+        this.laserHeat = 0;
+        this.weaponTuck = 0;
+        this.trauma = 0;
+        this.weaponCooldown = 0;
+        this.discBounceCount = 0;
+        this.lastDiscBouncePosition.set(0, 0, 0);
+        this.weaponVfx.clearTransientEffects();
+        this.updateCamera(0);
+        this.publishDiagnostics();
+      },
       setReducedMotion: (enabled: boolean) => {
         this.reducedMotion = enabled;
       },
@@ -2363,6 +3846,55 @@ export class Game {
         const steps = THREE.MathUtils.clamp(Math.ceil(seconds / MOVEMENT.fixedStep), 1, 3_600);
         for (let index = 0; index < steps; index += 1) this.fixedUpdate(MOVEMENT.fixedStep);
         this.updateCamera(0);
+        this.updateSpeedEffects(0, this.elapsed, true);
+        this.publishDiagnostics();
+      },
+      setPlayerKinematics: (position, velocity) => {
+        this.mode = 'running';
+        this.audio.setPaused(false);
+        this.hud.hideStart();
+        this.playerPosition.set(position.x, position.y, position.z);
+        this.playerVelocity.set(velocity.x, velocity.y, velocity.z);
+        this.jumpBuffer = 0;
+        this.coyote = 0;
+        this.dashBuffer = 0;
+        this.dashMomentumTimer = 0;
+        this.wallContactTimer = 0;
+        this.ceilingContactTimer = 0;
+        const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+        this.grounded = contact.grounded;
+        this.terrainNormal.copy(contact.contactNormal);
+        const horizontal = new THREE.Vector3(velocity.x, 0, velocity.z);
+        if (horizontal.lengthSq() > 1e-5) {
+          horizontal.normalize();
+          this.yaw = Math.atan2(-horizontal.x, -horizontal.z);
+        }
+        this.updateCamera(0);
+        this.updateSpeedEffects(0, this.elapsed, true);
+        this.publishDiagnostics();
+      },
+      setSpeedCapture: (speedKmh: number) => {
+        const speed = Math.max(0, speedKmh) / 3.6;
+        this.mode = 'running';
+        this.audio.setPaused(false);
+        this.hud.hideStart();
+        const view = this.viewDirection(new THREE.Vector3()).setY(0);
+        if (view.lengthSq() < 0.001) view.set(0, 0, -1);
+        view.normalize();
+        const side = new THREE.Vector3(-view.z, 0, view.x);
+        this.playerVelocity.copy(view).multiplyScalar(speed);
+        const botPosition = this.playerPosition.clone().addScaledVector(view, 11).addScaledVector(side, 1.35);
+        const botFloor = this.arena.floorHeightAt(botPosition.x, botPosition.z, botPosition.y + 8);
+        if (botFloor !== null) botPosition.y = botFloor;
+        this.bots[0].respawn(botPosition, false);
+        this.bots[0].movementLocked = true;
+        this.bots[0].velocity.copy(side).multiplyScalar(speed);
+        for (let index = 1; index < this.bots.length; index += 1) {
+          this.bots[index].movementLocked = true;
+          this.bots[index].velocity.set(0, 0, 0);
+        }
+        this.updateCamera(0);
+        this.updateSpeedEffects(0, this.elapsed, true);
         this.publishDiagnostics();
       },
       hideDebugUi: () => undefined,
@@ -2371,6 +3903,8 @@ export class Game {
 
   private publishDiagnostics(): void {
     const info = this.renderer.info;
+    const coreDirectorState = this.coreDirector.snapshot();
+    const styleSnapshot = this.styleSystem.snapshot();
     window.__THREE_GAME_DIAGNOSTICS__ = {
       frame: this.frame,
       elapsed: this.elapsed,
@@ -2390,9 +3924,14 @@ export class Game {
       botsAlive: this.bots.filter((bot) => bot.alive).length,
       bots: this.bots.map((bot) => ({
         id: bot.id,
+        displayName: bot.displayName,
+        archetype: bot.archetype,
         alive: bot.alive,
         health: bot.health,
+        armor: bot.armor,
+        score: bot.score,
         weapon: bot.weapon,
+        targetOwner: bot.targetOwner,
         targetVisible: bot.targetVisible,
         wantsToFire: bot.wantsToFire,
         facingDot: bot.facingDot,
@@ -2411,11 +3950,14 @@ export class Game {
         renderedMeshCount: bot.renderedMeshCount,
         weaponSwitches: bot.weaponSwitches,
         bunnyHops: bot.bunnyHops,
+        jetpackActive: bot.jetpackActive,
+        jetpackBursts: bot.jetpackBursts,
         grenadesThrown: bot.grenadesThrown,
         grapplesUsed: bot.grapplesUsed,
         grenadesRemaining: bot.grenadesRemaining,
         grappleActive: bot.grappleActive,
         collisionRecoveries: bot.collisionRecoveries,
+        stalledFor: bot.stalledFor,
         wallContacts: bot.wallContacts,
         ceilingContacts: bot.ceilingContacts,
         position: { x: bot.group.position.x, y: bot.group.position.y, z: bot.group.position.z },
@@ -2426,7 +3968,11 @@ export class Game {
         active: this.grappleActive,
         anchor: { x: this.grappleAnchor.x, y: this.grappleAnchor.y, z: this.grappleAnchor.z },
         length: this.grappleLength,
-        distance: this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)).distanceTo(this.grappleAnchor),
+        distance: Math.hypot(
+          this.playerPosition.x - this.grappleAnchor.x,
+          this.playerPosition.y + PLAYER_EYE - this.grappleAnchor.y,
+          this.playerPosition.z - this.grappleAnchor.z,
+        ),
         maxLength: GRAPPLE.maxLength,
       },
       tracers: this.weaponVfx.activeTracers,
@@ -2438,6 +3984,34 @@ export class Game {
         hasAuthoredWeapon: Boolean(pickup.group.getObjectByName(`${pickup.kind}-pickup-weapon-model`)),
       })),
       coreProgress: this.coreProgress,
+      core: {
+        phase: coreDirectorState.phase,
+        active: this.coreActive,
+        contested: this.coreContested,
+        owner: this.coreOwner,
+        location: this.currentCoreAnchorName,
+        nextLocation: coreDirectorState.nextAnchor?.name ?? null,
+        secondsRemaining: coreDirectorState.secondsRemaining,
+        cycle: coreDirectorState.cycle,
+        captures: coreDirectorState.count,
+      },
+      style: {
+        meter: styleSnapshot.meter,
+        comboCount: styleSnapshot.comboCount,
+        comboMultiplier: styleSnapshot.comboMultiplier,
+        lastMedal: styleSnapshot.lastMedal?.label ?? null,
+      },
+      weather: {
+        phase: this.weatherSnapshot.phase,
+        label: this.weatherSnapshot.label,
+        secondsRemaining: this.weatherSnapshot.secondsRemaining,
+        severity: this.weatherSnapshot.severity,
+        windDirection: { ...this.weatherSnapshot.windDirection },
+        windStrength: this.weatherSnapshot.windStrength,
+        multipliers: { ...this.weatherSnapshot.multipliers },
+        visuals: this.arena.getWeatherVisualDiagnostics(),
+      },
+      map: this.arena.mapInfo,
       player: {
         position: { x: this.playerPosition.x, y: this.playerPosition.y, z: this.playerPosition.z },
         velocity: { x: this.playerVelocity.x, y: this.playerVelocity.y, z: this.playerVelocity.z },
@@ -2445,20 +4019,41 @@ export class Game {
         rocketJumpCount: this.rocketJumpCount,
         grounded: this.grounded,
         skiing: this.skiHeld,
+        jetpacking: this.jetpackActive,
         dashCooldown: this.dashCooldown,
         wallContact: this.wallContactTimer > 0,
+        ceilingContact: this.ceilingContactTimer > 0,
         yaw: this.yaw,
         pitch: this.pitch,
       },
+      speedEffects: {
+        thresholdKmh: SPEED_EFFECT_START_KMH,
+        fullIntensityKmh: SPEED_EFFECT_FULL_KMH,
+        playerSpeedKmh: Math.hypot(this.playerVelocity.x, this.playerVelocity.z) * 3.6,
+        blurIntensity: this.speedBlurIntensity,
+        activeTrailSources: this.speedTrails.activeSourceCount,
+      },
+      skiMomentum: {
+        speedKmh: Math.hypot(this.playerVelocity.x, this.playerVelocity.z) * 3.6,
+        resistance: this.skiMomentumResistance,
+        gravityDriveScale: this.skiGravityDriveScale,
+        dragAcceleration: this.skiDragAcceleration,
+      },
       physics: {
-        engine: 'fixed-step-capsule-bsp-brush-patch-bvh',
+        engine: 'fixed-step-capsule-heightfield-bvh',
         timestep: MOVEMENT.fixedStep,
         bodies: 1 + this.bots.length + this.projectiles.length + this.grenades.length,
         colliders: this.arena.collisionTriangles + this.bots.length + this.projectiles.length + this.grenades.length,
-        ccdBodies: this.projectiles.length + this.grenades.length,
+        ccdBodies: 1 + this.projectiles.length + this.grenades.length,
         sensors: this.pickups.filter((pickup) => pickup.active).length + (this.coreActive ? 1 : 0),
         contacts: this.lastPhysicsContacts,
         groundNormal: { x: this.terrainNormal.x, y: this.terrainNormal.y, z: this.terrainNormal.z },
+        ccd: {
+          sweeps: this.ccdSweeps,
+          wallHits: this.ccdWallHits,
+          ceilingHits: this.ccdCeilingHits,
+          boundaryHits: this.ccdBoundaryHits,
+        },
         stairs: {
           attempts: this.stepAttempts,
           successes: this.stepSuccesses,
@@ -2482,12 +4077,33 @@ export class Game {
         activeTracers: this.weaponVfx.activeTracers,
         weaponWearMaterials: this.weaponVisual?.battleWearMaterialCount ?? 0,
         weaponWearTextures: this.weaponVisual?.battleWearTextureCount ?? 0,
+        weaponAssetSource: this.weaponVisual?.assetSource ?? 'procedural',
+        weaponModelMeshes: this.weaponVisual?.meshCount ?? 0,
+        weaponRenderMeshes: this.weaponVisual?.renderMeshCount ?? 0,
+        weaponModelTriangles: this.weaponVisual?.triangleCount ?? 0,
+        weaponTuck: this.weaponTuck,
+        weaponObstructionDistance: this.weaponObstructionDistance,
+        weaponMuzzleDistance: this.weaponMuzzleDistance,
+        weaponMuzzleForwardDistance: this.weaponMuzzleForwardDistance,
+        weaponMuzzleOccluded: this.weaponMuzzleOccluded,
+        weaponPulseIntensity: this.weaponVisual?.pulseMaterials.reduce(
+          (maximum, material) => Math.max(maximum, material.emissiveIntensity),
+          0,
+        ) ?? 0,
       },
       combat: {
+        secondaryAbility: WEAPONS[this.selectedWeapon].secondary,
+        altFireHeld: this.input.isAltFireHeld(),
         continuousLaserActive: this.weaponVfx.continuousLaserActive,
         continuousLaserBend: this.weaponVfx.continuousLaserBend,
         lastPelletCount: this.lastPelletCount,
         lastPelletSpread: this.lastPelletSpread,
+        discBounceCount: this.discBounceCount,
+        lastDiscBouncePosition: {
+          x: this.lastDiscBouncePosition.x,
+          y: this.lastDiscBouncePosition.y,
+          z: this.lastDiscBouncePosition.z,
+        },
         lastShotWeapon: this.lastShotWeapon,
         lastShotOrigin: {
           x: this.lastShotOrigin.x,
@@ -2505,7 +4121,7 @@ export class Game {
           z: this.lastProjectileOrigin.z,
         },
         muzzleOffset: this.lastShotOrigin.distanceTo(this.lastMuzzlePosition),
-        projectileMuzzleOffset: this.lastShotWeapon === 'rocket' || this.lastShotWeapon === 'plasma'
+        projectileMuzzleOffset: this.lastShotWeapon === 'rocket' || this.lastShotWeapon === 'plasma' || this.lastShotWeapon === 'disc'
           ? this.lastProjectileOrigin.distanceTo(this.lastMuzzlePosition)
           : null,
       },
@@ -2517,6 +4133,12 @@ export class Game {
         dpr: this.renderer.getPixelRatio(),
       },
       pointerLocked: this.input.pointerLocked(),
+      scope: {
+        active: this.scopeBlend > 0.5,
+        blend: this.scopeBlend,
+        range: this.scopeRange,
+        zoom: 84 / Math.max(24, this.camera.fov),
+      },
       audio: this.audio.diagnostics(),
     };
   }
@@ -2524,16 +4146,20 @@ export class Game {
   private render(): void {
     if (this.physicsQaMode && this.physicsQaFrameRendered) return;
     this.renderer.info.reset();
-    if (this.physicsQaMode) {
+    if (this.physicsQaMode || this.softwareRenderer) {
       this.renderer.render(this.scene, this.camera);
-      this.physicsQaFrameRendered = true;
+      if (this.physicsQaMode) this.physicsQaFrameRendered = true;
       return;
     }
 
     // The arena is static, but bots and pickups still need fresh directional
     // shadows. Keep the authored 2048² shadow map and refresh it at a cadence
     // that avoids rebuilding the entire shadow pass on every render.
-    if (this.frame > 1 && this.frame % this.shadowRefreshInterval === 0) {
+    const combatFrame = this.input.isFireHeld()
+      || this.weaponVfx.activeEffects > 0
+      || this.projectiles.length > 0
+      || this.grenades.length > 0;
+    if (!combatFrame && this.frame > 1 && this.fps >= 45 && this.frame % this.shadowRefreshInterval === 0) {
       this.renderer.shadowMap.needsUpdate = true;
     }
     this.composer.render();
@@ -2547,11 +4173,18 @@ export class Game {
   }
 
   private disposeObject(root: THREE.Object3D): void {
+    const ownedTextures = new Set<THREE.Texture>();
     root.traverse((object) => {
       const mesh = object as THREE.Mesh;
-      mesh.geometry?.dispose();
-      if (Array.isArray(mesh.material)) mesh.material.forEach((material) => material.dispose());
-      else mesh.material?.dispose();
+      if (mesh.geometry && !mesh.geometry.userData.sharedWeaponVfx) mesh.geometry.dispose();
+      const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+      for (const material of materials) {
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture && value.userData.disposeWithMaterial) ownedTextures.add(value);
+        }
+        material.dispose();
+      }
     });
+    for (const texture of ownedTextures) texture.dispose();
   }
 }

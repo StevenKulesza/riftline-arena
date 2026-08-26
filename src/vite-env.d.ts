@@ -19,9 +19,14 @@ interface ThreeGameDiagnostics {
   botsAlive: number;
   bots: Array<{
     id: number;
+    displayName: string;
+    archetype: 'hunter' | 'anchor' | 'runner';
     alive: boolean;
     health: number;
-    weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail';
+    armor: number;
+    score: number;
+    weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc';
+    targetOwner: 'player' | number | null;
     targetVisible: boolean;
     wantsToFire: boolean;
     facingDot: number;
@@ -40,11 +45,14 @@ interface ThreeGameDiagnostics {
     renderedMeshCount: number;
     weaponSwitches: number;
     bunnyHops: number;
+    jetpackActive: boolean;
+    jetpackBursts: number;
     grenadesThrown: number;
     grapplesUsed: number;
     grenadesRemaining: number;
     grappleActive: boolean;
     collisionRecoveries: number;
+    stalledFor: number;
     wallContacts: number;
     ceilingContacts: number;
     position: { x: number; y: number; z: number };
@@ -67,6 +75,63 @@ interface ThreeGameDiagnostics {
     hasAuthoredWeapon: boolean;
   }>;
   coreProgress: number;
+  core: {
+    phase: 'telegraph' | 'active' | 'cooldown';
+    active: boolean;
+    contested: boolean;
+    owner: 'player' | number | null;
+    location: string;
+    nextLocation: string | null;
+    secondsRemaining: number;
+    cycle: number;
+    captures: number;
+  };
+  style: {
+    meter: number;
+    comboCount: number;
+    comboMultiplier: number;
+    lastMedal: string | null;
+  };
+  weather: {
+    phase: string;
+    label: string;
+    secondsRemaining: number;
+    severity: number;
+    windDirection: { x: number; z: number };
+    windStrength: number;
+    multipliers: {
+      airControlMultiplier: number;
+      groundFrictionMultiplier: number;
+      groundTractionMultiplier: number;
+      projectileDriftMultiplier: number;
+      visibilityMultiplier: number;
+    };
+    visuals: {
+      source: 'autonomous' | 'gameplay';
+      phase: string;
+      label: string;
+      severity: number;
+      rainIntensity: number;
+      visualWindStrength: number;
+      windDirection: { x: number; z: number };
+      visibilityMultiplier: number;
+    };
+  };
+  map: {
+    name: string;
+    seed: number;
+    generationVersion: number;
+    ready: boolean;
+    topologyHash: string;
+    bounds: { width: number; depth: number };
+    altitudeRange: { min: number; max: number };
+    renderTriangles: number;
+    collisionTriangles: number;
+    spawnCount: number;
+    pickupCount: number;
+    jumpPadCount: number;
+    skiRoutes: number;
+  };
   player: {
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };
@@ -74,10 +139,25 @@ interface ThreeGameDiagnostics {
     rocketJumpCount: number;
     grounded: boolean;
     skiing: boolean;
+    jetpacking: boolean;
     dashCooldown: number;
     wallContact: boolean;
+    ceilingContact: boolean;
     yaw: number;
     pitch: number;
+  };
+  speedEffects: {
+    thresholdKmh: number;
+    fullIntensityKmh: number;
+    playerSpeedKmh: number;
+    blurIntensity: number;
+    activeTrailSources: number;
+  };
+  skiMomentum: {
+    speedKmh: number;
+    resistance: number;
+    gravityDriveScale: number;
+    dragAcceleration: number;
   };
   physics: {
     engine: string;
@@ -87,6 +167,12 @@ interface ThreeGameDiagnostics {
     ccdBodies: number;
     sensors: number;
     contacts: number;
+    ccd: {
+      sweeps: number;
+      wallHits: number;
+      ceilingHits: number;
+      boundaryHits: number;
+    };
     groundNormal: { x: number; y: number; z: number };
     stairs: {
       attempts: number;
@@ -111,13 +197,27 @@ interface ThreeGameDiagnostics {
     activeTracers: number;
     weaponWearMaterials: number;
     weaponWearTextures: number;
+    weaponAssetSource: 'procedural';
+    weaponModelMeshes: number;
+    weaponRenderMeshes: number;
+    weaponModelTriangles: number;
+    weaponTuck: number;
+    weaponObstructionDistance: number;
+    weaponMuzzleDistance: number;
+    weaponMuzzleForwardDistance: number;
+    weaponMuzzleOccluded: boolean;
+    weaponPulseIntensity: number;
   };
   combat: {
+    secondaryAbility: string;
+    altFireHeld: boolean;
     continuousLaserActive: boolean;
     continuousLaserBend: number;
     lastPelletCount: number;
     lastPelletSpread: number;
-    lastShotWeapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | null;
+    discBounceCount: number;
+    lastDiscBouncePosition: { x: number; y: number; z: number };
+    lastShotWeapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc' | null;
     lastShotOrigin: { x: number; y: number; z: number };
     lastMuzzlePosition: { x: number; y: number; z: number };
     lastProjectileOrigin: { x: number; y: number; z: number };
@@ -132,6 +232,12 @@ interface ThreeGameDiagnostics {
     dpr: number;
   };
   pointerLocked: boolean;
+  scope: {
+    active: boolean;
+    blend: number;
+    range: number;
+    zoom: number;
+  };
   audio: {
     supported: boolean;
     contextState: string;
@@ -146,6 +252,7 @@ interface ThreeGameDiagnostics {
     fallbackMode: boolean;
     activeVoices: number;
     activeVoicesByPool: Record<string, number>;
+    laserBeamActive: boolean;
     lastEvent: string;
     playCounts: Record<string, number>;
     resets: number;
@@ -158,16 +265,18 @@ interface ThreeGameTestHooks {
   /** Jump to a named state for baselines (scaffold: 'active-play' | 'complete'). */
   setState(name: string): void;
   /** Set deterministic ammo for audio and combat lifecycle tests. */
-  setAmmo(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail', amount: number): void;
+  setAmmo(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc', amount: number): void;
+  /** Trigger the equipped weapon's secondary ability without synthetic pointer input. */
+  fireSecondary(): void;
   /** Equip a weapon and rebuild its deterministic first-person view model. */
-  setWeapon(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail'): void;
+  setWeapon(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc'): void;
   /** Set deterministic camera aim for muzzle/beam tests. */
   setAim(yaw: number, pitch: number): void;
-  /** Sample authored BSP/patch floor height for deterministic controller QA. */
+  /** Sample procedural terrain floor height for deterministic controller QA. */
   sampleFloorHeight(x: number, z: number, fromY?: number): number | null;
-  /** Return the normalized authored arena spawn points. */
+  /** Return the grounded procedural arena spawn points. */
   getSpawnPoints(): Array<{ x: number; y: number; z: number }>;
-  /** Test world-space BSP/patch visibility between two points. */
+  /** Test world-space static terrain visibility between two points. */
   sampleLineOfSight(start: { x: number; y: number; z: number }, end: { x: number; y: number; z: number }): boolean;
   /** Place player/bot zero for deterministic FOV and occlusion checks. */
   setCombatants(
@@ -184,15 +293,34 @@ interface ThreeGameTestHooks {
   toggleGrapple(): void;
   /** Freeze the simulation while continuing to render the current frame. */
   setPausedForScreenshot(paused: boolean): void;
+  /** Render the equipped procedural weapon as a centered side profile for visual QA. */
+  setWeaponInspectionMode(enabled: boolean): void;
+  setWeaponHandsVisible(visible: boolean): void;
+  parkBotsForScreenshot(): void;
+  resetWeaponCaptureState(): void;
   /** Freeze ambient/idle animation time so screenshots are stable. */
   setReducedMotion(enabled: boolean): void;
   /** Advance the fixed 120 Hz simulation without relying on browser wall time. */
   stepSimulation(seconds: number): void;
+  /** Place the player with exact velocity for deterministic capsule/CCD QA. */
+  setPlayerKinematics(
+    position: { x: number; y: number; z: number },
+    velocity: { x: number; y: number; z: number },
+  ): void;
+  /** Stage a fast player and bot for deterministic blur/trail screenshots. */
+  setSpeedCapture(speedKmh: number): void;
   /** Hide debug UI (lil-gui) before capturing. */
   hideDebugUi(hidden: boolean): void;
 }
 
 interface Window {
+  __WEAPON_PREVIEW_READY__?: boolean;
+  __WEAPON_PREVIEW_DIAGNOSTICS__?: {
+    weapon: string;
+    pulseIntensity: number;
+    pulseMetalness: number[];
+    texturedPulseMaterials: number;
+  };
   __THREE_GAME_DIAGNOSTICS__?: ThreeGameDiagnostics;
   __THREE_GAME_TEST_HOOKS__?: ThreeGameTestHooks;
 }

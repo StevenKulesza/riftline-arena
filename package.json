@@ -10,12 +10,15 @@
     "test": "playwright test",
     "audio:generate": "bash scripts/generate-weapon-audio.sh",
     "audio:regenerate": "bash scripts/generate-weapon-audio.sh --force",
+    "audio:environment": "bash scripts/generate-environment-audio.sh",
+    "audio:environment:force": "bash scripts/generate-environment-audio.sh --force",
     "audio:countdown": "bash scripts/generate-countdown-audio.sh",
     "audio:master": "bash scripts/master-weapon-audio.sh",
     "map:convert": "node scripts/convert-wca1-bsp.mjs",
     "map:materials": "node scripts/import-wca1-materials.mjs",
     "verify:visual": "playwright test tests/visual.spec.ts",
-    "inspect:canvas": "node scripts/inspect-threejs-canvas.mjs"
+    "inspect:canvas": "node scripts/inspect-threejs-canvas.mjs",
+    "profile:perf": "npm run build && node scripts/profile-performance.mjs"
   },
   "dependencies": {
     "lil-gui": "^0.21.0",

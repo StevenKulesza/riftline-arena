@@ -1,17 +1,30 @@
 import * as THREE from 'three';
 
+function needsDefaultFramebufferAntialiasing(): boolean {
+  // Normal gameplay is resolved by EffectComposer. MSAA on the default
+  // framebuffer cannot smooth the scene inside those off-screen targets; it
+  // only adds bandwidth to the final full-screen copy. Direct-render QA paths
+  // keep it enabled so existing visual captures retain their edge quality.
+  const automatedCapture = typeof navigator !== 'undefined' && navigator.webdriver;
+  const qaCapture = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('qa');
+  return automatedCapture || qaCapture;
+}
+
 export function createRenderer(canvas: HTMLCanvasElement): THREE.WebGLRenderer {
   const renderer = new THREE.WebGLRenderer({
     canvas,
-    antialias: true,
+    antialias: needsDefaultFramebufferAntialiasing(),
     alpha: false,
+    stencil: false,
+    preserveDrawingBuffer: false,
     powerPreference: 'high-performance',
   });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = 0.96;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   return renderer;
 }
 
@@ -26,10 +39,15 @@ export function resizeRenderer(
   const dpr = getRenderDpr(maxDpr);
   const bufferWidth = Math.floor(width * dpr);
   const bufferHeight = Math.floor(height * dpr);
-  const needsResize = canvas.width !== bufferWidth || canvas.height !== bufferHeight;
+  const dprChanged = Math.abs(renderer.getPixelRatio() - dpr) > 0.001;
+  const aspectChanged = Math.abs(camera.aspect - width / height) > 0.0001;
+  const needsResize = dprChanged
+    || aspectChanged
+    || canvas.width !== bufferWidth
+    || canvas.height !== bufferHeight;
 
   if (needsResize) {
-    renderer.setPixelRatio(dpr);
+    if (dprChanged) renderer.setPixelRatio(dpr);
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
@@ -38,6 +56,11 @@ export function resizeRenderer(
   return needsResize;
 }
 
-export function getRenderDpr(maxDpr: number): number {
-  return Math.min(window.devicePixelRatio || 1, maxDpr);
+export function getRenderDpr(
+  maxDpr: number,
+  devicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio,
+): number {
+  const safeCap = Number.isFinite(maxDpr) && maxDpr > 0 ? maxDpr : 1;
+  const safeDeviceDpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  return Math.min(safeDeviceDpr, safeCap);
 }

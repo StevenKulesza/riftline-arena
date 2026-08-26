@@ -45,7 +45,7 @@ test('sample-backed audio survives combat, pause, visibility, mute, and restart 
   expect((await audioSnapshot(page))?.activeVoicesByPool['weapon.machine'] ?? 0).toBeLessThanOrEqual(7);
 
   const equipBefore = (await audioSnapshot(page))?.playCounts['equip.heavy'] ?? 0;
-  await page.keyboard.press('Digit3');
+  await page.keyboard.press('Digit4');
   await expect.poll(async () => (await audioSnapshot(page))?.playCounts['equip.heavy'] ?? 0).toBeGreaterThan(equipBefore);
 
   await page.evaluate(() => {
@@ -124,7 +124,7 @@ test('lo-fi arena bed starts as one looping music voice', async ({ page }, testI
   test.skip(testInfo.project.name !== 'desktop-chrome', 'The music-loop contract only needs one browser project.');
   test.setTimeout(120_000);
   await page.route('**/assets/audio/**', (route) => {
-    if (route.request().url().endsWith('/assets/audio/music/riftline-ambient-loop.mp3')) {
+    if (route.request().url().endsWith('/assets/audio/music/riftline-monsoon-bed-clean-v1.mp3')) {
       void route.continue();
     } else {
       void route.fulfill({ status: 404, body: '' });
@@ -162,4 +162,65 @@ test('missing ElevenLabs files are reported without synthesizing fallback audio'
     consoleErrors.filter((message) => !message.includes('Failed to load resource: the server responded with a status of 404')),
   ).toEqual([]);
   expect(pageErrors).toEqual([]);
+});
+
+test('held laser uses one continuous voice with a soft release tail', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chrome', 'The Web Audio beam lifetime only needs one browser project.');
+  await page.route('**/src/main.ts', (route) => route.fulfill({ contentType: 'application/javascript', body: '' }));
+  await page.route('**/src/menu.ts', (route) => route.fulfill({ contentType: 'application/javascript', body: '' }));
+  await page.route('**/assets/audio/**', (route) => route.fulfill({ status: 404, body: '' }));
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    const moduleUrl = '/src/systems/AudioSystem.ts';
+    const { AudioSystem } = await import(moduleUrl);
+    const audio = new AudioSystem();
+    (window as unknown as { __LASER_AUDIO_TEST__: typeof audio }).__LASER_AUDIO_TEST__ = audio;
+    const unlock = document.createElement('button');
+    unlock.id = 'laser-audio-unlock';
+    unlock.addEventListener('click', () => void audio.unlock());
+    document.body.append(unlock);
+  });
+  await page.locator('#laser-audio-unlock').click();
+  const snapshot = () => page.evaluate(() => (
+    window as unknown as { __LASER_AUDIO_TEST__: { diagnostics(): NonNullable<typeof window.__THREE_GAME_DIAGNOSTICS__>['audio'] } }
+  ).__LASER_AUDIO_TEST__.diagnostics());
+  await expect.poll(async () => (await snapshot()).unlocked).toBe(true);
+
+  const before = (await snapshot()).playCounts['weapon.laser'] ?? 0;
+  await page.evaluate(() => (
+    window as unknown as { __LASER_AUDIO_TEST__: { setLaserBeamActive(active: boolean): void } }
+  ).__LASER_AUDIO_TEST__.setLaserBeamActive(true));
+  const started = await snapshot();
+  expect((started.playCounts['weapon.laser'] ?? 0) - before).toBe(1);
+  expect(started.activeVoicesByPool['weapon.laser']).toBe(1);
+  expect(started.laserBeamActive).toBe(true);
+
+  await page.evaluate(() => {
+    const audio = (
+      window as unknown as { __LASER_AUDIO_TEST__: { setLaserBeamActive(active: boolean): void } }
+    ).__LASER_AUDIO_TEST__;
+    for (let tick = 0; tick < 72; tick += 1) audio.setLaserBeamActive(true);
+  });
+  const held = await snapshot();
+  expect((held.playCounts['weapon.laser'] ?? 0) - before, 'damage ticks must not retrigger beam audio').toBe(1);
+  expect(held.activeVoicesByPool['weapon.laser']).toBe(1);
+
+  await page.evaluate(() => (
+    window as unknown as { __LASER_AUDIO_TEST__: { setLaserBeamActive(active: boolean): void } }
+  ).__LASER_AUDIO_TEST__.setLaserBeamActive(false));
+  await page.evaluate(() => {
+    const audio = (
+      window as unknown as { __LASER_AUDIO_TEST__: { setLaserBeamActive(active: boolean): void } }
+    ).__LASER_AUDIO_TEST__;
+    for (let tick = 0; tick < 72; tick += 1) audio.setLaserBeamActive(false);
+  });
+  const releasing = await snapshot();
+  expect(releasing.laserBeamActive).toBe(false);
+  expect(releasing.activeVoicesByPool['weapon.laser'], 'release envelope keeps the voice alive briefly').toBe(1);
+  await page.waitForTimeout(280);
+  const stopped = await snapshot();
+  expect(stopped.activeVoicesByPool['weapon.laser'] ?? 0).toBe(0);
+  await page.evaluate(() => (
+    window as unknown as { __LASER_AUDIO_TEST__: { dispose(): void } }
+  ).__LASER_AUDIO_TEST__.dispose());
 });

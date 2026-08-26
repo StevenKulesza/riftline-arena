@@ -1,23 +1,29 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const testPort = process.env.PLAYWRIGHT_TEST_PORT ?? '5190';
+const testBaseUrl = `http://127.0.0.1:${testPort}`;
+
 export default defineConfig({
   testDir: './tests',
   // One worker: parallel headless WebGL contexts contend for the GPU, and the
   // frame-time collapse makes game time drift from wall time, flaking timed
   // gameplay phases and screenshot baselines.
   workers: 1,
-  timeout: 30_000,
+  // Full Monsoon scene startup is intentionally asset-heavy and the bundled
+  // headless browser uses SwiftShader on this machine. Keep functional tests
+  // deterministic without treating software-raster startup as a gameplay hang.
+  timeout: 120_000,
   expect: {
     timeout: 5_000,
   },
   use: {
-    baseURL: 'http://127.0.0.1:5190',
+    baseURL: testBaseUrl,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm run dev -- --port 5190',
-    url: 'http://127.0.0.1:5190',
+    command: `npm run dev -- --port ${testPort}`,
+    url: testBaseUrl,
     reuseExistingServer: true,
     timeout: 20_000,
   },
