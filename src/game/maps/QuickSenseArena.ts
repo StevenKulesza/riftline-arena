@@ -12,6 +12,7 @@ import type {
 } from '../Arena';
 import {
   buildLaunchRamp,
+  sampleLaunchRampHeight,
   sampleLaunchRampProfile,
   type FlowSurfaceBuild,
   type LaunchRampSpec,
@@ -20,7 +21,7 @@ import {
 export const QUICKSENSE = {
   id: 'quicksense',
   name: 'QuickSense',
-  generationVersion: 5,
+  generationVersion: 6,
   width: 360,
   depth: 320,
   killY: -24,
@@ -444,7 +445,7 @@ export class QuickSenseArena implements ArenaRuntime {
     const groundFoundationMaterial = this.material('QuickSense terrain foundation', 0x343a30, 0.01, 0.99);
     const terrainRouteMaterial = this.material('QuickSense carved ski channels', 0x354044, 0.05, 0.86);
     const deckMaterial = this.material('QuickSense graphite panels', 0xb8bdc0, 0.16, 0.62, panelTexture);
-    const sideMaterial = this.material('QuickSense charcoal deck skirts', 0x303a40, 0.2, 0.82);
+    const sideMaterial = this.material('QuickSense chamfered deck structure', 0x3d484e, 0.18, 0.76);
     const structureMaterial = this.material('QuickSense architectural shells', 0x3b474d, 0.22, 0.7);
     const rockMaterial = this.material('QuickSense volcanic cliffs', 0xffffff, 0.0, 0.96);
     const rockHighlightMaterial = this.material('QuickSense cliff faces', 0x5b6567, 0.0, 0.94);
@@ -660,7 +661,7 @@ export class QuickSenseArena implements ArenaRuntime {
       seed,
       generationVersion: QUICKSENSE.generationVersion,
       ready: true,
-      topologyHash: `quicksense-${seed.toString(16)}-cliff-bowl-v5`,
+      topologyHash: `quicksense-${seed.toString(16)}-habitat-flow-v6`,
       bounds: { width: QUICKSENSE.width, depth: QUICKSENSE.depth },
       altitudeRange: { min: 0, max: 180 },
       renderTriangles: Math.round(renderTriangles),
@@ -1897,10 +1898,11 @@ export class QuickSenseArena implements ArenaRuntime {
     const topIndices: number[] = [];
     const sideIndices: number[] = [];
     const segmentCount = closed ? points.length : points.length - 1;
-    // The route body is a thin bridge fascia. The analytic heightfield is the
-    // riding collision surface, while players can deliberately pass beneath
-    // elevated lanes between their physical support columns.
-    const bottomDepth = 0.42;
+    // The route body is a finished bridge deck rather than a paper-thin
+    // ribbon. Its lower perimeter is inset to create a broad structural
+    // chamfer while the analytic riding surface stays exactly unchanged.
+    const bottomDepth = 1.08;
+    const bottomInset = Math.min(0.38, width * 0.045);
     const pathDistances = [0];
     for (let index = 1; index < points.length; index += 1) {
       const previous = points[index - 1];
@@ -1937,8 +1939,10 @@ export class QuickSenseArena implements ArenaRuntime {
       const textureU = pathDistances[index] / Math.max(width, 1);
       addVertex(left, textureU, 0);
       addVertex(right, textureU, 1);
-      const leftBottom = left.clone(); leftBottom.y -= bottomDepth;
-      const rightBottom = right.clone(); rightBottom.y -= bottomDepth;
+      const leftBottom = left.clone().addScaledVector(new THREE.Vector3(crossX, 0, crossZ), bottomInset);
+      leftBottom.y -= bottomDepth;
+      const rightBottom = right.clone().addScaledVector(new THREE.Vector3(crossX, 0, crossZ), -bottomInset);
+      rightBottom.y -= bottomDepth;
       addVertex(leftBottom, textureU, 0);
       addVertex(rightBottom, textureU, 1);
     }
@@ -1956,6 +1960,25 @@ export class QuickSenseArena implements ArenaRuntime {
       sideIndices.push(topLeft, bottomLeft, nextBottomLeft, topLeft, nextBottomLeft, nextTopLeft);
       sideIndices.push(topRight, nextTopRight, nextBottomRight, topRight, nextBottomRight, bottomRight);
       sideIndices.push(bottomLeft, bottomRight, nextBottomRight, bottomLeft, nextBottomRight, nextBottomLeft);
+    }
+    if (!closed) {
+      const firstTopLeft = 0;
+      const firstTopRight = 1;
+      const firstBottomLeft = 2;
+      const firstBottomRight = 3;
+      sideIndices.push(
+        firstTopLeft, firstTopRight, firstBottomRight,
+        firstTopLeft, firstBottomRight, firstBottomLeft,
+      );
+      const finalBase = (points.length - 1) * 4;
+      const finalTopLeft = finalBase;
+      const finalTopRight = finalBase + 1;
+      const finalBottomLeft = finalBase + 2;
+      const finalBottomRight = finalBase + 3;
+      sideIndices.push(
+        finalTopLeft, finalBottomRight, finalTopRight,
+        finalTopLeft, finalBottomLeft, finalBottomRight,
+      );
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -2065,27 +2088,27 @@ export class QuickSenseArena implements ArenaRuntime {
     const ramps: Array<{ name: string; spec: LaunchRampSpec; edge: THREE.MeshStandardMaterial }> = [
       {
         name: 'South progressive launch',
-        spec: { origin: { x: 0, y: 3.05, z: -69 }, heading: 0, length: 34, width: 11.5, rise: 15.6, curveExponent: 1.82, profile: 'smootherstep', longitudinalSegments: 32, lateralSegments: 5, solid: true, skirtDepth: 0.46, followSurfaceUnderside: true },
+        spec: { origin: { x: 0, y: 3.05, z: -69 }, heading: 0, length: 34, width: 11.5, rise: 15.6, curveExponent: 1.82, profile: 'smootherstep', troughDepth: 0.72, longitudinalSegments: 32, lateralSegments: 6, solid: true, skirtDepth: 1.18, edgeChamfer: 0.38, followSurfaceUnderside: true },
         edge: amberMaterial,
       },
       {
         name: 'North return launch',
-        spec: { origin: { x: 0, y: 27.0, z: 69 }, heading: Math.PI, length: 34, width: 11.5, rise: -15.6, curveExponent: 1.82, profile: 'smootherstep', longitudinalSegments: 32, lateralSegments: 5, solid: true, skirtDepth: 0.46, followSurfaceUnderside: true },
+        spec: { origin: { x: 0, y: 27.0, z: 69 }, heading: Math.PI, length: 34, width: 11.5, rise: -15.6, curveExponent: 1.82, profile: 'smootherstep', troughDepth: 0.72, longitudinalSegments: 32, lateralSegments: 6, solid: true, skirtDepth: 1.18, edgeChamfer: 0.38, followSurfaceUnderside: true },
         edge: amberMaterial,
       },
       {
         name: 'West transfer ramp',
-        spec: { origin: { x: -77, y: 10.8, z: -18 }, heading: Math.PI * 0.5, length: 35, width: 10.5, rise: 11.8, curveExponent: 1.78, profile: 'smootherstep', longitudinalSegments: 30, lateralSegments: 5, solid: true, skirtDepth: 0.44, followSurfaceUnderside: true },
+        spec: { origin: { x: -77, y: 10.8, z: -18 }, heading: Math.PI * 0.5, length: 35, width: 10.5, rise: 11.8, curveExponent: 1.78, profile: 'smootherstep', troughDepth: 0.6, longitudinalSegments: 30, lateralSegments: 6, solid: true, skirtDepth: 1.08, edgeChamfer: 0.34, followSurfaceUnderside: true },
         edge: cyanMaterial,
       },
       {
         name: 'East transfer ramp',
-        spec: { origin: { x: 77, y: 10.8, z: 18 }, heading: -Math.PI * 0.5, length: 35, width: 10.5, rise: 11.8, curveExponent: 1.78, profile: 'smootherstep', longitudinalSegments: 30, lateralSegments: 5, solid: true, skirtDepth: 0.44, followSurfaceUnderside: true },
+        spec: { origin: { x: 77, y: 10.8, z: 18 }, heading: -Math.PI * 0.5, length: 35, width: 10.5, rise: 11.8, curveExponent: 1.78, profile: 'smootherstep', troughDepth: 0.6, longitudinalSegments: 30, lateralSegments: 6, solid: true, skirtDepth: 1.08, edgeChamfer: 0.34, followSurfaceUnderside: true },
         edge: magentaMaterial,
       },
       {
         name: 'Center dais transition',
-        spec: { origin: { x: 0, y: 7.5, z: -28 }, heading: 0, length: 17.8, width: 9.5, rise: 4.7, curveExponent: 1.55, profile: 'smootherstep', longitudinalSegments: 22, lateralSegments: 5, solid: true, skirtDepth: 0.42, followSurfaceUnderside: true },
+        spec: { origin: { x: 0, y: 7.5, z: -28 }, heading: 0, length: 17.8, width: 9.5, rise: 4.7, curveExponent: 1.55, profile: 'smootherstep', troughDepth: 0.46, longitudinalSegments: 22, lateralSegments: 6, solid: true, skirtDepth: 0.92, edgeChamfer: 0.3, followSurfaceUnderside: true },
         edge: amberMaterial,
       },
     ];
@@ -2148,23 +2171,22 @@ export class QuickSenseArena implements ArenaRuntime {
     safetyMaterial: THREE.MeshStandardMaterial,
     routeMaterial: THREE.MeshStandardMaterial,
   ): void {
-    const samples = 12;
-    const points = Array.from({ length: samples }, (_, index) => {
+    const samples = 24;
+    for (const lateral of [-spec.width * 0.5 + 0.3, spec.width * 0.5 - 0.3]) {
+      const edgePoints = Array.from({ length: samples }, (_, index) => {
+        const point = this.rampPoint(spec, index / (samples - 1), lateral);
+        return { x: point.x, y: point.y, z: point.z };
+      });
+      const safetyGeometry = this.createRibbonGeometry(edgePoints, false, [0], 0.28, 0, 0.04);
+      const safety = this.addMesh(safetyGeometry, safetyMaterial, 'QuickSense sculpted ramp edge trim');
+      safety.castShadow = false;
+      safety.receiveShadow = false;
+    }
+    const centerPoints = Array.from({ length: samples }, (_, index) => {
       const point = this.rampPoint(spec, index / (samples - 1), 0);
       return { x: point.x, y: point.y, z: point.z };
     });
-    const safetyGeometry = this.createRibbonGeometry(
-      points,
-      false,
-      [-spec.width * 0.5 + 0.3, spec.width * 0.5 - 0.3],
-      0.28,
-      0,
-      0.04,
-    );
-    const safety = this.addMesh(safetyGeometry, safetyMaterial, 'QuickSense ramp amber edge trim');
-    safety.castShadow = false;
-    safety.receiveShadow = false;
-    const routeGeometry = this.createRibbonGeometry(points, false, [0], 0.18, 0, 0.06);
+    const routeGeometry = this.createRibbonGeometry(centerPoints, false, [0], 0.18, 0, 0.06);
     const route = this.addMesh(routeGeometry, routeMaterial, 'QuickSense ramp route signal');
     route.castShadow = false;
     route.receiveShadow = false;
@@ -2227,11 +2249,11 @@ export class QuickSenseArena implements ArenaRuntime {
   private rampPoint(spec: LaunchRampSpec, u: number, lateral: number): THREE.Vector3 {
     const sine = Math.sin(spec.heading);
     const cosine = Math.cos(spec.heading);
-    return new THREE.Vector3(
-      spec.origin.x + sine * spec.length * u + cosine * lateral,
-      spec.origin.y + spec.rise * sampleLaunchRampProfile(spec, u) + 0.2,
-      spec.origin.z + cosine * spec.length * u - sine * lateral,
-    );
+    const x = spec.origin.x + sine * spec.length * u + cosine * lateral;
+    const z = spec.origin.z + cosine * spec.length * u - sine * lateral;
+    const y = sampleLaunchRampHeight(spec, x, z)
+      ?? spec.origin.y + spec.rise * sampleLaunchRampProfile(spec, u);
+    return new THREE.Vector3(x, y + 0.2, z);
   }
 
   private addPlatform(
@@ -3459,8 +3481,13 @@ export class QuickSenseArena implements ArenaRuntime {
     const lateral = dx * cosine - dz * sine;
     const halfWidth = spec.width * 0.5;
     if (longitudinal <= -radius || longitudinal >= spec.length + radius || lateral <= -halfWidth - radius || lateral >= halfWidth + radius) return null;
-    const u = THREE.MathUtils.clamp(longitudinal / spec.length, 0, 1);
-    const surfaceY = spec.origin.y + spec.rise * sampleLaunchRampProfile(spec, u);
+    const clampedLongitudinal = THREE.MathUtils.clamp(longitudinal, 0, spec.length);
+    const clampedLateral = THREE.MathUtils.clamp(lateral, -halfWidth, halfWidth);
+    const sampleX = spec.origin.x + sine * clampedLongitudinal + cosine * clampedLateral;
+    const sampleZ = spec.origin.z + cosine * clampedLongitudinal - sine * clampedLateral;
+    const u = THREE.MathUtils.clamp(clampedLongitudinal / spec.length, 0, 1);
+    const surfaceY = sampleLaunchRampHeight(spec, sampleX, sampleZ)
+      ?? spec.origin.y + spec.rise * sampleLaunchRampProfile(spec, u);
     const bottomY = spec.followSurfaceUnderside
       ? surfaceY - (spec.skirtDepth ?? 0.8)
       : Math.min(spec.origin.y, spec.origin.y + spec.rise) - (spec.skirtDepth ?? 0.8);

@@ -372,9 +372,7 @@ export class Game {
     this.renderer.toneMappingExposure = new URLSearchParams(window.location.search).get('map') === 'quicksense'
       ? 0.95
       : 0.86;
-    this.renderer.shadowMap.type = arena.mapInfo.name === 'QuickSense'
-      ? THREE.PCFSoftShadowMap
-      : THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.startButton = this.element<HTMLButtonElement>('#start-button');
     this.playTab = this.element<HTMLButtonElement>('#play-tab');
     this.optionsTab = this.element<HTMLButtonElement>('#options-tab');
@@ -2989,14 +2987,15 @@ export class Game {
 
   private createScene(): void {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
-    // QuickSense's low-poly architecture needs a clean value backdrop. Keep
-    // the loaded panorama owned by the arena, but do not let its storm plate
-    // flatten silhouettes or contaminate the cyan/magenta route palette.
+    // QuickSense uses the authored equirectangular panorama as its live value
+    // backdrop. Keep the procedural sky only for offline/failed asset loads.
     this.scene.background = quickSense
-      ? new THREE.Color(0x75b6df)
+      ? this.arena.skyTexture ?? new THREE.Color(0x75b6df)
       : this.arena.skyTexture ?? new THREE.Color(0x8fcddd);
-    this.scene.backgroundIntensity = quickSense ? 0.96 : 0.78;
-    this.scene.backgroundBlurriness = 0.035;
+    this.scene.backgroundIntensity = quickSense
+      ? (this.arena.skyTexture ? 0.84 : 0.96)
+      : 0.78;
+    this.scene.backgroundBlurriness = this.arena.skyTexture ? 0.02 : 0.035;
     this.scene.fog = new THREE.FogExp2(quickSense ? 0x6f899a : 0x7293a0, quickSense ? QUICKSENSE_FOG_DENSITY : 0.00146);
     const environmentGenerator = new THREE.PMREMGenerator(this.renderer);
     // Keep the 4K panorama as the authored background. A compact PMREM studio
@@ -3004,14 +3003,14 @@ export class Game {
     // startup (which is especially costly on integrated and software GPUs).
     this.environmentTexture = environmentGenerator.fromScene(new RoomEnvironment(), 0.03).texture;
     this.scene.environment = this.environmentTexture;
-    this.scene.environmentIntensity = quickSense ? 0.52 : 0.72;
+    this.scene.environmentIntensity = quickSense ? 0.56 : 0.72;
     environmentGenerator.dispose();
-    if (quickSense || !this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
-    this.scene.add(new THREE.AmbientLight(0x607786, quickSense ? 0.018 : 0.11));
+    if (!this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
+    this.scene.add(new THREE.AmbientLight(0x607786, quickSense ? 0.032 : 0.11));
     const hemisphere = new THREE.HemisphereLight(
       quickSense ? 0x9fc5dc : 0xb4d7e3,
-      quickSense ? 0x1c2521 : 0x263825,
-      quickSense ? 0.52 : 0.76,
+      quickSense ? 0x242d28 : 0x263825,
+      quickSense ? 0.58 : 0.76,
     );
     this.scene.add(hemisphere);
     const sun = new THREE.DirectionalLight(0xfff1df, quickSense ? 2.12 : 1.86);
@@ -3058,7 +3057,7 @@ export class Game {
         gradeContrast: { value: quickSense ? 1.055 : 1 },
         neutralDarken: { value: quickSense ? 0.085 : 0 },
         shadowCool: { value: quickSense ? 0.18 : 0 },
-        shadowLift: { value: quickSense ? 0.0045 : 0 },
+        shadowLift: { value: quickSense ? 0.009 : 0 },
         routeHueSeparation: { value: quickSense ? 1 : 0 },
         saturation: { value: quickSense ? 1.09 : 1.065 },
         speedBlur: { value: 0 },
@@ -3117,8 +3116,8 @@ export class Game {
             * smoothstep(1.08, 1.72, greenOverBlue)
             * smoothstep(0.11, 0.24, blueShare)
             * (1.0 - smoothstep(0.46, 0.68, blueShare));
-          vec3 magentaRoute = vec3(signalPeak, signalPeak * 0.055, signalPeak * 0.58);
-          graded = mix(graded, magentaRoute, routeHueSeparation * warmRoseMask * 0.92);
+          vec3 terracottaRoute = vec3(signalPeak, signalPeak * 0.42, signalPeak * 0.18);
+          graded = mix(graded, terracottaRoute, routeHueSeparation * warmRoseMask * 0.92);
           float gradeLuma = luma(graded);
           float maxChannel = max(graded.r, max(graded.g, graded.b));
           float minChannel = min(graded.r, min(graded.g, graded.b));
@@ -3807,8 +3806,8 @@ export class Game {
         } else if (name === 'quicksense-overlook') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotCameraFov = 45;
-          this.playerPosition.set(0, 610, -20);
+          this.screenshotCameraFov = 55;
+          this.playerPosition.set(0, 520, -20);
           this.playerVelocity.set(0, 0, 0);
           this.screenshotLookTarget.set(0, 8, 0);
           this.screenshotLookTargetActive = true;
@@ -3837,6 +3836,19 @@ export class Game {
           this.playerPosition.set(-46, 42, -150);
           this.playerVelocity.set(0, 0, 0);
           this.screenshotLookTarget.set(0, 26, -74);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-cliff') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 52;
+          this.playerPosition.set(-105, 78, -78);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(-188, 34, -78);
           this.screenshotLookTargetActive = true;
           const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
@@ -3937,7 +3949,7 @@ export class Game {
             );
           }
         }
-        if (name.startsWith('monsoon-') || ['quicksense-overlook', 'quicksense-depth', 'quicksense-ramp'].includes(name)) {
+        if (name.startsWith('monsoon-') || ['quicksense-overlook', 'quicksense-depth', 'quicksense-ramp', 'quicksense-cliff'].includes(name)) {
           this.pausedForScreenshot = true;
           this.renderer.shadowMap.autoUpdate = false;
           this.renderer.shadowMap.needsUpdate = false;
