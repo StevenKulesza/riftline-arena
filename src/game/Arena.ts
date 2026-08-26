@@ -92,6 +92,8 @@ export interface ArenaRuntime {
   ): CapsuleContact;
   floorHeightAt(x: number, z: number, fromY?: number): number | null;
   segmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null;
+  /** Player CCD query. Maps may exclude rideable tops and hitscan-only proxies. */
+  movementSegmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null;
   surfaceAt(x: number, z: number, fromY?: number): ArenaSurface;
   addFootTrack(position: THREE.Vector3, movement: THREE.Vector3, elapsed: number): void;
   registerSurfaceImpact(position: THREE.Vector3, normal: THREE.Vector3, energy: number, elapsed: number): void;
@@ -394,7 +396,21 @@ export class Arena implements ArenaRuntime {
 
   static async load(): Promise<ArenaRuntime> {
     if (new URLSearchParams(window.location.search).get('map') === 'quicksense') {
-      return new QuickSenseArena(mapSeedFromLocation());
+      let skyTexture: THREE.Texture | undefined;
+      try {
+        skyTexture = await new THREE.TextureLoader().loadAsync(
+          assetUrl('assets/maps/quicksense-panorama-v1/quicksense-equirect-v2.png'),
+        );
+        skyTexture.name = 'QuickSenseEquirectangularSkyV2';
+        skyTexture.colorSpace = THREE.SRGBColorSpace;
+        skyTexture.mapping = THREE.EquirectangularReflectionMapping;
+        skyTexture.minFilter = THREE.LinearFilter;
+        skyTexture.magFilter = THREE.LinearFilter;
+        skyTexture.generateMipmaps = false;
+      } catch (error) {
+        console.warn('QuickSense sky panorama unavailable; using procedural fallback.', error);
+      }
+      return new QuickSenseArena(mapSeedFromLocation(), skyTexture);
     }
     let skyTexture: THREE.Texture | undefined;
     try {
@@ -835,6 +851,10 @@ export class Arena implements ArenaRuntime {
     result.distance = hit.distance;
     result.surface = surface;
     return result;
+  }
+
+  movementSegmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null {
+    return this.segmentHitDetails(start, end);
   }
 
   surfaceAt(x: number, z: number, fromY = Number.POSITIVE_INFINITY): ArenaSurface {

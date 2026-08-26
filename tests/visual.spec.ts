@@ -21,7 +21,7 @@ function collectRuntimeErrors(page: Page): { consoleErrors: string[]; pageErrors
 }
 
 async function enterDeterministicActivePlay(page: Page): Promise<void> {
-  await page.goto('/');
+  await page.goto('/?map=quicksense&qa=visual');
   await expect(page.locator('#game-canvas')).toBeVisible();
   await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
 

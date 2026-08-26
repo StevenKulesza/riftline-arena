@@ -90,6 +90,9 @@ const PLAYER_EYE = 54 / 56;
 const MAX_FIXED_STEPS_PER_FRAME = 4;
 const HUD_UPDATE_INTERVAL = 1 / 15;
 const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
+const BASE_GAME_FOV = 80;
+const MAX_SPEED_FOV = 98;
+const QUICKSENSE_FOG_DENSITY = 0.00074;
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
 const WEAPON_VIEW_CLEARANCE = 0.1;
 const WEAPON_OBSTRUCTION_PROBE_LENGTH = 3.35;
@@ -114,7 +117,7 @@ export class Game {
   private readonly shadowRefreshInterval = 240;
   private readonly scene = new THREE.Scene();
   private readonly speedTrails = new SpeedTrailSystem(this.scene, 4);
-  private readonly camera = new THREE.PerspectiveCamera(84, 1, 0.08, 1800);
+  private readonly camera = new THREE.PerspectiveCamera(BASE_GAME_FOV, 1, 0.08, 1400);
   private readonly input: InputController;
   private readonly arena: ArenaRuntime;
   private readonly audio = new AudioSystem();
@@ -129,6 +132,7 @@ export class Game {
   private readonly adaptiveQuality: AdaptiveQualitySystem;
   private renderDprCap: number;
   private readonly softwareRenderer: boolean;
+  private readonly visualCapture: boolean;
   private readonly bots: Bot[] = [];
   private readonly projectiles: Projectile[] = [];
   private readonly grenades: GrenadeEntity[] = [];
@@ -227,7 +231,7 @@ export class Game {
   private reducedMotion = false;
   private pausedForScreenshot = false;
   private screenshotArenaTime = 0;
-  private screenshotCameraFov = 84;
+  private screenshotCameraFov = BASE_GAME_FOV;
   private weaponInspectionMode = false;
   private lastGroundImpact = 0;
   private lastDamageDirection = '';
@@ -269,6 +273,8 @@ export class Game {
   private readonly cameraRightScratch = new THREE.Vector3();
   private readonly cameraDownScratch = new THREE.Vector3();
   private readonly cameraAimScratch = new THREE.Vector3();
+  private readonly screenshotLookTarget = new THREE.Vector3();
+  private screenshotLookTargetActive = false;
   private readonly cameraLocalAimScratch = new THREE.Vector3();
   private readonly weaponBoreScratch = new THREE.Vector3();
   private readonly weaponMuzzleScratch = new THREE.Vector3();
@@ -348,6 +354,7 @@ export class Game {
     const qaMode = new URLSearchParams(window.location.search).get('qa');
     const diagnosticCapture = qaMode !== null;
     const visualCapture = qaMode === 'visual' || qaMode === 'capture';
+    this.visualCapture = visualCapture;
     this.maxRenderDpr = this.softwareRenderer ? diagnosticCapture ? 0.75 : 0.25 : this.mobileQuality ? 1 : 1.25;
     this.renderDprCap = this.maxRenderDpr;
     this.adaptiveQuality = new AdaptiveQualitySystem({
@@ -363,9 +370,11 @@ export class Game {
     if (this.softwareRenderer && !visualCapture) this.renderer.shadowMap.enabled = false;
     this.renderer.info.autoReset = false;
     this.renderer.toneMappingExposure = new URLSearchParams(window.location.search).get('map') === 'quicksense'
-      ? 0.98
+      ? 0.95
       : 0.86;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = arena.mapInfo.name === 'QuickSense'
+      ? THREE.PCFSoftShadowMap
+      : THREE.PCFShadowMap;
     this.startButton = this.element<HTMLButtonElement>('#start-button');
     this.playTab = this.element<HTMLButtonElement>('#play-tab');
     this.optionsTab = this.element<HTMLButtonElement>('#options-tab');
@@ -747,7 +756,8 @@ export class Game {
       else if (this.weatherSnapshot.phase === 'recovery') this.hud.message('WEATHER CLEARING');
     }
     if (this.scene.fog instanceof THREE.FogExp2) {
-      this.scene.fog.density = 0.00146 / Math.max(0.82, this.weatherSnapshot.multipliers.visibilityMultiplier);
+      const baseline = this.arena.mapInfo.name === 'QuickSense' ? QUICKSENSE_FOG_DENSITY : 0.00146;
+      this.scene.fog.density = baseline / Math.max(0.82, this.weatherSnapshot.multipliers.visibilityMultiplier);
     }
 
     this.updatePlayerMovement(delta);
@@ -1084,7 +1094,7 @@ export class Game {
   ): void {
     const rayStart = this.sweepRayStart.copy(start).add(offset);
     const rayEnd = this.sweepRayEnd.copy(intended).add(offset);
-    const hit = this.arena.segmentHitDetails(rayStart, rayEnd);
+    const hit = this.arena.movementSegmentHitDetails(rayStart, rayEnd);
     if (!hit || hit.distance <= 1e-5) return;
     const qualifies = kind === 'wall'
       ? hit.normal.y < MOVEMENT.maxSlopeCosine && hit.normal.y > -0.55
@@ -2600,6 +2610,9 @@ export class Game {
     } else {
       this.camera.rotation.z = 0;
     }
+    if (this.pausedForScreenshot && this.screenshotLookTargetActive) {
+      this.camera.lookAt(this.screenshotLookTarget);
+    }
 
     const speed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
     const scopeRequested = this.sniperScopeRequested();
@@ -2610,7 +2623,10 @@ export class Game {
       1 - Math.exp(-scopeDelta * (scopeRequested ? 14 : 18)),
     );
     if (this.scopeBlend < 0.001) this.scopeBlend = 0;
-    const unscopedFov = Math.min(104, this.pausedForScreenshot ? this.screenshotCameraFov : 84 + speed * 0.31 + this.fovPunch);
+    const unscopedFov = Math.min(
+      MAX_SPEED_FOV,
+      this.pausedForScreenshot ? this.screenshotCameraFov : BASE_GAME_FOV + speed * 0.24 + this.fovPunch,
+    );
     const baseFov = THREE.MathUtils.lerp(unscopedFov, 24, this.scopeBlend);
     this.fovPunch *= Math.exp(-delta / 0.2);
     this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, baseFov, 1 - Math.exp(-scopeDelta * 12));
@@ -2659,7 +2675,7 @@ export class Game {
     const aimRayEnd = this.cameraAimScratch.copy(eye).addScaledVector(direction, 190);
     const aimPointWorld = this.arena.segmentHit(eye, aimRayEnd) ?? aimRayEnd;
     this.scopeRange = eye.distanceTo(aimPointWorld);
-    this.hud.setSniperScope(this.scopeBlend, this.scopeRange, 84 / Math.max(24, this.camera.fov));
+    this.hud.setSniperScope(this.scopeBlend, this.scopeRange, BASE_GAME_FOV / Math.max(24, this.camera.fov));
     this.camera.updateMatrixWorld(true);
     const aimPointLocal = this.camera.worldToLocal(this.cameraLocalAimScratch.copy(aimPointWorld));
     const bob = this.reducedMotion
@@ -2923,7 +2939,9 @@ export class Game {
     this.recentPlayerKills.length = 0;
     this.weatherSnapshot = this.weatherSystem.reset();
     this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
-    if (this.scene.fog instanceof THREE.FogExp2) this.scene.fog.density = 0.00146;
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.density = this.arena.mapInfo.name === 'QuickSense' ? QUICKSENSE_FOG_DENSITY : 0.00146;
+    }
     for (const pickup of this.pickups) {
       pickup.active = true;
       pickup.cooldown = 0;
@@ -2971,45 +2989,51 @@ export class Game {
 
   private createScene(): void {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
-    this.scene.background = this.arena.skyTexture ?? new THREE.Color(quickSense ? 0x78aee0 : 0x8fcddd);
-    this.scene.backgroundIntensity = quickSense ? 1 : 0.78;
+    // QuickSense's low-poly architecture needs a clean value backdrop. Keep
+    // the loaded panorama owned by the arena, but do not let its storm plate
+    // flatten silhouettes or contaminate the cyan/magenta route palette.
+    this.scene.background = quickSense
+      ? new THREE.Color(0x75b6df)
+      : this.arena.skyTexture ?? new THREE.Color(0x8fcddd);
+    this.scene.backgroundIntensity = quickSense ? 0.96 : 0.78;
     this.scene.backgroundBlurriness = 0.035;
-    this.scene.fog = new THREE.FogExp2(quickSense ? 0x7d95a1 : 0x7293a0, quickSense ? 0.0008 : 0.00146);
+    this.scene.fog = new THREE.FogExp2(quickSense ? 0x6f899a : 0x7293a0, quickSense ? QUICKSENSE_FOG_DENSITY : 0.00146);
     const environmentGenerator = new THREE.PMREMGenerator(this.renderer);
     // Keep the 4K panorama as the authored background. A compact PMREM studio
     // provides predictable PBR fill without prefiltering that large image on
     // startup (which is especially costly on integrated and software GPUs).
     this.environmentTexture = environmentGenerator.fromScene(new RoomEnvironment(), 0.03).texture;
     this.scene.environment = this.environmentTexture;
-    this.scene.environmentIntensity = quickSense ? 0.82 : 0.72;
+    this.scene.environmentIntensity = quickSense ? 0.52 : 0.72;
     environmentGenerator.dispose();
-    if (!this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
-    this.scene.add(new THREE.AmbientLight(0x708896, quickSense ? 0.18 : 0.11));
+    if (quickSense || !this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
+    this.scene.add(new THREE.AmbientLight(0x607786, quickSense ? 0.018 : 0.11));
     const hemisphere = new THREE.HemisphereLight(
-      quickSense ? 0xb8d5e7 : 0xb4d7e3,
-      quickSense ? 0x303627 : 0x263825,
-      quickSense ? 0.86 : 0.76,
+      quickSense ? 0x9fc5dc : 0xb4d7e3,
+      quickSense ? 0x1c2521 : 0x263825,
+      quickSense ? 0.52 : 0.76,
     );
     this.scene.add(hemisphere);
-    const sun = new THREE.DirectionalLight(0xffe0b2, quickSense ? 1.62 : 1.86);
-    sun.position.set(quickSense ? -135 : 135, 190, quickSense ? -105 : 105);
+    const sun = new THREE.DirectionalLight(0xfff1df, quickSense ? 2.12 : 1.86);
+    sun.position.set(quickSense ? -205 : 135, quickSense ? 255 : 190, quickSense ? -145 : 105);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    const shadowMapSize = quickSense && this.mobileQuality ? 1024 : 2048;
+    sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     sun.shadow.camera.near = 20;
-    sun.shadow.camera.far = quickSense ? 680 : 520;
-    const shadowExtent = quickSense ? 390 : 210;
+    sun.shadow.camera.far = quickSense ? 540 : 520;
+    const shadowExtent = quickSense ? 235 : 210;
     sun.shadow.camera.left = -shadowExtent;
     sun.shadow.camera.right = shadowExtent;
     sun.shadow.camera.top = shadowExtent;
     sun.shadow.camera.bottom = -shadowExtent;
-    sun.shadow.bias = -0.00035;
-    sun.shadow.normalBias = 0.035;
+    sun.shadow.bias = quickSense ? -0.00018 : -0.00035;
+    sun.shadow.normalBias = quickSense ? 0.018 : 0.035;
     this.scene.add(sun);
     this.coreLight.position.copy(this.arena.corePosition).add(new THREE.Vector3(0, 6, 0));
     this.coreLight.visible = false;
     this.scene.add(this.coreLight);
-    const rim = new THREE.DirectionalLight(0x5d86ab, quickSense ? 0.5 : 0.56);
-    rim.position.set(-90, 70, -120);
+    const rim = new THREE.DirectionalLight(0x6aa7d4, quickSense ? 0.3 : 0.56);
+    rim.position.set(quickSense ? 165 : -90, quickSense ? 115 : 70, quickSense ? 185 : -120);
     this.scene.add(rim);
     this.scene.add(this.arena.group);
   }
@@ -3020,16 +3044,23 @@ export class Game {
     composer.addPass(new RenderPass(this.scene, this.camera));
     composer.addPass(new UnrealBloomPass(
       new THREE.Vector2(1, 1),
-      quickSense ? (this.mobileQuality ? 0.08 : 0.16) : (this.mobileQuality ? 0.12 : 0.28),
-      quickSense ? 0.26 : 0.34,
-      quickSense ? 1.14 : 1.08,
+      quickSense ? (this.mobileQuality ? 0.075 : 0.14) : (this.mobileQuality ? 0.12 : 0.28),
+      quickSense ? 0.24 : 0.34,
+      quickSense ? 1.08 : 1.08,
     ));
     this.inkPass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
         resolution: { value: new THREE.Vector2(1, 1) },
-        edgeStrength: { value: quickSense ? (this.mobileQuality ? 0.05 : 0.075) : (this.mobileQuality ? 0.08 : 0.115) },
-        vignette: { value: quickSense ? 0.1 : 0.16 },
+        edgeStrength: { value: quickSense ? (this.mobileQuality ? 0.035 : 0.05) : (this.mobileQuality ? 0.08 : 0.115) },
+        vignette: { value: quickSense ? 0.07 : 0.16 },
+        gradeStrength: { value: quickSense ? 1 : 0 },
+        gradeContrast: { value: quickSense ? 1.055 : 1 },
+        neutralDarken: { value: quickSense ? 0.085 : 0 },
+        shadowCool: { value: quickSense ? 0.18 : 0 },
+        shadowLift: { value: quickSense ? 0.0045 : 0 },
+        routeHueSeparation: { value: quickSense ? 1 : 0 },
+        saturation: { value: quickSense ? 1.09 : 1.065 },
         speedBlur: { value: 0 },
       },
       vertexShader: `varying vec2 vUv;
@@ -3041,6 +3072,13 @@ export class Game {
         uniform vec2 resolution;
         uniform float edgeStrength;
         uniform float vignette;
+        uniform float gradeStrength;
+        uniform float gradeContrast;
+        uniform float neutralDarken;
+        uniform float shadowCool;
+        uniform float shadowLift;
+        uniform float routeHueSeparation;
+        uniform float saturation;
         uniform float speedBlur;
         varying vec2 vUv;
         float luma(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
@@ -3070,7 +3108,30 @@ export class Game {
             color = mix(color, speedColor, peripheral * speedBlur * 0.54);
           }
           color *= 1.0 - edge * edgeStrength;
-          color = mix(vec3(luma(color)), color, 1.065);
+          vec3 graded = color;
+          float signalPeak = max(graded.r, max(graded.g, graded.b));
+          float redOverGreen = graded.r / max(graded.g, 0.001);
+          float greenOverBlue = graded.g / max(graded.b, 0.001);
+          float blueShare = graded.b / max(graded.r, 0.001);
+          float warmRoseMask = smoothstep(1.18, 1.62, redOverGreen)
+            * smoothstep(1.08, 1.72, greenOverBlue)
+            * smoothstep(0.11, 0.24, blueShare)
+            * (1.0 - smoothstep(0.46, 0.68, blueShare));
+          vec3 magentaRoute = vec3(signalPeak, signalPeak * 0.055, signalPeak * 0.58);
+          graded = mix(graded, magentaRoute, routeHueSeparation * warmRoseMask * 0.92);
+          float gradeLuma = luma(graded);
+          float maxChannel = max(graded.r, max(graded.g, graded.b));
+          float minChannel = min(graded.r, min(graded.g, graded.b));
+          float neutralMask = 1.0 - smoothstep(0.055, 0.24, maxChannel - minChannel);
+          float neutralRange = smoothstep(0.08, 0.3, gradeLuma)
+            * (1.0 - smoothstep(1.35, 2.2, gradeLuma));
+          graded *= 1.0 - neutralDarken * neutralMask * neutralRange;
+          graded = max(vec3(0.0), (graded - 0.2) * gradeContrast + 0.2);
+          float shadowMask = 1.0 - smoothstep(0.2, 0.68, luma(graded));
+          graded = mix(graded, graded * vec3(0.93, 0.985, 1.04), shadowCool * shadowMask);
+          graded += vec3(shadowLift * (1.0 - smoothstep(0.04, 0.24, luma(graded))));
+          color = mix(color, graded, gradeStrength);
+          color = mix(vec3(luma(color)), color, saturation);
           float radial = smoothstep(0.92, 0.2, length(vUv - 0.5));
           color *= mix(1.0 - vignette, 1.0, radial);
           gl_FragColor = vec4(color, 1.0);
@@ -3096,13 +3157,13 @@ export class Game {
 
   private createSky(bright = false): THREE.Mesh {
     const uniforms = {
-      uTop: { value: new THREE.Color(bright ? 0x4a97cf : 0x152a43) },
-      uHorizon: { value: new THREE.Color(bright ? 0xb0d5e9 : 0x83a8b6) },
-      uLower: { value: new THREE.Color(bright ? 0xd1e4ed : 0x2d5567) },
-      uStorm: { value: new THREE.Color(bright ? 0xbccbd4 : 0x101c31) },
+      uTop: { value: new THREE.Color(bright ? 0x4a95cc : 0x152a43) },
+      uHorizon: { value: new THREE.Color(bright ? 0xa9d2e4 : 0x83a8b6) },
+      uLower: { value: new THREE.Color(bright ? 0xd0dfe0 : 0x2d5567) },
+      uStorm: { value: new THREE.Color(bright ? 0x789db2 : 0x101c31) },
       uSunColor: { value: new THREE.Color(0xffd7a4) },
-      uSunDir: { value: new THREE.Vector3(bright ? -0.62 : 0.62, bright ? 0.32 : 0.22, bright ? -0.55 : 0.55).normalize() },
-      uCloudStrength: { value: bright ? 0.48 : 0.88 },
+      uSunDir: { value: new THREE.Vector3(bright ? -0.62 : 0.62, bright ? 0.38 : 0.22, bright ? -0.55 : 0.55).normalize() },
+      uCloudStrength: { value: bright ? 0.1 : 0.88 },
     };
     const sky = new THREE.Mesh(
       new THREE.SphereGeometry(850, 40, 22),
@@ -3121,15 +3182,15 @@ export class Game {
             return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
           }
           void main(){
-            float h = clamp(vDir.y * 0.5 + 0.5, 0.0, 1.0);
-            vec3 upper = mix(uHorizon, uTop, pow(h, 0.68));
-            vec3 col = mix(uLower, upper, smoothstep(0.08, 0.48, h));
+            float elevation = clamp(vDir.y, 0.0, 1.0);
+            vec3 upper = mix(uHorizon, uTop, pow(elevation, 0.58));
+            vec3 col = mix(uLower, upper, smoothstep(-0.18, 0.055, vDir.y));
             float azimuth = atan(vDir.z, vDir.x);
             float cloudNoise = noise(vec2(azimuth * 2.8, vDir.y * 7.0)) * 0.62
               + noise(vec2(azimuth * 6.2 + 4.0, vDir.y * 13.0)) * 0.38;
             float stormSide = smoothstep(-0.3, 0.68, -vDir.x - vDir.z * 0.38);
             float clouds = smoothstep(0.38, 0.7, cloudNoise + (uCloudStrength < 0.7 ? 0.1 : 0.0) + stormSide * 0.24)
-              * smoothstep(0.28, 0.62, h);
+              * smoothstep(-0.02, 0.42, vDir.y);
             col = mix(col, uStorm, clouds * uCloudStrength);
             float d = clamp(dot(normalize(vDir), normalize(uSunDir)), 0.0, 1.0);
             col += uSunColor * (pow(d, 900.0) * 1.25 + pow(d, 14.0) * 0.11);
@@ -3203,8 +3264,11 @@ export class Game {
       mesh.name = name;
       mesh.position.set(...position);
       mesh.rotation.set(...rotation);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
+      // Pickups are emissive readability props, not world architecture. Their
+      // former dynamic shadows duplicated the full weapon geometry in every
+      // shadow refresh and dominated the scene's submitted triangle budget.
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
       group.add(mesh);
       return mesh;
     };
@@ -3220,11 +3284,7 @@ export class Game {
     const isWeapon = kind === 'rail' || kind === 'rocket' || kind === 'plasma'
       || kind === 'shotgun' || kind === 'sniper' || kind === 'laser' || kind === 'disc';
     if (isWeapon) {
-      const visual = createWeaponViewModel(this.weapon(kind), false);
-      visual.root.scale.multiplyScalar(kind === 'rail' || kind === 'sniper' ? 0.54 : 0.6);
-      visual.root.rotation.set(-0.08, Math.PI * 0.5, kind === 'rocket' ? -0.08 : 0);
-      visual.root.position.set(0, 0.49, 0);
-      group.add(this.bakePickupWeapon(visual.root, kind));
+      group.add(this.createWeaponPickupLod(kind, dark, accent));
       for (const side of [-1, 1]) {
         add(`weapon-rack-${side}`, new THREE.BoxGeometry(0.1, 0.34, 0.18), rubber, [side * 0.34, 0.3, 0]);
         add(`weapon-clamp-${side}`, new THREE.TorusGeometry(0.12, 0.025, 6, 16, Math.PI), accent, [side * 0.34, 0.48, 0], [0, Math.PI * 0.5, 0]);
@@ -3266,6 +3326,90 @@ export class Game {
     }
     this.compactPickupModel(group);
     return group;
+  }
+
+  private createWeaponPickupLod(
+    kind: WeaponId,
+    dark: THREE.MeshStandardMaterial,
+    accent: THREE.MeshStandardMaterial,
+  ): THREE.Group {
+    const root = new THREE.Group();
+    root.name = `${kind}-pickup-weapon-model`;
+    root.position.set(0, 0.58, 0);
+    root.rotation.set(-0.06, 0.18, kind === 'rocket' ? -0.08 : 0);
+
+    const longWeapon = kind === 'rail' || kind === 'sniper' || kind === 'laser';
+    const bodyLength = longWeapon ? 1.42 : kind === 'rocket' ? 1.18 : 1.02;
+    const bodyHeight = kind === 'rocket' ? 0.31 : 0.24;
+    const bodyDepth = kind === 'disc' ? 0.4 : kind === 'rocket' ? 0.38 : 0.31;
+    const bodyParts: THREE.BufferGeometry[] = [];
+    const receiver = new THREE.BoxGeometry(bodyLength * 0.64, bodyHeight, bodyDepth);
+    receiver.translate(-bodyLength * 0.06, 0, 0);
+    bodyParts.push(receiver);
+    const stock = new THREE.BoxGeometry(bodyLength * 0.3, bodyHeight * 0.82, bodyDepth * 0.84);
+    stock.translate(-bodyLength * 0.46, -bodyHeight * 0.04, 0);
+    bodyParts.push(stock);
+    if (kind === 'sniper' || kind === 'rail') {
+      const upper = new THREE.BoxGeometry(bodyLength * 0.42, bodyHeight * 0.4, bodyDepth * 0.62);
+      upper.translate(-bodyLength * 0.02, bodyHeight * 0.58, 0);
+      bodyParts.push(upper);
+    }
+    const mergedBody = mergeGeometries(bodyParts, false);
+    for (const geometry of bodyParts) geometry.dispose();
+    if (mergedBody) {
+      const mesh = new THREE.Mesh(mergedBody, dark);
+      mesh.name = `${kind}-pickup-lod-body`;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      root.add(mesh);
+    }
+
+    const barrelParts: THREE.BufferGeometry[] = [];
+    const barrelLength = longWeapon ? 0.92 : kind === 'rocket' ? 0.74 : 0.62;
+    const barrelRadius = kind === 'rocket' ? 0.13 : kind === 'shotgun' ? 0.055 : 0.045;
+    const barrelCount = kind === 'shotgun' ? 2 : 1;
+    for (let index = 0; index < barrelCount; index += 1) {
+      const barrel = new THREE.CylinderGeometry(barrelRadius, barrelRadius * 1.08, barrelLength, 8);
+      barrel.rotateZ(Math.PI * 0.5);
+      barrel.translate(bodyLength * 0.34 + barrelLength * 0.5, 0, (index - (barrelCount - 1) * 0.5) * 0.13);
+      barrelParts.push(barrel);
+    }
+    if (kind === 'plasma') {
+      const chamber = new THREE.SphereGeometry(0.19, 8, 5);
+      chamber.translate(bodyLength * 0.12, 0.03, 0);
+      barrelParts.push(chamber);
+    }
+    const mergedBarrel = mergeGeometries(barrelParts, false);
+    for (const geometry of barrelParts) geometry.dispose();
+    if (mergedBarrel) {
+      const mesh = new THREE.Mesh(mergedBarrel, dark);
+      mesh.name = `${kind}-pickup-lod-barrel`;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      root.add(mesh);
+    }
+
+    const signature = kind === 'disc'
+      ? new THREE.TorusGeometry(0.29, 0.055, 6, 18)
+      : kind === 'rocket'
+        ? new THREE.CylinderGeometry(0.17, 0.17, 0.18, 8)
+        : new THREE.BoxGeometry(longWeapon ? 0.42 : 0.28, bodyHeight * 0.28, bodyDepth * 1.04);
+    if (kind === 'rocket') {
+      signature.rotateZ(Math.PI * 0.5);
+      signature.translate(bodyLength * 0.25, 0, 0);
+    } else if (kind === 'disc') {
+      signature.rotateY(Math.PI * 0.5);
+      signature.translate(bodyLength * 0.05, bodyHeight * 0.52, 0);
+    } else {
+      signature.translate(bodyLength * 0.08, bodyHeight * 0.52, 0);
+    }
+    const signatureMesh = new THREE.Mesh(signature, accent);
+    signatureMesh.name = `${kind}-pickup-lod-signature`;
+    signatureMesh.castShadow = false;
+    signatureMesh.receiveShadow = false;
+    root.add(signatureMesh);
+    this.compactPickupModel(root);
+    return root;
   }
 
   private compactPickupModel(group: THREE.Group): void {
@@ -3316,58 +3460,10 @@ export class Game {
     if (merged) {
       const mesh = new THREE.Mesh(merged, materials.length === 1 ? materials[0] : materials);
       mesh.name = 'pickup-static-material-batches';
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
       group.add(mesh);
     }
-  }
-
-  private bakePickupWeapon(source: THREE.Group, kind: WeaponId): THREE.Group {
-    source.updateMatrixWorld(true);
-    const batches = new Map<THREE.Material, THREE.BufferGeometry[]>();
-    source.traverse((object) => {
-      const mesh = object as THREE.Mesh;
-      if (!mesh.isMesh || Array.isArray(mesh.material)) return;
-      let geometry = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
-      geometry.applyMatrix4(mesh.matrixWorld);
-      if (!geometry.getAttribute('normal')) geometry.computeVertexNormals();
-      if (!geometry.getAttribute('uv')) {
-        geometry.setAttribute('uv', new THREE.Float32BufferAttribute(geometry.getAttribute('position').count * 2, 2));
-      }
-      for (const attribute of Object.keys(geometry.attributes)) {
-        if (attribute !== 'position' && attribute !== 'normal' && attribute !== 'uv') geometry.deleteAttribute(attribute);
-      }
-      const entries = batches.get(mesh.material) ?? [];
-      entries.push(geometry);
-      batches.set(mesh.material, entries);
-    });
-
-    const baked = new THREE.Group();
-    baked.name = `${kind}-pickup-weapon-model`;
-    const materials: THREE.Material[] = [];
-    const mergedParts: THREE.BufferGeometry[] = [];
-    for (const [material, geometries] of batches) {
-      const merged = mergeGeometries(geometries, false);
-      for (const geometry of geometries) geometry.dispose();
-      if (merged) {
-        materials.push(material);
-        mergedParts.push(merged);
-      }
-    }
-    const merged = mergeGeometries(mergedParts, true);
-    for (const geometry of mergedParts) geometry.dispose();
-    if (merged) {
-      const mesh = new THREE.Mesh(merged, materials.length === 1 ? materials[0] : materials);
-      mesh.name = `${kind}-pickup-material-batches`;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      baked.add(mesh);
-    }
-    source.traverse((object) => {
-      const mesh = object as THREE.Mesh;
-      if (mesh.isMesh) mesh.geometry.dispose();
-    });
-    return baked;
   }
 
   private createCore(): void {
@@ -3502,7 +3598,8 @@ export class Game {
         this.cancelMatchCountdown();
         this.pausedForScreenshot = false;
         this.screenshotArenaTime = 0;
-        this.screenshotCameraFov = 84;
+        this.screenshotCameraFov = BASE_GAME_FOV;
+        this.screenshotLookTargetActive = false;
         this.weaponModel.visible = true;
         this.input.consumeJump();
         this.input.consumeDash();
@@ -3559,25 +3656,34 @@ export class Game {
           this.audio.setPaused(false);
           this.hud.hideStart();
           const floor = this.arena.floorHeightAt(-148, 76, Number.POSITIVE_INFINITY) ?? 0;
-          this.playerPosition.set(-148, floor, 76);
+          this.playerPosition.set(-148, floor - 0.08, 76);
           // Aim the deterministic descent at the low edge of the west launch.
           // The old route target cut across its skirt instead of following the
           // visible ramp line, which made a clean downhill run look snagged.
           const downhill = new THREE.Vector3(-119, floor, 58).sub(this.playerPosition).setY(0).normalize();
-          this.playerVelocity.copy(downhill).multiplyScalar(14);
+          this.playerVelocity.set(0, 0, 0);
           this.jumpBuffer = 0;
           this.coyote = 0;
           this.dashBuffer = 0;
           this.dashMomentumTimer = 0;
           this.yaw = Math.atan2(-downhill.x, -downhill.z);
           this.pitch = -0.08;
-          const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          let contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          if (!contact.grounded) {
+            this.playerPosition.y = floor - 0.14;
+            contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          }
           this.grounded = contact.grounded;
           this.terrainNormal.copy(contact.contactNormal);
+          this.playerVelocity.copy(downhill).multiplyScalar(14);
         } else if (name === 'active-play') {
           this.mode = 'running';
           this.audio.setPaused(false);
           this.hud.hideStart();
+          this.selectedWeapon = WEAPONS.findIndex((weapon) => weapon.id === 'machine');
+          this.weaponCooldown = 0;
+          this.ammo.set('machine', this.weapon('machine').ammo);
+          this.buildWeaponModel();
           // Use the validated flat-lane spawn for live-input and visual smoke
           // tests. Spawn 7 sits above a brush seam that has no capsule contact,
           // which made deterministic active play begin airborne and produced
@@ -3702,9 +3808,11 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(true);
           this.screenshotCameraFov = 45;
-          this.playerPosition.set(0, 320, -235);
+          this.playerPosition.set(0, 610, -20);
           this.playerVelocity.set(0, 0, 0);
-          const view = new THREE.Vector3(0, 13, 0).sub(this.playerPosition).normalize();
+          this.screenshotLookTarget.set(0, 8, 0);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -3712,10 +3820,12 @@ export class Game {
         } else if (name === 'quicksense-depth') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotCameraFov = 61;
-          this.playerPosition.set(-98, 27, -108);
+          this.screenshotCameraFov = 62;
+          this.playerPosition.set(-96, 30, -116);
           this.playerVelocity.set(0, 0, 0);
-          const view = new THREE.Vector3(0, 15, 24).sub(this.playerPosition).normalize();
+          this.screenshotLookTarget.set(18, 31, 32);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -3724,13 +3834,38 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(true);
           this.screenshotCameraFov = 58;
-          this.playerPosition.set(-48, 20, -126);
+          this.playerPosition.set(-46, 42, -150);
           this.playerVelocity.set(0, 0, 0);
-          const view = new THREE.Vector3(0, 16.5, -91).sub(this.playerPosition).normalize();
+          this.screenshotLookTarget.set(0, 26, -74);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
           this.weaponModel.visible = false;
+        } else if (name === 'quicksense-speed') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          this.screenshotCameraFov = 96;
+          const floor = this.arena.floorHeightAt(0, -128, 160) ?? 4.8;
+          this.playerPosition.set(0, floor - 0.04, -128);
+          this.playerVelocity.set(0, 0, 0);
+          const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          this.grounded = contact.grounded;
+          this.terrainNormal.copy(contact.contactNormal);
+          this.playerVelocity.set(0, 0, 38);
+          this.skiHeld = true;
+          this.yaw = Math.PI;
+          this.pitch = -0.035;
+          this.weaponModel.visible = false;
+          this.renderer.shadowMap.autoUpdate = false;
+          this.renderer.shadowMap.needsUpdate = false;
+          for (const bot of this.bots) {
+            bot.movementLocked = true;
+            bot.velocity.set(0, 0, 0);
+          }
         } else if (name === 'quicksense-flow') {
           this.mode = 'running';
           this.audio.setPaused(true);
@@ -3804,6 +3939,8 @@ export class Game {
         }
         if (name.startsWith('monsoon-') || ['quicksense-overlook', 'quicksense-depth', 'quicksense-ramp'].includes(name)) {
           this.pausedForScreenshot = true;
+          this.renderer.shadowMap.autoUpdate = false;
+          this.renderer.shadowMap.needsUpdate = false;
           this.hud.hideStart();
           for (const selector of ['#hud', '#crosshair', '#touch-controls']) {
             document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
@@ -3878,6 +4015,13 @@ export class Game {
       },
       setPausedForScreenshot: (paused: boolean) => {
         this.pausedForScreenshot = paused;
+        if (paused) {
+          // The static arena shadow atlas is already valid by the time the QA
+          // hooks are installed. Camera-only capture states must not resubmit
+          // every static mesh merely because the player was teleported.
+          this.renderer.shadowMap.autoUpdate = false;
+          this.renderer.shadowMap.needsUpdate = false;
+        }
       },
       setWeaponInspectionMode: (enabled: boolean) => {
         this.weaponInspectionMode = enabled;
@@ -4212,7 +4356,7 @@ export class Game {
         active: this.scopeBlend > 0.5,
         blend: this.scopeBlend,
         range: this.scopeRange,
-        zoom: 84 / Math.max(24, this.camera.fov),
+        zoom: BASE_GAME_FOV / Math.max(24, this.camera.fov),
       },
       audio: this.audio.diagnostics(),
     };
@@ -4221,7 +4365,7 @@ export class Game {
   private render(): void {
     if (this.physicsQaMode && this.physicsQaFrameRendered) return;
     this.renderer.info.reset();
-    if (this.physicsQaMode || this.softwareRenderer) {
+    if (this.physicsQaMode || (this.softwareRenderer && !this.visualCapture)) {
       this.renderer.render(this.scene, this.camera);
       if (this.physicsQaMode) this.physicsQaFrameRendered = true;
       return;
