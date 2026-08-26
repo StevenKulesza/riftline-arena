@@ -1,3 +1,5 @@
+import { assetUrl } from './assets/assetUrl';
+
 type RiftSettings = {
   sensitivity: number;
   muted: boolean;
@@ -21,7 +23,7 @@ const motionOption = element<HTMLButtonElement>('#motion-option');
 const fullscreenOption = element<HTMLButtonElement>('#fullscreen-option');
 const mapChoices = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-map-choice]'));
 
-const menuMusic = new Audio('/assets/audio/music/rift-menu-loop-clean-v1.mp3');
+const menuMusic = new Audio(assetUrl('assets/audio/music/rift-menu-loop-clean-v1.mp3'));
 menuMusic.loop = true;
 menuMusic.preload = 'auto';
 menuMusic.volume = 0.32;

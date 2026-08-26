@@ -5,6 +5,7 @@ import {
   type BotDifficultyId,
   type BotPolicySnapshot,
 } from './systems/BotArchetypes';
+import { assetUrl } from './assets/assetUrl';
 
 type RolePresentation = Readonly<{
   index: string;
@@ -22,7 +23,7 @@ const ROLE_PRESENTATION: Readonly<Record<BotArchetypeId, RolePresentation>> = Ob
     description: 'Seeks direct engagements and sustains pressure. Prioritizes targets that open space and break defensive setups.',
     tacticNote: 'Maintains contact. Re-acquires the highest-value threat after interruption.',
     accent: '#ff5d68',
-    image: '/assets/ui/dossier/hunter.webp',
+    image: assetUrl('assets/ui/dossier/hunter.webp'),
   }),
   anchor: Object.freeze({
     index: '02',
@@ -30,7 +31,7 @@ const ROLE_PRESENTATION: Readonly<Record<BotArchetypeId, RolePresentation>> = Ob
     description: 'Controls the Flux Core approach and punishes overextension. Prefers stable sightlines and defensible combat ranges.',
     tacticNote: 'Holds objective geometry. Breaks position only for immediate player pressure.',
     accent: '#48c9ff',
-    image: '/assets/ui/dossier/anchor.webp',
+    image: assetUrl('assets/ui/dossier/anchor.webp'),
   }),
   runner: Object.freeze({
     index: '03',
@@ -38,7 +39,7 @@ const ROLE_PRESENTATION: Readonly<Record<BotArchetypeId, RolePresentation>> = Ob
     description: 'Chains authored routes into rapid objective pressure. Uses movement lines to arrive before slower combat frames.',
     tacticNote: 'Commits to route flow. Diverts for the Core or a high-value pickup window.',
     accent: '#64f1b2',
-    image: '/assets/ui/dossier/runner.webp',
+    image: assetUrl('assets/ui/dossier/runner.webp'),
   }),
   thief: Object.freeze({
     index: '04',
@@ -46,7 +47,7 @@ const ROLE_PRESENTATION: Readonly<Record<BotArchetypeId, RolePresentation>> = Ob
     description: 'Steals powerups and precision channels before opponents can establish control, then disengages into safer lanes.',
     tacticNote: 'Tracks item timing. Repositions after acquisition instead of holding a prolonged duel.',
     accent: '#d27cff',
-    image: '/assets/ui/dossier/thief.webp',
+    image: assetUrl('assets/ui/dossier/thief.webp'),
   }),
 });
 

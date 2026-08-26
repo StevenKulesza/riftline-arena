@@ -1,9 +1,11 @@
 import { defineConfig } from 'vite';
 
+const githubRepository = process.env.GITHUB_REPOSITORY?.split('/')[1];
+
 export default defineConfig({
-  // Relative production URLs work at both a GitHub project Pages path and a
-  // custom/root domain without maintaining separate build configurations.
-  base: './',
+  // GitHub project Pages needs an explicit repository prefix so public assets
+  // referenced by CSS resolve below /<repository>/ instead of the site root.
+  base: githubRepository ? `/${githubRepository}/` : './',
   server: {
     host: '127.0.0.1',
     port: 5190,
