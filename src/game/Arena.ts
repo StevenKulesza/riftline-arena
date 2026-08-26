@@ -303,6 +303,24 @@ export class Arena implements ArenaRuntime {
   private readonly contactNormal = new THREE.Vector3(0, 1, 0);
   private readonly correction = new THREE.Vector3();
   private readonly bestWallNormal = new THREE.Vector3();
+  private readonly capsuleContacts: CapsuleContact[] = Array.from({ length: 8 }, () => ({
+    grounded: false,
+    contactNormal: new THREE.Vector3(0, 1, 0),
+    wallContact: false,
+    wallNormal: new THREE.Vector3(),
+    correction: new THREE.Vector3(),
+    contacts: 0,
+  }));
+  private capsuleContactCursor = 0;
+  private readonly rayDirection = new THREE.Vector3();
+  private readonly collisionRay = new THREE.Ray();
+  private readonly rayHitNormal = new THREE.Vector3();
+  private readonly surfaceHit: SurfaceHit = {
+    point: new THREE.Vector3(),
+    normal: new THREE.Vector3(),
+    distance: 0,
+    surface: 'grass',
+  };
   private readonly rampContactNormal = new THREE.Vector3();
   private readonly rampContact = { normal: this.rampContactNormal, depth: 0 };
   private readonly floorSurfaceNormal = new THREE.Vector3(0, 1, 0);
@@ -679,14 +697,15 @@ export class Arena implements ArenaRuntime {
       contacts += 1;
     }
 
-    return {
-      grounded,
-      contactNormal: this.contactNormal.clone(),
-      wallContact,
-      wallNormal: this.bestWallNormal.clone(),
-      correction: this.correction.clone(),
-      contacts,
-    };
+    const result = this.capsuleContacts[this.capsuleContactCursor];
+    this.capsuleContactCursor = (this.capsuleContactCursor + 1) % this.capsuleContacts.length;
+    result.grounded = grounded;
+    result.contactNormal.copy(this.contactNormal);
+    result.wallContact = wallContact;
+    result.wallNormal.copy(this.bestWallNormal);
+    result.correction.copy(this.correction);
+    result.contacts = contacts;
+    return result;
   }
 
   private rampSolidContact(
@@ -793,14 +812,16 @@ export class Arena implements ArenaRuntime {
   }
 
   segmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null {
-    const direction = end.clone().sub(start);
+    const direction = this.rayDirection.copy(end).sub(start);
     const distance = direction.length();
     if (distance < 1e-6) return null;
     direction.multiplyScalar(1 / distance);
-    const ray = new THREE.Ray(start, direction);
+    const ray = this.collisionRay.set(start, direction);
     const hit = this.boundsTree.raycastFirst(ray, THREE.DoubleSide, 0, distance);
     if (!hit) return null;
-    const normal = hit.face?.normal?.clone() ?? sampleMonsoonNormal(hit.point.x, hit.point.z, new THREE.Vector3(), this.seed);
+    const normal = hit.face?.normal
+      ? this.rayHitNormal.copy(hit.face.normal)
+      : sampleMonsoonNormal(hit.point.x, hit.point.z, this.rayHitNormal, this.seed);
     if (normal.dot(direction) > 0) normal.negate();
     const masks = sampleMonsoonMasks(hit.point.x, hit.point.z);
     const surface: SurfaceHit['surface'] = this.isConcretePoint(hit.point)
@@ -808,7 +829,12 @@ export class Arena implements ArenaRuntime {
       : hit.point.y <= MONSOON_DIVIDE.waterY + 0.2
       ? 'water'
       : normal.y < 0.62 ? 'rock' : masks.route > 0.24 ? 'soil' : 'grass';
-    return { point: hit.point.clone(), normal, distance: hit.distance, surface };
+    const result = this.surfaceHit;
+    result.point.copy(hit.point);
+    result.normal.copy(normal);
+    result.distance = hit.distance;
+    result.surface = surface;
+    return result;
   }
 
   surfaceAt(x: number, z: number, fromY = Number.POSITIVE_INFINITY): ArenaSurface {

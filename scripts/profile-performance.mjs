@@ -103,6 +103,9 @@ function parseArgs(argv) {
     speedKmh: 0,
     fireWeapon: null,
     preloadAudio: false,
+    combat: false,
+    fly: false,
+    map: null,
   };
   for (let index = 2; index < argv.length; index += 1) {
     const value = argv[index];
@@ -118,6 +121,9 @@ function parseArgs(argv) {
     else if (value === '--speed-kmh') result.speedKmh = Number(argv[++index]);
     else if (value === '--fire-weapon') result.fireWeapon = argv[++index];
     else if (value === '--preload-audio') result.preloadAudio = true;
+    else if (value === '--combat') result.combat = true;
+    else if (value === '--fly') result.fly = true;
+    else if (value === '--map') result.map = argv[++index];
     else throw new Error(`Unknown argument: ${value}`);
   }
   return result;
@@ -133,6 +139,7 @@ export async function runProfile(argv = process.argv) {
   const url = args.url ?? `http://127.0.0.1:${port}/`;
   const profileUrl = new URL(url);
   if (args.unbatched) profileUrl.searchParams.set('perf-unbatched', '1');
+  if (args.map) profileUrl.searchParams.set('map', args.map);
   if (!args.url) {
     previewServer = await preview({ preview: { host: '127.0.0.1', port, strictPort: true } });
   }
@@ -183,29 +190,33 @@ export async function runProfile(argv = process.argv) {
       { timeout: 90_000 },
     );
   }
-  await page.evaluate(({ speedKmh, fireWeapon }) => {
+  await page.evaluate(({ speedKmh, fireWeapon, combat }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__;
     hooks.seed(450_600);
     hooks.setState('active-play');
     hooks.setWeapon(fireWeapon ?? 'machine');
-    hooks.parkBotsForScreenshot();
+    if (!combat) hooks.parkBotsForScreenshot();
     hooks.setReducedMotion(false);
     if (speedKmh > 0) hooks.setSpeedCapture(speedKmh);
     hooks.setPausedForScreenshot(false);
     if (document.pointerLockElement) document.exitPointerLock();
-  }, { speedKmh: args.speedKmh, fireWeapon: args.fireWeapon });
+  }, { speedKmh: args.speedKmh, fireWeapon: args.fireWeapon, combat: args.combat });
   await page.waitForTimeout(args.warmup);
-  await page.evaluate(({ state, freeze, speedKmh, fireWeapon }) => {
+  await page.evaluate(({ state, freeze, speedKmh, fireWeapon, combat }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__;
     hooks.seed(450_600);
     hooks.setState(state);
     hooks.setWeapon(fireWeapon ?? 'machine');
-    hooks.parkBotsForScreenshot();
+    if (!combat) hooks.parkBotsForScreenshot();
     if (speedKmh > 0) hooks.setSpeedCapture(speedKmh);
     hooks.setPausedForScreenshot(freeze);
     if (document.pointerLockElement) document.exitPointerLock();
-  }, { state: args.state, freeze: args.freeze, speedKmh: args.speedKmh, fireWeapon: args.fireWeapon });
+  }, { state: args.state, freeze: args.freeze, speedKmh: args.speedKmh, fireWeapon: args.fireWeapon, combat: args.combat });
 
+  if (args.fly) {
+    await page.keyboard.down('KeyW');
+    await page.keyboard.down('Space');
+  }
   if (args.fireWeapon) await page.keyboard.down('KeyF');
 
   const rawMeasurement = await page.evaluate(async (duration) => {
@@ -214,14 +225,50 @@ export async function runProfile(argv = process.argv) {
     const debug = gl?.getExtension('WEBGL_debug_renderer_info');
     const deltas = [];
     const timeline = [];
+    const slowFrames = [];
+    const longAnimationFrames = [];
+    const longFrameObserver = typeof PerformanceObserver !== 'undefined'
+      && PerformanceObserver.supportedEntryTypes?.includes('long-animation-frame')
+      ? new PerformanceObserver((entries) => {
+        for (const entry of entries.getEntries()) {
+          longAnimationFrames.push({
+            startTime: entry.startTime,
+            duration: entry.duration,
+            blockingDuration: entry.blockingDuration,
+            renderStart: entry.renderStart,
+            styleAndLayoutStart: entry.styleAndLayoutStart,
+            scripts: (entry.scripts ?? []).map((script) => ({
+              duration: script.duration,
+              functionName: script.sourceFunctionName,
+              sourceURL: script.sourceURL,
+              invoker: script.invoker,
+            })),
+          });
+        }
+      })
+      : null;
+    longFrameObserver?.observe({ type: 'long-animation-frame' });
     const started = performance.now();
     let previous = started;
     let nextTimelineSample = 0;
     await new Promise((resolve) => {
       const sample = (now) => {
-        deltas.push(now - previous);
+        const frameTimeMs = now - previous;
+        deltas.push(frameTimeMs);
         previous = now;
         const elapsed = now - started;
+        if (frameTimeMs > 25) {
+          const diagnostics = window.__THREE_GAME_DIAGNOSTICS__;
+          slowFrames.push({
+            elapsedMs: elapsed,
+            frameTimeMs,
+            calls: diagnostics?.renderer.calls ?? null,
+            geometries: diagnostics?.renderer.geometries ?? null,
+            activeWeaponVfx: diagnostics?.renderer.activeWeaponVfx ?? null,
+            activeSurfaceMarks: diagnostics?.renderer.activeSurfaceMarks ?? null,
+            projectiles: diagnostics?.projectiles ?? null,
+          });
+        }
         if (elapsed >= nextTimelineSample) {
           const diagnostics = window.__THREE_GAME_DIAGNOSTICS__;
           timeline.push({
@@ -245,6 +292,7 @@ export async function runProfile(argv = process.argv) {
     const renderer = gl && debug
       ? String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL))
       : gl ? String(gl.getParameter(gl.RENDERER)) : null;
+    longFrameObserver?.disconnect();
     return {
       webdriver: navigator.webdriver,
       gpu: {
@@ -252,6 +300,8 @@ export async function runProfile(argv = process.argv) {
         software: renderer ? /swiftshader|llvmpipe|software|basic render/i.test(renderer) : null,
       },
       deltas,
+      slowFrames,
+      longAnimationFrames,
       timeline,
       diagnostics: window.__THREE_GAME_DIAGNOSTICS__,
       memory: performance.memory
@@ -264,11 +314,17 @@ export async function runProfile(argv = process.argv) {
   }, args.duration);
 
   if (args.fireWeapon) await page.keyboard.up('KeyF');
+  if (args.fly) {
+    await page.keyboard.up('Space');
+    await page.keyboard.up('KeyW');
+  }
   const { deltas, ...measurement } = rawMeasurement;
   const frameMetrics = computeFrameMetrics(deltas);
   const rendererCounters = summarizeRendererCounters(measurement.diagnostics);
   const validHardwareRun = measurement.gpu.software === false && measurement.webdriver === false;
-  const passesTarget = validHardwareRun && frameMetrics.fps >= args.target;
+  const passesTarget = validHardwareRun
+    && frameMetrics.fps >= args.target
+    && frameMetrics.onePercentLowFps >= args.target;
   const result = {
     profileSchemaVersion: 2,
     capturedAt: new Date().toISOString(),
@@ -283,10 +339,13 @@ export async function runProfile(argv = process.argv) {
     captureSpeedKmh: args.speedKmh,
     sustainedFireWeapon: args.fireWeapon,
     audioPreloaded: args.preloadAudio,
+    activeCombat: args.combat,
+    activeFlight: args.fly,
+    map: args.map,
     validHardwareRun,
     passesTarget,
     performanceContract: {
-      passCriterion: 'valid hardware run and average FPS at or above target',
+      passCriterion: 'valid hardware run with average and 1% low FPS at or above target',
       targetFps: args.target,
       targetFrameTimeMs: 1_000 / args.target,
       observedFps: frameMetrics.fps,

@@ -8,6 +8,25 @@ type Effect = {
   materials: THREE.Material[];
   update: (progress: number, delta: number) => void;
   kind?: 'muzzle' | 'beam' | 'trail' | 'impact' | 'tracer' | 'burst';
+  pooled?: boolean;
+};
+
+type MachineMuzzlePoolEntry = {
+  root: THREE.Group;
+  hot: THREE.MeshBasicMaterial;
+  glow: THREE.MeshBasicMaterial;
+  effect: Effect;
+};
+
+type MachineBeamPoolEntry = {
+  root: THREE.Group;
+  packet: THREE.Mesh;
+  halo: THREE.Mesh;
+  core: THREE.MeshBasicMaterial;
+  glow: THREE.MeshBasicMaterial;
+  direction: THREE.Vector3;
+  speed: number;
+  effect: Effect;
 };
 
 type ContinuousLaser = {
@@ -118,17 +137,20 @@ export class WeaponVfxSystem {
   private readonly sharedGeometries = new Map<string, THREE.BufferGeometry>();
   private readonly sharedGeometrySet = new Set<THREE.BufferGeometry>();
   private readonly grappleCurvePoints = Array.from({ length: 6 }, () => new THREE.Vector3());
-  private readonly grappleCurve = new THREE.CatmullRomCurve3(this.grappleCurvePoints, false, 'catmullrom', 0.18);
   private continuousLaser?: ContinuousLaser;
   private grappleRoot?: THREE.Group;
-  private grappleCable?: THREE.Mesh;
+  private grappleCable?: THREE.Group;
+  private readonly grappleCableSegments: THREE.Mesh[] = [];
   private grappleHook?: THREE.Mesh;
   private grappleHookCore?: THREE.Mesh;
   private readonly grappleMaterials: THREE.Material[] = [];
+  private readonly machineMuzzlePool: MachineMuzzlePoolEntry[] = [];
+  private readonly machineBeamPool: MachineBeamPoolEntry[] = [];
+  private machineMuzzleCursor = 0;
+  private machineBeamCursor = 0;
   private laserPhase = 0;
   private laserBend = 0;
   private ropePhase = 0;
-  private grappleGeometryFrame = 0;
   private trailSpawnTokens = TRAIL_BURST_ALLOWANCE;
 
   constructor(
@@ -142,6 +164,7 @@ export class WeaponVfxSystem {
     // pull. Precompile the actual shared ballistic/energy geometry while the
     // ready screen is visible so a cold plasma or rocket shot cannot stall a
     // live frame.
+    this.ensureMachineEffectPools();
     const prewarmScene = new THREE.Scene();
     prewarmScene.fog = this.scene.fog;
     const hot = additiveMaterial(0xffffff, 1, false);
@@ -154,8 +177,31 @@ export class WeaponVfxSystem {
       metalness: 0.48,
       clearcoat: 0.62,
     });
+    const anisotropicPhysical = new THREE.MeshPhysicalMaterial({
+      color: 0x7d878b,
+      roughness: 0.2,
+      metalness: 1,
+      envMapIntensity: 0.78,
+      anisotropy: 1,
+    });
     const geometries = [
       this.sharedGeometry('muzzle-machine-cone-7', () => new THREE.ConeGeometry(1, 1, 7, 1, true)),
+      this.sharedGeometry('muzzle-shotgun-cone-12', () => new THREE.ConeGeometry(1, 1, 12, 1, true)),
+      this.sharedGeometry('muzzle-shotgun-smoke', () => new THREE.IcosahedronGeometry(0.1, 1)),
+      this.sharedGeometry('muzzle-laser-cone', () => new THREE.ConeGeometry(0.045, 0.44, 10, 1, true)),
+      ...Array.from({ length: 3 }, (_, index) => this.sharedGeometry(
+        `muzzle-laser-aperture-${index}`,
+        () => new THREE.TorusGeometry(0.07 + index * 0.035, 0.007, 5, 24),
+      )),
+      this.sharedGeometry('muzzle-sniper-cone', () => new THREE.ConeGeometry(0.045, 0.82, 7, 1, true)),
+      this.sharedGeometry('muzzle-sniper-smoke', () => new THREE.IcosahedronGeometry(1, 1)),
+      this.sharedGeometry('muzzle-rail-outer', () => new THREE.ConeGeometry(0.045, 1.05, 7, 1, true)),
+      this.sharedGeometry('muzzle-rail-core', () => new THREE.ConeGeometry(0.035, 1.2, 8, 1, true)),
+      ...Array.from({ length: 4 }, (_, index) => this.sharedGeometry(
+        `muzzle-rail-arc-${index}`,
+        () => this.createRailMuzzleArcGeometry(index),
+      )),
+      this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1)),
       this.sharedGeometry('beam-cylinder-7', () => new THREE.CylinderGeometry(1, 0.72, 1, 7, 1, true)),
       this.sharedGeometry('impact-unit-circle-18', () => new THREE.CircleGeometry(1, 18)),
       this.sharedGeometry('impact-unit-ring-28', () => new THREE.RingGeometry(0.84, 1, 28)),
@@ -168,6 +214,43 @@ export class WeaponVfxSystem {
       this.sharedGeometry('muzzle-plasma-chamber', () => new THREE.IcosahedronGeometry(0.18, 2)),
       this.sharedGeometry('muzzle-plasma-core', () => new THREE.IcosahedronGeometry(0.075, 1)),
       this.sharedGeometry('muzzle-plasma-ring', () => new THREE.TorusGeometry(0.21, 0.014, 6, 24)),
+      this.sharedGeometry('muzzle-rocket-outer-plume', () => new THREE.ConeGeometry(0.17, 0.82, 12, 1, true)),
+      this.sharedGeometry('muzzle-rocket-inner-plume', () => new THREE.ConeGeometry(0.065, 0.68, 10, 1, true)),
+      this.sharedGeometry(
+        'muzzle-rocket-heat-shell',
+        () => new THREE.SphereGeometry(0.19, 12, 8, 0, Math.PI * 2, 0.15, Math.PI * 0.7),
+      ),
+      this.sharedGeometry('muzzle-rocket-pressure', () => new THREE.TorusGeometry(0.2, 0.016, 6, 28)),
+      this.sharedGeometry('projectile-rocket-fuselage', () => new THREE.CylinderGeometry(0.075, 0.09, 0.34, 12)),
+      this.sharedGeometry('projectile-rocket-nose', () => new THREE.ConeGeometry(0.075, 0.15, 12)),
+      this.sharedGeometry('projectile-rocket-band', () => new THREE.TorusGeometry(0.082, 0.012, 7, 18)),
+      this.sharedGeometry('projectile-rocket-fin', () => new THREE.BoxGeometry(0.022, 0.15, 0.12)),
+      this.sharedGeometry('projectile-rocket-exhaust', () => new THREE.ConeGeometry(0.085, 0.32, 10, 1, true)),
+      this.sharedGeometry('projectile-rocket-exhaust-core', () => new THREE.ConeGeometry(0.028, 0.22, 8, 1, true)),
+      this.sharedGeometry('projectile-rocket-heat', () => new THREE.SphereGeometry(0.1, 10, 7)),
+      this.sharedGeometry('projectile-rocket-pressure', () => new THREE.TorusGeometry(0.1, 0.009, 5, 18)),
+      this.sharedGeometry('grenade-body', () => new THREE.SphereGeometry(0.18, 12, 8)),
+      this.sharedGeometry('grenade-band', () => new THREE.TorusGeometry(0.185, 0.018, 6, 18)),
+      this.sharedGeometry('grenade-cap', () => new THREE.CylinderGeometry(0.06, 0.06, 0.04, 8)),
+      this.sharedGeometry('explosion-rocket-core', () => new THREE.SphereGeometry(0.24, 14, 10)),
+      this.sharedGeometry('explosion-rocket-wave', () => new THREE.RingGeometry(0.22, 0.3, 32)),
+      this.sharedGeometry('grapple-segment', () => new THREE.CylinderGeometry(0.035, 0.035, 1, 6, 1, true)),
+      this.sharedGeometry('grapple-hook', () => new THREE.TorusGeometry(0.19, 0.04, 8, 18)),
+      this.sharedGeometry('grapple-hook-core', () => new THREE.IcosahedronGeometry(0.095, 1)),
+      this.sharedGeometry('mark-unit-circle-18', () => new THREE.CircleGeometry(1, 18)),
+      this.sharedGeometry('mark-unit-circle-12', () => new THREE.CircleGeometry(1, 12)),
+      this.sharedGeometry('mark-unit-circle-6', () => new THREE.CircleGeometry(1, 6)),
+      this.sharedGeometry('mark-rocket-unit-ring', () => new THREE.RingGeometry(0.83, 1, 22)),
+      this.sharedGeometry('mark-plasma-unit-ring', () => new THREE.RingGeometry(0.46, 1, 20)),
+      this.sharedGeometry('mark-unit-plane', () => new THREE.PlaneGeometry(1, 1)),
+      this.sharedGeometry('mark-rail-unit-ring-0', () => new THREE.RingGeometry(0.75, 1, 26)),
+      this.sharedGeometry('mark-rail-unit-ring-1', () => new THREE.RingGeometry(0.38 / 0.44, 1, 26)),
+      this.sharedGeometry('mark-rail-unit-ring-2', () => new THREE.RingGeometry(0.58 / 0.64, 1, 26)),
+      this.sharedGeometry('mark-puncture-unit-ring-7', () => new THREE.RingGeometry(0.44, 1, 7)),
+      this.sharedGeometry('mark-puncture-unit-ring-12', () => new THREE.RingGeometry(0.44, 1, 12)),
+      this.sharedGeometry('tracer-needle', () => new THREE.CylinderGeometry(0.018, 0.012, 0.2, 6)),
+      this.sharedGeometry('tracer-tip', () => new THREE.ConeGeometry(0.035, 0.08, 6)),
+      this.sharedGeometry('tracer-ring', () => new THREE.TorusGeometry(0.05, 0.008, 5, 12)),
     ];
     geometries.forEach((geometry, index) => {
       const material = index === geometries.length - 1 ? smoke : index % 2 ? glow : hot;
@@ -182,6 +265,17 @@ export class WeaponVfxSystem {
     standardMesh.frustumCulled = false;
     physicalMesh.frustumCulled = false;
     prewarmScene.add(standardMesh, physicalMesh);
+    const discCutter = new THREE.Mesh(
+      this.sharedGeometry('projectile-disc-cutter', () => this.createDiscCutterGeometry()),
+      anisotropicPhysical,
+    );
+    const discHub = new THREE.Mesh(
+      this.sharedGeometry('projectile-disc-hub', () => new THREE.CylinderGeometry(0.125, 0.125, 0.085, 18, 1)),
+      anisotropicPhysical,
+    );
+    discCutter.frustumCulled = false;
+    discHub.frustumCulled = false;
+    prewarmScene.add(discCutter, discHub);
     const burstGeometry = this.sharedGeometry(
       'burst-spark-cylinder',
       () => new THREE.CylinderGeometry(0.009, 0.022, 1, 5),
@@ -197,6 +291,11 @@ export class WeaponVfxSystem {
     laserRoot.visible = true;
     prewarmScene.add(laserRoot);
     renderer.compile(prewarmScene, this.camera);
+    // compile() prepares shader programs but does not force every vertex/index
+    // buffer through the driver. One hidden startup render uploads the shared
+    // projectile and impact geometry now instead of blocking the first rocket
+    // or plasma volley in the middle of a match.
+    renderer.render(prewarmScene, this.camera);
     prewarmScene.remove(laserRoot);
     laserRoot.visible = false;
     this.scene.add(laserRoot);
@@ -205,7 +304,148 @@ export class WeaponVfxSystem {
     smoke.dispose();
     standard.dispose();
     physical.dispose();
+    anisotropicPhysical.dispose();
     prewarmScene.clear();
+  }
+
+  private ensureMachineEffectPools(): void {
+    if (!this.machineMuzzlePool.length) {
+      const geometry = this.sharedGeometry(
+        'muzzle-machine-cone-7',
+        () => new THREE.ConeGeometry(1, 1, 7, 1, true),
+      );
+      for (let index = 0; index < 3; index += 1) {
+        const root = new THREE.Group();
+        root.name = `machine-muzzle-pool-${index}`;
+        root.visible = false;
+        const hot = additiveMaterial(0xfff4c2, 0.92, false);
+        const glow = additiveMaterial(0xffbe55, 0.66, false);
+        const core = new THREE.Mesh(geometry, hot);
+        core.name = 'machine-muzzle-hot-core';
+        core.rotation.x = -Math.PI * 0.5;
+        core.position.set(-0.035, 0.028, -0.27);
+        core.scale.set(0.045, 0.5, 0.045);
+        const envelope = new THREE.Mesh(geometry, glow);
+        envelope.name = 'machine-muzzle-heat-envelope';
+        envelope.rotation.x = -Math.PI * 0.5;
+        envelope.position.copy(core.position);
+        envelope.scale.set(0.07, 0.39, 0.07);
+        root.add(envelope, core);
+        root.traverse((object) => { object.frustumCulled = false; });
+        const effect: Effect = {
+          root,
+          age: 0,
+          duration: 0.085,
+          materials: [hot, glow],
+          kind: 'muzzle',
+          pooled: true,
+          update: (progress) => {
+            const fade = Math.pow(1 - progress, 1.7);
+            hot.opacity = fade * 0.92;
+            glow.opacity = fade * 0.66;
+            root.scale.z = 0.72 + Math.sin(progress * Math.PI) * 0.42;
+            root.scale.x = root.scale.y = 0.9 + progress * 0.28;
+          },
+        };
+        this.machineMuzzlePool.push({ root, hot, glow, effect });
+        this.scene.add(root);
+      }
+    }
+
+    if (!this.machineBeamPool.length) {
+      const packetGeometry = this.sharedGeometry(
+        'beam-cylinder-6',
+        () => new THREE.CylinderGeometry(1, 0.72, 1, 6, 1, true),
+      );
+      const haloGeometry = this.sharedGeometry(
+        'beam-cylinder-7',
+        () => new THREE.CylinderGeometry(1, 0.72, 1, 7, 1, true),
+      );
+      for (let index = 0; index < 8; index += 1) {
+        const root = new THREE.Group();
+        root.name = `machine-beam-pool-${index}`;
+        root.visible = false;
+        const core = additiveMaterial(0xfff4c2, 0.92);
+        const glow = additiveMaterial(0xffbe55, 0.22);
+        const packet = new THREE.Mesh(packetGeometry, core);
+        packet.name = 'machine-hot-tracer';
+        const halo = new THREE.Mesh(haloGeometry, glow);
+        halo.name = 'machine-tracer-heat-envelope';
+        root.add(packet, halo);
+        root.traverse((object) => { object.frustumCulled = false; });
+        const direction = new THREE.Vector3();
+        let entry!: MachineBeamPoolEntry;
+        const effect: Effect = {
+          root,
+          age: 0,
+          duration: 0.06,
+          materials: [core, glow],
+          kind: 'beam',
+          pooled: true,
+          update: (progress, delta) => {
+            const fade = Math.pow(1 - progress, 1.8);
+            core.opacity = fade * 0.92;
+            glow.opacity = fade * 0.22;
+            root.position.addScaledVector(direction, delta * entry.speed);
+          },
+        };
+        entry = { root, packet, halo, core, glow, direction, speed: 22, effect };
+        this.machineBeamPool.push(entry);
+        this.scene.add(root);
+      }
+    }
+  }
+
+  private activateMachineMuzzle(socket: THREE.Object3D, color: number): void {
+    this.ensureMachineEffectPools();
+    const entry = this.machineMuzzlePool[this.machineMuzzleCursor];
+    this.machineMuzzleCursor = (this.machineMuzzleCursor + 1) % this.machineMuzzlePool.length;
+    const activeIndex = this.effects.indexOf(entry.effect);
+    if (activeIndex >= 0) this.removeEffect(activeIndex);
+    socket.updateWorldMatrix(true, false);
+    socket.getWorldPosition(entry.root.position);
+    socket.getWorldQuaternion(entry.root.quaternion);
+    entry.root.scale.set(1, 1, 1);
+    entry.root.visible = true;
+    entry.hot.color.setHex(0xfff4c2);
+    entry.glow.color.setHex(color);
+    entry.hot.opacity = 0.92;
+    entry.glow.opacity = 0.66;
+    entry.effect.age = 0;
+    this.addEffect(entry.effect);
+  }
+
+  private activateMachineBeam(
+    start: THREE.Vector3,
+    end: THREE.Vector3,
+    color: number,
+    duration: number,
+  ): void {
+    this.ensureMachineEffectPools();
+    const entry = this.machineBeamPool[this.machineBeamCursor];
+    this.machineBeamCursor = (this.machineBeamCursor + 1) % this.machineBeamPool.length;
+    const activeIndex = this.effects.indexOf(entry.effect);
+    if (activeIndex >= 0) this.removeEffect(activeIndex);
+    const visibleStart = this.tempPosition.copy(start).lerp(end, 0.11);
+    const length = orientBetween(entry.root, visibleStart, end);
+    if (length <= 0.001) return;
+    const packetLength = Math.min(3.8, Math.max(0.48, length * 0.12));
+    const positionY = -length * 0.24;
+    entry.packet.position.y = positionY;
+    entry.packet.scale.set(0.012, packetLength, 0.012);
+    entry.halo.position.y = positionY;
+    entry.halo.scale.set(0.032, packetLength * 1.18, 0.032);
+    entry.root.scale.set(1, 1, 1);
+    entry.root.visible = true;
+    entry.core.color.setHex(0xfff4c2);
+    entry.glow.color.setHex(color);
+    entry.core.opacity = 0.92;
+    entry.glow.opacity = 0.22;
+    entry.direction.copy(end).sub(visibleStart).normalize();
+    entry.speed = Math.max(22, length / Math.max(duration, 0.03));
+    entry.effect.age = 0;
+    entry.effect.duration = duration;
+    this.addEffect(entry.effect);
   }
 
   muzzle(weapon: WeaponId, color: number, socket: THREE.Object3D): void {
@@ -214,6 +454,10 @@ export class WeaponVfxSystem {
     // draw calls during ricochet volleys.
     if (suppressSawSlingLights(weapon)) return;
     if (!this.hasTransientCapacity()) return;
+    if (weapon === 'machine') {
+      this.activateMachineMuzzle(socket, color);
+      return;
+    }
     socket.updateWorldMatrix(true, false);
     socket.getWorldPosition(this.tempPosition);
     socket.getWorldQuaternion(this.tempQuaternion);
@@ -238,31 +482,13 @@ export class WeaponVfxSystem {
     const softOpacity = weapon === 'disc' ? 0.08 : 0.22;
     const hot = additiveMaterial(hotColors[weapon], hotOpacity, false);
     const glow = additiveMaterial(color, glowOpacity, false);
-    const soft = weapon === 'machine' ? undefined : additiveMaterial(color, softOpacity, false);
-    const materials: THREE.Material[] = soft ? [hot, glow, soft] : [hot, glow];
+    const soft = additiveMaterial(color, softOpacity, false);
+    const materials: THREE.Material[] = [hot, glow, soft];
 
     // Each weapon owns a different silhouette and time profile. This keeps the
     // muzzle event readable in a frozen frame without falling back to a shared
     // white cone or a large camera-facing disc.
-    if (weapon === 'machine') {
-      // Two nested cones preserve the hot-core silhouette without spawning
-      // nine independently rendered meshes for every automatic round.
-      const geometry = this.sharedGeometry(
-        'muzzle-machine-cone-7',
-        () => new THREE.ConeGeometry(1, 1, 7, 1, true),
-      );
-      const core = new THREE.Mesh(geometry, hot);
-      core.name = 'machine-muzzle-hot-core';
-      core.rotation.x = -Math.PI * 0.5;
-      core.position.set(-0.035, 0.028, -0.27);
-      core.scale.set(0.045, 0.5, 0.045);
-      const envelope = new THREE.Mesh(geometry, glow);
-      envelope.name = 'machine-muzzle-heat-envelope';
-      envelope.rotation.x = -Math.PI * 0.5;
-      envelope.position.copy(core.position);
-      envelope.scale.set(0.07, 0.39, 0.07);
-      root.add(envelope, core);
-    } else if (weapon === 'shotgun') {
+    if (weapon === 'shotgun') {
       const coneGeometry = this.sharedGeometry(
         'muzzle-shotgun-cone-12',
         () => new THREE.ConeGeometry(1, 1, 12, 1, true),
@@ -297,19 +523,34 @@ export class WeaponVfxSystem {
         root.add(spark);
       }
     } else if (weapon === 'rocket') {
-      const outerPlume = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.82, 12, 1, true), glow);
+      const outerPlume = new THREE.Mesh(
+        this.sharedGeometry('muzzle-rocket-outer-plume', () => new THREE.ConeGeometry(0.17, 0.82, 12, 1, true)),
+        glow,
+      );
       outerPlume.name = 'rocket-luminous-plume';
       outerPlume.rotation.x = -Math.PI * 0.5;
       outerPlume.position.z = -0.34;
-      const innerPlume = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.68, 10, 1, true), hot);
+      const innerPlume = new THREE.Mesh(
+        this.sharedGeometry('muzzle-rocket-inner-plume', () => new THREE.ConeGeometry(0.065, 0.68, 10, 1, true)),
+        hot,
+      );
       innerPlume.name = 'rocket-hot-exhaust-core';
       innerPlume.rotation.x = -Math.PI * 0.5;
       innerPlume.position.z = -0.29;
-      const heatShell = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 8, 0, Math.PI * 2, 0.15, Math.PI * 0.7), soft);
+      const heatShell = new THREE.Mesh(
+        this.sharedGeometry(
+          'muzzle-rocket-heat-shell',
+          () => new THREE.SphereGeometry(0.19, 12, 8, 0, Math.PI * 2, 0.15, Math.PI * 0.7),
+        ),
+        soft,
+      );
       heatShell.name = 'rocket-heat-shimmer';
       heatShell.scale.z = 1.7;
       heatShell.position.z = -0.18;
-      const pressure = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.016, 6, 28), glow);
+      const pressure = new THREE.Mesh(
+        this.sharedGeometry('muzzle-rocket-pressure', () => new THREE.TorusGeometry(0.2, 0.016, 6, 28)),
+        glow,
+      );
       pressure.name = 'rocket-pressure-ring';
       pressure.position.z = -0.12;
       root.add(outerPlume, innerPlume, heatShell, pressure);
@@ -334,32 +575,52 @@ export class WeaponVfxSystem {
       torus.position.z = -0.22;
       root.add(torus);
     } else if (weapon === 'laser') {
-      const emitterCore = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.44, 10, 1, true), hot);
+      const emitterCore = new THREE.Mesh(
+        this.sharedGeometry('muzzle-laser-cone', () => new THREE.ConeGeometry(0.045, 0.44, 10, 1, true)),
+        hot,
+      );
       emitterCore.name = 'laser-emitter-core-flare';
       emitterCore.rotation.x = -Math.PI * 0.5;
       emitterCore.position.z = -0.22;
       root.add(emitterCore);
       for (let index = 0; index < 3; index += 1) {
-        const aperture = new THREE.Mesh(new THREE.TorusGeometry(0.07 + index * 0.035, 0.007, 5, 24), index === 0 ? hot : glow);
+        const aperture = new THREE.Mesh(
+          this.sharedGeometry(
+            `muzzle-laser-aperture-${index}`,
+            () => new THREE.TorusGeometry(0.07 + index * 0.035, 0.007, 5, 24),
+          ),
+          index === 0 ? hot : glow,
+        );
         aperture.name = `laser-aperture-flare-${index}`;
         aperture.position.z = -0.025 - index * 0.028;
         root.add(aperture);
       }
       for (let index = 0; index < 4; index += 1) {
-        const blade = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.16, 0.012), glow);
+        const blade = new THREE.Mesh(
+          this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1)),
+          glow,
+        );
+        blade.scale.set(0.012, 0.16, 0.012);
         blade.position.z = -0.06;
         blade.rotation.z = index * Math.PI * 0.5;
         root.add(blade);
       }
     } else if (weapon === 'sniper') {
-      const needle = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.82, 7, 1, true), hot);
+      const needle = new THREE.Mesh(
+        this.sharedGeometry('muzzle-sniper-cone', () => new THREE.ConeGeometry(0.045, 0.82, 7, 1, true)),
+        hot,
+      );
       needle.name = 'sniper-directional-needle';
       needle.rotation.x = -Math.PI * 0.5;
       needle.position.z = -0.4;
       root.add(needle);
       for (let index = 0; index < 6; index += 1) {
-        const blade = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.28 + (index % 2) * 0.13, 0.025), index % 2 ? glow : hot);
+        const blade = new THREE.Mesh(
+          this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1)),
+          index % 2 ? glow : hot,
+        );
         blade.name = `sniper-star-blade-${index}`;
+        blade.scale.set(0.012, 0.28 + (index % 2) * 0.13, 0.025);
         blade.position.z = -0.06;
         blade.rotation.z = index * Math.PI / 3;
         root.add(blade);
@@ -367,8 +628,12 @@ export class WeaponVfxSystem {
       const smoke = smokeMaterial(0x7d7870, 0.1, false);
       materials.push(smoke);
       for (let index = 0; index < 3; index += 1) {
-        const wisp = new THREE.Mesh(new THREE.IcosahedronGeometry(0.06 + index * 0.02, 1), smoke);
+        const wisp = new THREE.Mesh(
+          this.sharedGeometry('muzzle-sniper-smoke', () => new THREE.IcosahedronGeometry(1, 1)),
+          smoke,
+        );
         wisp.name = `sniper-smoke-${index}`;
+        wisp.scale.setScalar(0.06 + index * 0.02);
         wisp.position.set((this.random() - 0.5) * 0.13, 0.04 + this.random() * 0.12, -0.1 - index * 0.11);
         root.add(wisp);
       }
@@ -404,26 +669,29 @@ export class WeaponVfxSystem {
         root.add(spark);
       }
     } else {
-      const leftRail = new THREE.Mesh(new THREE.ConeGeometry(0.045, 1.05, 7, 1, true), glow);
+      const leftRail = new THREE.Mesh(
+        this.sharedGeometry('muzzle-rail-outer', () => new THREE.ConeGeometry(0.045, 1.05, 7, 1, true)),
+        glow,
+      );
       leftRail.name = 'rail-discharge-left';
       leftRail.rotation.x = -Math.PI * 0.5;
       leftRail.position.set(-0.075, 0, -0.5);
       const rightRail = leftRail.clone();
       rightRail.name = 'rail-discharge-right';
       rightRail.position.x = 0.075;
-      const core = new THREE.Mesh(new THREE.ConeGeometry(0.035, 1.2, 8, 1, true), hot);
+      const core = new THREE.Mesh(
+        this.sharedGeometry('muzzle-rail-core', () => new THREE.ConeGeometry(0.035, 1.2, 8, 1, true)),
+        hot,
+      );
       core.name = 'rail-collapse-core';
       core.rotation.x = -Math.PI * 0.5;
       core.position.z = -0.57;
       root.add(leftRail, rightRail, core);
       for (let index = 0; index < 4; index += 1) {
-        const side = index % 2 ? 1 : -1;
-        const curve = new THREE.QuadraticBezierCurve3(
-          new THREE.Vector3(side * 0.17, (index - 1.5) * 0.04, 0.05),
-          new THREE.Vector3(side * 0.3, (this.random() - 0.5) * 0.24, -0.38),
-          new THREE.Vector3(side * 0.04, (this.random() - 0.5) * 0.08, -0.82),
+        const arc = new THREE.Mesh(
+          this.sharedGeometry(`muzzle-rail-arc-${index}`, () => this.createRailMuzzleArcGeometry(index)),
+          index === 0 ? hot : glow,
         );
-        const arc = new THREE.Mesh(new THREE.TubeGeometry(curve, 8, index === 0 ? 0.014 : 0.009, 4, false), index === 0 ? hot : glow);
         arc.name = `rail-collapse-arc-${index}`;
         root.add(arc);
       }
@@ -477,8 +745,11 @@ export class WeaponVfxSystem {
 
   beam(start: THREE.Vector3, end: THREE.Vector3, weapon: WeaponId, color: number, duration: number): void {
     if (!this.hasTransientCapacity()) return;
+    if (weapon === 'machine') {
+      this.activateMachineBeam(start, end, color, duration);
+      return;
+    }
     const visibleStart = start.clone();
-    if (weapon === 'machine') visibleStart.lerp(end, 0.11);
     if (weapon === 'shotgun') visibleStart.lerp(end, 0.06);
     const root = new THREE.Group();
     root.name = `${weapon}-beam-vfx`;
@@ -488,12 +759,10 @@ export class WeaponVfxSystem {
     const glowMaterial = additiveMaterial(color, 0.34);
     const accentMaterial = additiveMaterial(weapon === 'rail' ? 0x96fbff : 0xffffff, 0.58);
     const materials = [coreMaterial, glowMaterial, accentMaterial];
-    const coreOpacity = weapon === 'machine' ? 0.92
-      : weapon === 'shotgun' ? duration > 0.1 ? 0.92 : 0.18
-        : weapon === 'sniper' ? 0.96 : 1;
-    const glowOpacity = weapon === 'machine' ? 0.22
-      : weapon === 'shotgun' ? duration > 0.1 ? 0.24 : 0.035
-        : weapon === 'sniper' ? 0.18 : weapon === 'rail' ? 0.4 : 0.26;
+    const coreOpacity = weapon === 'shotgun' ? duration > 0.1 ? 0.92 : 0.18
+      : weapon === 'sniper' ? 0.96 : 1;
+    const glowOpacity = weapon === 'shotgun' ? duration > 0.1 ? 0.24 : 0.035
+      : weapon === 'sniper' ? 0.18 : weapon === 'rail' ? 0.4 : 0.26;
     coreMaterial.opacity = coreOpacity;
     glowMaterial.opacity = glowOpacity;
     accentMaterial.opacity = weapon === 'rail' ? 0.7 : 0.45;
@@ -520,16 +789,7 @@ export class WeaponVfxSystem {
       return mesh;
     };
 
-    if (weapon === 'machine') {
-      // Ballistic packet: only a short, fast-moving hot slug is visible. The
-      // previous full-distance white cylinder was what made every gun read as
-      // the same low-resolution laser.
-      const packetLength = Math.min(3.8, Math.max(0.48, length * 0.12));
-      const packet = addCylinder('machine-hot-tracer', 0.012, packetLength, -length * 0.24, coreMaterial, 6);
-      const halo = addCylinder('machine-tracer-heat-envelope', 0.032, packetLength * 1.18, -length * 0.24, glowMaterial, 7);
-      packet.userData.travel = Math.max(22, length / Math.max(duration, 0.03));
-      halo.userData.travel = packet.userData.travel;
-    } else if (weapon === 'shotgun') {
+    if (weapon === 'shotgun') {
       const sabot = duration > 0.1;
       const streakLength = sabot ? Math.min(length, 7.5) : Math.min(1.1, length * 0.08);
       const positionY = sabot ? -length * 0.16 : -length * (0.16 + this.random() * 0.32);
@@ -598,9 +858,7 @@ export class WeaponVfxSystem {
         coreMaterial.opacity = envelope * coreOpacity;
         glowMaterial.opacity = envelope * glowOpacity;
         accentMaterial.opacity = envelope * (weapon === 'rail' ? 0.7 : 0.45);
-        if (weapon === 'machine') {
-          root.position.addScaledVector(direction, delta * Math.max(22, length / Math.max(duration, 0.03)));
-        } else if (weapon === 'sniper') {
+        if (weapon === 'sniper') {
           root.position.addScaledVector(direction, delta * Math.max(55, length / Math.max(duration, 0.04)));
         } else if (weapon === 'rail') {
           root.scale.x = root.scale.z = 0.5 + envelope * 0.72;
@@ -785,30 +1043,24 @@ export class WeaponVfxSystem {
     const radius = weapon === 'rocket' ? 1.8 : weapon === 'rail' ? 1.15 : weapon === 'plasma' ? 0.72 : weapon === 'disc' ? 0.58 : 0.46;
 
     const flash = new THREE.Mesh(
-      weapon === 'disc'
-        ? new THREE.RingGeometry(radius * 0.17, radius * 0.39, 22)
-        : rapidImpact
-          ? this.sharedGeometry('impact-unit-circle-18', () => new THREE.CircleGeometry(1, 18))
-          : new THREE.CircleGeometry(radius * (weapon === 'rocket' ? 0.25 : 0.34), 18),
+      this.sharedGeometry('impact-unit-circle-18', () => new THREE.CircleGeometry(1, 18)),
       hot,
     );
     flash.name = 'impact-flash';
-    const flashBaseScale = rapidImpact ? radius * 0.34 : 1;
-    if (rapidImpact) flash.scale.setScalar(flashBaseScale);
+    const flashBaseScale = radius * (weapon === 'rocket' ? 0.25 : 0.34);
+    flash.scale.setScalar(flashBaseScale);
     root.add(flash);
     const ringCount = rapidImpact ? 1 : heavy ? 3 : 2;
     for (let index = 0; index < ringCount; index += 1) {
       const ring = new THREE.Mesh(
-        rapidImpact
-          ? this.sharedGeometry('impact-unit-ring-28', () => new THREE.RingGeometry(0.84, 1, 28))
-          : new THREE.RingGeometry(radius * (0.32 + index * 0.17), radius * (0.38 + index * 0.18), 28),
+        this.sharedGeometry('impact-unit-ring-28', () => new THREE.RingGeometry(0.84, 1, 28)),
         glow,
       );
       ring.name = `impact-ring-${index}`;
       ring.position.z = -0.01 * index;
       ring.userData.phase = index * 0.16;
-      ring.userData.baseScale = rapidImpact ? radius * 0.38 : 1;
-      if (rapidImpact) ring.scale.setScalar(ring.userData.baseScale as number);
+      ring.userData.baseScale = radius * (0.38 + index * 0.18);
+      ring.scale.setScalar(ring.userData.baseScale as number);
       root.add(ring);
     }
 
@@ -902,38 +1154,67 @@ export class WeaponVfxSystem {
       polygonOffset: true,
       polygonOffsetFactor: -5,
     });
-    const crater = new THREE.Mesh(new THREE.CircleGeometry(radius, weapon === 'rocket' ? 18 : 12), dark);
-    crater.scale.set(1, 0.82 + this.random() * 0.22, 1);
+    const crater = new THREE.Mesh(
+      this.sharedGeometry(
+        weapon === 'rocket' ? 'mark-unit-circle-18' : 'mark-unit-circle-12',
+        () => new THREE.CircleGeometry(1, weapon === 'rocket' ? 18 : 12),
+      ),
+      dark,
+    );
+    crater.scale.set(radius, radius * (0.82 + this.random() * 0.22), 1);
     root.add(crater);
 
     if (weapon === 'rocket') {
       for (let index = 0; index < 2; index += 1) {
         const ring = new THREE.Mesh(
-          new THREE.RingGeometry(radius * (0.28 + index * 0.2), radius * (0.34 + index * 0.21), 22),
+          this.sharedGeometry('mark-rocket-unit-ring', () => new THREE.RingGeometry(0.83, 1, 22)),
           index === 0 ? accent : dark,
         );
+        ring.scale.setScalar(radius * (0.34 + index * 0.21));
         ring.position.z = 0.002 + index * 0.001;
         ring.rotation.z = index * 0.73;
         root.add(ring);
       }
       for (let index = 0; index < 3; index += 1) {
-        const chip = new THREE.Mesh(new THREE.CircleGeometry(0.045 + this.random() * 0.055, 6), dark);
+        const chip = new THREE.Mesh(
+          this.sharedGeometry('mark-unit-circle-6', () => new THREE.CircleGeometry(1, 6)),
+          dark,
+        );
+        chip.scale.setScalar(0.045 + this.random() * 0.055);
         const angle = (index / 3) * Math.PI * 2 + this.random() * 0.22;
         chip.position.set(Math.cos(angle) * radius * (0.68 + this.random() * 0.34), Math.sin(angle) * radius * (0.68 + this.random() * 0.34), 0.001);
         root.add(chip);
       }
     } else if (weapon === 'plasma') {
-      const residue = new THREE.Mesh(new THREE.RingGeometry(radius * 0.34, radius * 0.74, 20), accent);
-      const core = new THREE.Mesh(new THREE.CircleGeometry(radius * 0.18, 12), accent);
+      const residue = new THREE.Mesh(
+        this.sharedGeometry('mark-plasma-unit-ring', () => new THREE.RingGeometry(0.46, 1, 20)),
+        accent,
+      );
+      residue.scale.setScalar(radius * 0.74);
+      const core = new THREE.Mesh(
+        this.sharedGeometry('mark-unit-circle-12', () => new THREE.CircleGeometry(1, 12)),
+        accent,
+      );
+      core.scale.setScalar(radius * 0.18);
       residue.position.z = core.position.z = 0.002;
       root.add(residue, core);
     } else if (weapon === 'laser') {
-      const burn = new THREE.Mesh(new THREE.PlaneGeometry(radius * 0.34, radius * 1.8), accent);
+      const burn = new THREE.Mesh(
+        this.sharedGeometry('mark-unit-plane', () => new THREE.PlaneGeometry(1, 1)),
+        accent,
+      );
+      burn.scale.set(radius * 0.34, radius * 1.8, 1);
       burn.position.z = 0.002;
       root.add(burn);
     } else if (weapon === 'rail') {
       for (let index = 0; index < 3; index += 1) {
-        const ring = new THREE.Mesh(new THREE.RingGeometry(radius * (0.18 + index * 0.2), radius * (0.24 + index * 0.2), 26), accent);
+        const outer = radius * (0.24 + index * 0.2);
+        const innerRatio = (0.18 + index * 0.2) / (0.24 + index * 0.2);
+        const ring = new THREE.Mesh(
+          this.sharedGeometry(`mark-rail-unit-ring-${index}`, () => new THREE.RingGeometry(innerRatio, 1, 26)),
+          accent,
+        );
+        ring.scale.setScalar(outer);
         ring.position.z = 0.002 + index * 0.001;
         root.add(ring);
       }
@@ -951,7 +1232,12 @@ export class WeaponVfxSystem {
         root.add(slash);
       }
     } else {
-      const puncture = new THREE.Mesh(new THREE.RingGeometry(radius * 0.22, radius * 0.5, weapon === 'shotgun' ? 7 : 12), accent);
+      const segments = weapon === 'shotgun' ? 7 : 12;
+      const puncture = new THREE.Mesh(
+        this.sharedGeometry(`mark-puncture-unit-ring-${segments}`, () => new THREE.RingGeometry(0.44, 1, segments)),
+        accent,
+      );
+      puncture.scale.setScalar(radius * 0.5);
       puncture.position.z = 0.002;
       root.add(puncture);
     }
@@ -982,15 +1268,24 @@ export class WeaponVfxSystem {
     const tracerMaterial = additiveMaterial(color, 0.92, false);
     const hotMaterial = additiveMaterial(0xffffff, 0.96, false);
     const materials = [tracerMaterial, hotMaterial];
-    const tracer = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.012, 0.2, 6), tracerMaterial);
+    const tracer = new THREE.Mesh(
+      this.sharedGeometry('tracer-needle', () => new THREE.CylinderGeometry(0.018, 0.012, 0.2, 6)),
+      tracerMaterial,
+    );
     tracer.name = 'tracer-needle';
     tracer.rotation.x = Math.PI * 0.5;
     tracer.position.z = 0.04;
-    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.08, 6), hotMaterial);
+    const tip = new THREE.Mesh(
+      this.sharedGeometry('tracer-tip', () => new THREE.ConeGeometry(0.035, 0.08, 6)),
+      hotMaterial,
+    );
     tip.name = 'tracer-tip';
     tip.rotation.x = -Math.PI * 0.5;
     tip.position.z = -0.08;
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.008, 5, 12), tracerMaterial);
+    const ring = new THREE.Mesh(
+      this.sharedGeometry('tracer-ring', () => new THREE.TorusGeometry(0.05, 0.008, 5, 12)),
+      tracerMaterial,
+    );
     ring.name = 'tracer-ring';
     ring.position.z = 0.03;
     ring.rotation.x = Math.PI * 0.5;
@@ -1082,43 +1377,67 @@ export class WeaponVfxSystem {
       const shell = new THREE.MeshPhysicalMaterial({ color: 0x5f1717, roughness: 0.3, metalness: 0.48, clearcoat: 0.62 });
       const glow = additiveMaterial(0xff5b20, 0.82);
       const hot = additiveMaterial(0xfff0bd, 0.96);
-      const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.34, 12), shell);
+      const fuselage = new THREE.Mesh(
+        this.sharedGeometry('projectile-rocket-fuselage', () => new THREE.CylinderGeometry(0.075, 0.09, 0.34, 12)),
+        shell,
+      );
       fuselage.name = 'rocket-fuselage';
       fuselage.rotation.x = Math.PI * 0.5;
       root.add(fuselage);
-      const nose = new THREE.Mesh(new THREE.ConeGeometry(0.075, 0.15, 12), body);
+      const nose = new THREE.Mesh(
+        this.sharedGeometry('projectile-rocket-nose', () => new THREE.ConeGeometry(0.075, 0.15, 12)),
+        body,
+      );
       nose.rotation.x = -Math.PI * 0.5;
       nose.position.z = -0.245;
       root.add(nose);
-      const warheadBand = new THREE.Mesh(new THREE.TorusGeometry(0.082, 0.012, 7, 18), glow);
+      const warheadBand = new THREE.Mesh(
+        this.sharedGeometry('projectile-rocket-band', () => new THREE.TorusGeometry(0.082, 0.012, 7, 18)),
+        glow,
+      );
       warheadBand.name = 'rocket-spin-ring';
       warheadBand.rotation.x = Math.PI * 0.5;
       warheadBand.position.z = -0.13;
       root.add(warheadBand);
       const fins: THREE.Object3D[] = [];
       for (let index = 0; index < 3; index += 1) {
-        const fin = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.15, 0.12), index === 0 ? shell : body);
+        const fin = new THREE.Mesh(
+          this.sharedGeometry('projectile-rocket-fin', () => new THREE.BoxGeometry(0.022, 0.15, 0.12)),
+          index === 0 ? shell : body,
+        );
         fin.name = `rocket-fin-${index}`;
         fin.position.z = 0.16;
         fin.rotation.z = index * Math.PI * 2 / 3;
         root.add(fin);
         fins.push(fin);
       }
-      const exhaust = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.32, 10, 1, true), glow);
+      const exhaust = new THREE.Mesh(
+        this.sharedGeometry('projectile-rocket-exhaust', () => new THREE.ConeGeometry(0.085, 0.32, 10, 1, true)),
+        glow,
+      );
       exhaust.name = 'rocket-exhaust-plume';
       exhaust.rotation.x = Math.PI * 0.5;
       exhaust.position.z = 0.34;
       root.add(exhaust);
-      const exhaustCore = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.22, 8, 1, true), hot);
+      const exhaustCore = new THREE.Mesh(
+        this.sharedGeometry('projectile-rocket-exhaust-core', () => new THREE.ConeGeometry(0.028, 0.22, 8, 1, true)),
+        hot,
+      );
       exhaustCore.name = 'rocket-exhaust-hot-core';
       exhaustCore.rotation.x = Math.PI * 0.5;
       exhaustCore.position.z = 0.29;
       root.add(exhaustCore);
-      const heatGlow = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 7), glow);
+      const heatGlow = new THREE.Mesh(
+        this.sharedGeometry('projectile-rocket-heat', () => new THREE.SphereGeometry(0.1, 10, 7)),
+        glow,
+      );
       heatGlow.name = 'rocket-exhaust-heat-glow';
       heatGlow.position.z = 0.25;
       heatGlow.scale.z = 1.85;
-      const pressureRing = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.009, 5, 18), glow);
+      const pressureRing = new THREE.Mesh(
+        this.sharedGeometry('projectile-rocket-pressure', () => new THREE.TorusGeometry(0.1, 0.009, 5, 18)),
+        glow,
+      );
       pressureRing.name = 'rocket-exhaust-pressure-ring';
       pressureRing.position.z = 0.28;
       root.add(heatGlow, pressureRing);
@@ -1167,38 +1486,14 @@ export class WeaponVfxSystem {
         anisotropy: 1,
       });
 
-      const cutterShape = new THREE.Shape();
-      const cutterTeeth = 40;
-      for (let index = 0; index < cutterTeeth; index += 1) {
-        const step = Math.PI * 2 / cutterTeeth;
-        const points: Array<[number, number]> = [
-          [index * step, 0.325],
-          [(index + 0.2) * step, 0.38],
-          [(index + 0.44) * step, 0.374],
-          [(index + 0.78) * step, 0.325],
-        ];
-        for (const [angle, radius] of points) {
-          const x = Math.cos(angle) * radius;
-          const y = Math.sin(angle) * radius;
-          if (index === 0 && angle === 0) cutterShape.moveTo(x, y);
-          else cutterShape.lineTo(x, y);
-        }
-      }
-      cutterShape.closePath();
-      const cutterGeometry = new THREE.ExtrudeGeometry(cutterShape, {
-        depth: 0.022,
-        steps: 1,
-        bevelEnabled: true,
-        bevelSize: 0.0015,
-        bevelThickness: 0.0015,
-        bevelSegments: 1,
-      });
-      cutterGeometry.translate(0, 0, -0.011);
-      cutterGeometry.computeVertexNormals();
+      const cutterGeometry = this.sharedGeometry('projectile-disc-cutter', () => this.createDiscCutterGeometry());
       const cutterBody = new THREE.Mesh(cutterGeometry, carbide);
       cutterBody.name = 'disc-projectile-body';
       rotor.add(cutterBody);
-      const armoredHub = new THREE.Mesh(new THREE.CylinderGeometry(0.125, 0.125, 0.085, 18, 1), carbide);
+      const armoredHub = new THREE.Mesh(
+        this.sharedGeometry('projectile-disc-hub', () => new THREE.CylinderGeometry(0.125, 0.125, 0.085, 18, 1)),
+        carbide,
+      );
       armoredHub.name = 'disc-projectile-hub';
       armoredHub.rotation.x = Math.PI * 0.5;
       rotor.add(armoredHub);
@@ -1217,10 +1512,19 @@ export class WeaponVfxSystem {
     root.name = 'grenade';
     const shell = new THREE.MeshStandardMaterial({ color: 0x252b31, roughness: 0.34, metalness: 0.76 });
     const glow = additiveMaterial(color, 0.8);
-    const body = new THREE.Mesh(new THREE.SphereGeometry(0.18, 12, 8), shell);
-    const band = new THREE.Mesh(new THREE.TorusGeometry(0.185, 0.018, 6, 18), glow);
+    const body = new THREE.Mesh(
+      this.sharedGeometry('grenade-body', () => new THREE.SphereGeometry(0.18, 12, 8)),
+      shell,
+    );
+    const band = new THREE.Mesh(
+      this.sharedGeometry('grenade-band', () => new THREE.TorusGeometry(0.185, 0.018, 6, 18)),
+      glow,
+    );
     band.rotation.x = Math.PI * 0.5;
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.04, 8), glow);
+    const cap = new THREE.Mesh(
+      this.sharedGeometry('grenade-cap', () => new THREE.CylinderGeometry(0.06, 0.06, 0.04, 8)),
+      glow,
+    );
     cap.position.y = 0.18;
     root.add(body, band, cap);
     root.traverse((object) => { object.frustumCulled = false; });
@@ -1251,8 +1555,14 @@ export class WeaponVfxSystem {
     const glow = additiveMaterial(0xff5b20, 0.82);
     const hot = additiveMaterial(0xfff4c1, 0.96);
     const materials = [glow, hot];
-    const core = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 10), hot);
-    const wave = new THREE.Mesh(new THREE.RingGeometry(0.22, 0.3, 32), glow);
+    const core = new THREE.Mesh(
+      this.sharedGeometry('explosion-rocket-core', () => new THREE.SphereGeometry(0.24, 14, 10)),
+      hot,
+    );
+    const wave = new THREE.Mesh(
+      this.sharedGeometry('explosion-rocket-wave', () => new THREE.RingGeometry(0.22, 0.3, 32)),
+      glow,
+    );
     wave.position.z = -0.02;
     root.add(core, wave);
     this.scene.add(root);
@@ -1288,20 +1598,33 @@ export class WeaponVfxSystem {
       for (let index = 0; index < this.grappleCurvePoints.length; index += 1) {
         this.grappleCurvePoints[index].set(0, index / (this.grappleCurvePoints.length - 1), 0);
       }
-      this.grappleCurve.updateArcLengths();
-      this.grappleCable = new THREE.Mesh(new THREE.TubeGeometry(this.grappleCurve, 8, 0.035, 6, false), cableMaterial);
+      this.grappleCable = new THREE.Group();
       this.grappleCable.name = 'grapple-cable';
-      this.grappleCable.frustumCulled = false;
       this.grappleCable.renderOrder = 1000;
+      const cableGeometry = this.sharedGeometry(
+        'grapple-segment',
+        () => new THREE.CylinderGeometry(0.035, 0.035, 1, 6, 1, true),
+      );
+      for (let index = 0; index < this.grappleCurvePoints.length - 1; index += 1) {
+        const segment = new THREE.Mesh(cableGeometry, cableMaterial);
+        segment.name = `grapple-cable-segment-${index}`;
+        segment.frustumCulled = false;
+        segment.renderOrder = 1000;
+        this.grappleCable.add(segment);
+        this.grappleCableSegments.push(segment);
+      }
       this.grappleHook = new THREE.Mesh(
-        new THREE.TorusGeometry(0.19, 0.04, 8, 18),
+        this.sharedGeometry('grapple-hook', () => new THREE.TorusGeometry(0.19, 0.04, 8, 18)),
         additiveMaterial(0xffffff, 1, false),
       );
       this.grappleMaterials.push(this.grappleHook.material as THREE.Material);
       this.grappleHook.frustumCulled = false;
       this.grappleHook.renderOrder = 1001;
       this.grappleHook.rotation.x = Math.PI * 0.5;
-      this.grappleHookCore = new THREE.Mesh(new THREE.IcosahedronGeometry(0.095, 1), additiveMaterial(0x6df4ff, 1, false));
+      this.grappleHookCore = new THREE.Mesh(
+        this.sharedGeometry('grapple-hook-core', () => new THREE.IcosahedronGeometry(0.095, 1)),
+        additiveMaterial(0x6df4ff, 1, false),
+      );
       this.grappleHookCore.frustumCulled = false;
       this.grappleHookCore.renderOrder = 1001;
       this.grappleMaterials.push(this.grappleHookCore.material as THREE.Material);
@@ -1332,13 +1655,11 @@ export class WeaponVfxSystem {
       point.addScaledVector(side, Math.sin(t * Math.PI) * flex);
     }
     this.grappleCurvePoints[this.grappleCurvePoints.length - 1].copy(end);
-    if (this.grappleGeometryFrame === 0) {
-      this.grappleCurve.updateArcLengths();
-      const previousGeometry = cable.geometry;
-      cable.geometry = new THREE.TubeGeometry(this.grappleCurve, 18, 0.035, 6, false);
-      previousGeometry.dispose();
+    for (let index = 0; index < this.grappleCableSegments.length; index += 1) {
+      const segment = this.grappleCableSegments[index];
+      const length = orientBetween(segment, this.grappleCurvePoints[index], this.grappleCurvePoints[index + 1]);
+      segment.scale.set(1, length, 1);
     }
-    this.grappleGeometryFrame = (this.grappleGeometryFrame + 1) % 3;
     this.ropePhase += 0.055;
     hook.position.copy(end);
     if (this.grappleHookCore) this.grappleHookCore.position.copy(end);
@@ -1346,7 +1667,6 @@ export class WeaponVfxSystem {
 
   clearGrapple(): void {
     if (this.grappleRoot) this.grappleRoot.visible = false;
-    this.grappleGeometryFrame = 0;
   }
 
   orientProjectile(root: THREE.Group, direction: THREE.Vector3, elapsed: number, weapon: WeaponId): void {
@@ -1450,10 +1770,23 @@ export class WeaponVfxSystem {
       this.disposeRoot(this.grappleRoot, this.grappleMaterials);
       this.grappleRoot = undefined;
       this.grappleCable = undefined;
+      this.grappleCableSegments.length = 0;
       this.grappleHook = undefined;
       this.grappleHookCore = undefined;
       this.grappleMaterials.length = 0;
     }
+    for (const entry of this.machineMuzzlePool) {
+      entry.root.parent?.remove(entry.root);
+      entry.hot.dispose();
+      entry.glow.dispose();
+    }
+    for (const entry of this.machineBeamPool) {
+      entry.root.parent?.remove(entry.root);
+      entry.core.dispose();
+      entry.glow.dispose();
+    }
+    this.machineMuzzlePool.length = 0;
+    this.machineBeamPool.length = 0;
     for (const geometry of this.sharedGeometries.values()) geometry.dispose();
     this.sharedGeometries.clear();
     this.sharedGeometrySet.clear();
@@ -1516,6 +1849,11 @@ export class WeaponVfxSystem {
   private removeEffect(index: number): void {
     const effect = this.effects[index];
     if (!effect) return;
+    if (effect.pooled) {
+      effect.root.visible = false;
+      this.effects.splice(index, 1);
+      return;
+    }
     effect.root.parent?.remove(effect.root);
     this.disposeRoot(effect.root, effect.materials);
     this.effects.splice(index, 1);
@@ -1528,6 +1866,49 @@ export class WeaponVfxSystem {
     geometry.userData.sharedWeaponVfx = true;
     this.sharedGeometries.set(key, geometry);
     this.sharedGeometrySet.add(geometry);
+    return geometry;
+  }
+
+  private createRailMuzzleArcGeometry(index: number): THREE.TubeGeometry {
+    const side = index % 2 ? 1 : -1;
+    const verticalOffset = (index - 1.5) * 0.04;
+    const curve = new THREE.QuadraticBezierCurve3(
+      new THREE.Vector3(side * 0.17, verticalOffset, 0.05),
+      new THREE.Vector3(side * 0.3, verticalOffset * -0.8, -0.38),
+      new THREE.Vector3(side * 0.04, verticalOffset * 0.45, -0.82),
+    );
+    return new THREE.TubeGeometry(curve, 8, index === 0 ? 0.014 : 0.009, 4, false);
+  }
+
+  private createDiscCutterGeometry(): THREE.ExtrudeGeometry {
+    const cutterShape = new THREE.Shape();
+    const cutterTeeth = 40;
+    const step = Math.PI * 2 / cutterTeeth;
+    for (let index = 0; index < cutterTeeth; index += 1) {
+      const points: Array<[number, number]> = [
+        [index * step, 0.325],
+        [(index + 0.2) * step, 0.38],
+        [(index + 0.44) * step, 0.374],
+        [(index + 0.78) * step, 0.325],
+      ];
+      for (const [angle, radius] of points) {
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        if (index === 0 && angle === 0) cutterShape.moveTo(x, y);
+        else cutterShape.lineTo(x, y);
+      }
+    }
+    cutterShape.closePath();
+    const geometry = new THREE.ExtrudeGeometry(cutterShape, {
+      depth: 0.022,
+      steps: 1,
+      bevelEnabled: true,
+      bevelSize: 0.0015,
+      bevelThickness: 0.0015,
+      bevelSegments: 1,
+    });
+    geometry.translate(0, 0, -0.011);
+    geometry.computeVertexNormals();
     return geometry;
   }
 

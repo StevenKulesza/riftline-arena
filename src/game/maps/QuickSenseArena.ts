@@ -15,10 +15,10 @@ import { buildLaunchRamp, type FlowSurfaceBuild, type LaunchRampSpec } from './F
 export const QUICKSENSE = {
   id: 'quicksense',
   name: 'QuickSense',
-  generationVersion: 1,
-  width: 180,
-  depth: 160,
-  killY: -16,
+  generationVersion: 2,
+  width: 360,
+  depth: 320,
+  killY: -24,
 } as const;
 
 type PathPoint = { x: number; y: number; z: number };
@@ -62,8 +62,44 @@ type AnimatedProp = {
   spin: number;
 };
 
-const PANEL_GRID = 64;
+type InstanceTransform = {
+  position: THREE.Vector3;
+  scale: THREE.Vector3;
+  yaw?: number;
+  rotation?: THREE.Euler;
+};
+
+type AccentRole = 'cyan' | 'magenta' | 'amber';
+
+type GroundBuildingSpec = {
+  x: number;
+  z: number;
+  roofY: number;
+  width: number;
+  depth: number;
+  height: number;
+  yaw: number;
+  accent: AccentRole;
+  collidable: boolean;
+};
+
+type FloatingBuildingSpec = {
+  x: number;
+  z: number;
+  y: number;
+  width: number;
+  height: number;
+  depth: number;
+  yaw: number;
+  accent: AccentRole;
+};
+
+const PANEL_GRID = 128;
 const EPSILON = 0.0001;
+const QUICK_LOCAL_WIDTH = 180;
+const QUICK_LOCAL_DEPTH = 160;
+const QUICK_HORIZONTAL_SCALE = 2;
+const QUICK_VERTICAL_SCALE = 1.6;
 const QUICK_WEATHER_DIRECTION = new THREE.Vector2(0.82, 0.28).normalize();
 
 function clamp01(value: number): number {
@@ -87,6 +123,33 @@ function ellipsePoints(
       z: centerZ + Math.sin(angle) * radiusZ,
     };
   });
+}
+
+function rollerEllipsePoints(
+  centerX: number,
+  centerZ: number,
+  radiusX: number,
+  radiusZ: number,
+  segments: number,
+  baseY: number,
+  amplitude: number,
+  waves: number,
+  phase = 0,
+): PathPoint[] {
+  return ellipsePoints(centerX, centerZ, radiusX, radiusZ, segments, baseY, phase).map((point, index) => ({
+    ...point,
+    y: baseY + Math.sin(index / segments * Math.PI * 2 * waves + phase) * amplitude,
+  }));
+}
+
+function splinePoints(controlPoints: PathPoint[], samples: number): PathPoint[] {
+  const curve = new THREE.CatmullRomCurve3(
+    controlPoints.map((point) => new THREE.Vector3(point.x, point.y, point.z)),
+    false,
+    'centripetal',
+    0.45,
+  );
+  return curve.getPoints(samples).map((point) => ({ x: point.x, y: point.y, z: point.z }));
 }
 
 function closestSegment(
@@ -147,29 +210,43 @@ function createPanelTexture(): THREE.CanvasTexture {
   canvas.height = PANEL_GRID;
   const context = canvas.getContext('2d');
   if (!context) throw new Error('QuickSense could not create its panel texture.');
-  context.fillStyle = '#667782';
+  context.fillStyle = '#63676a';
   context.fillRect(0, 0, PANEL_GRID, PANEL_GRID);
-  context.strokeStyle = 'rgba(226, 241, 245, 0.23)';
-  context.lineWidth = 1;
-  for (let offset = 0; offset <= PANEL_GRID; offset += 8) {
-    context.beginPath();
-    context.moveTo(offset + 0.5, 0);
-    context.lineTo(offset + 0.5, PANEL_GRID);
-    context.stroke();
-    context.beginPath();
-    context.moveTo(0, offset + 0.5);
-    context.lineTo(PANEL_GRID, offset + 0.5);
-    context.stroke();
+  const panelSize = 32;
+  for (let panelZ = 0; panelZ < PANEL_GRID / panelSize; panelZ += 1) {
+    for (let panelX = 0; panelX < PANEL_GRID / panelSize; panelX += 1) {
+      const variation = (panelX * 5 + panelZ * 3) % 4;
+      context.fillStyle = ['#636669', '#585c5f', '#6c7073', '#5e6265'][variation];
+      const x = panelX * panelSize;
+      const y = panelZ * panelSize;
+      context.fillRect(x + 1, y + 1, panelSize - 2, panelSize - 2);
+      context.strokeStyle = 'rgba(24, 27, 30, 0.84)';
+      context.lineWidth = 2;
+      context.strokeRect(x + 0.7, y + 0.7, panelSize - 1.4, panelSize - 1.4);
+      context.strokeStyle = 'rgba(218, 221, 222, 0.22)';
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(x + 2, y + 2);
+      context.lineTo(x + panelSize - 2, y + 2);
+      context.stroke();
+      context.fillStyle = 'rgba(20, 23, 26, 0.72)';
+      context.fillRect(x + 4, y + 4, 2, 2);
+      context.fillRect(x + panelSize - 6, y + panelSize - 6, 2, 2);
+    }
   }
-  context.fillStyle = 'rgba(7, 16, 27, 0.28)';
-  context.fillRect(2, 2, 3, PANEL_GRID - 4);
-  context.fillRect(PANEL_GRID - 5, 2, 3, PANEL_GRID - 4);
+  context.strokeStyle = 'rgba(223, 226, 226, 0.18)';
+  context.lineWidth = 1;
+  context.strokeRect(2.5, 2.5, PANEL_GRID - 5, PANEL_GRID - 5);
+  context.fillStyle = 'rgba(15, 18, 21, 0.36)';
+  context.fillRect(0, 0, 4, PANEL_GRID);
+  context.fillRect(PANEL_GRID - 4, 0, 4, PANEL_GRID);
   const texture = new THREE.CanvasTexture(canvas);
   texture.name = 'QuickSensePanelGrid';
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
-  texture.repeat.set(4, 4);
+  texture.repeat.set(1, 1);
+  texture.anisotropy = 4;
   return texture;
 }
 
@@ -200,6 +277,45 @@ export class QuickSenseArena implements ArenaRuntime {
   private readonly correction = new THREE.Vector3();
   private readonly wallNormal = new THREE.Vector3();
   private readonly rampNormal = new THREE.Vector3();
+  private readonly localPosition = new THREE.Vector3();
+  private readonly localVelocity = new THREE.Vector3();
+  private readonly localStart = new THREE.Vector3();
+  private readonly localEnd = new THREE.Vector3();
+  private readonly segmentDirection = new THREE.Vector3();
+  private readonly segmentRay = new THREE.Ray();
+  private readonly segmentPoint = new THREE.Vector3();
+  private readonly segmentClosestPoint = new THREE.Vector3();
+  private readonly segmentClosestNormal = new THREE.Vector3();
+  private readonly localSurfaceHit: SurfaceHit = {
+    point: new THREE.Vector3(),
+    normal: new THREE.Vector3(),
+    distance: 0,
+    surface: 'concrete',
+  };
+  private readonly worldSurfaceHit: SurfaceHit = {
+    point: new THREE.Vector3(),
+    normal: new THREE.Vector3(),
+    distance: 0,
+    surface: 'concrete',
+  };
+  private readonly localContactResults: CapsuleContact[] = Array.from({ length: 8 }, () => ({
+    grounded: false,
+    contactNormal: new THREE.Vector3(0, 1, 0),
+    wallContact: false,
+    wallNormal: new THREE.Vector3(),
+    correction: new THREE.Vector3(),
+    contacts: 0,
+  }));
+  private readonly worldContactResults: CapsuleContact[] = Array.from({ length: 8 }, () => ({
+    grounded: false,
+    contactNormal: new THREE.Vector3(0, 1, 0),
+    wallContact: false,
+    wallNormal: new THREE.Vector3(),
+    correction: new THREE.Vector3(),
+    contacts: 0,
+  }));
+  private localContactCursor = 0;
+  private worldContactCursor = 0;
   private readonly floorSurface = { height: 0, normal: this.floorNormal };
   private readonly playerInfluence = new THREE.Vector3(0, -100, 0);
   private weatherGameplaySnapshot: WeatherGameplaySnapshot | null = null;
@@ -229,115 +345,163 @@ export class QuickSenseArena implements ArenaRuntime {
     this.group.userData.source = 'Authored low-poly flow layout';
     this.group.userData.license = 'Riftline project original';
     this.group.userData.mapSeed = seed;
+    this.group.userData.horizontalScale = QUICK_HORIZONTAL_SCALE;
+    this.group.userData.verticalScale = QUICK_VERTICAL_SCALE;
+    this.group.scale.set(QUICK_HORIZONTAL_SCALE, QUICK_VERTICAL_SCALE, QUICK_HORIZONTAL_SCALE);
 
     const panelTexture = createPanelTexture();
     this.textures.push(panelTexture);
-    const groundMaterial = this.material('QuickSense moss floor', 0x3f6049, 0.02, 0.98);
-    const deckMaterial = this.material('QuickSense graphite panels', 0xa7b3b8, 0.72, 0.42, panelTexture);
-    const sideMaterial = this.material('QuickSense deck skirts', 0x293946, 0.72, 0.5);
-    const rockMaterial = this.material('QuickSense volcanic cliffs', 0x35424d, 0.05, 0.98);
-    const cyanMaterial = this.emissiveMaterial('QuickSense cyan route', 0x2edfff, 0x2edfff);
-    const magentaMaterial = this.emissiveMaterial('QuickSense magenta route', 0xff3fad, 0xff3fad);
-    const amberMaterial = this.emissiveMaterial('QuickSense amber safety', 0xffb638, 0xffb638);
-    const whiteMaterial = this.material('QuickSense structure highlight', 0x8f9ca8, 0.8, 0.34);
+    const groundMaterial = this.material('QuickSense olive basin floor', 0xffffff, 0.01, 0.98);
+    const groundFoundationMaterial = this.material('QuickSense terrain foundation', 0x3c4334, 0.01, 0.99);
+    const deckMaterial = this.material('QuickSense graphite panels', 0xb4b6b8, 0.27, 0.78, panelTexture);
+    const sideMaterial = this.material('QuickSense charcoal deck skirts', 0x394047, 0.46, 0.75);
+    const rockMaterial = this.material('QuickSense volcanic cliffs', 0x292d31, 0.02, 0.99);
+    const rockHighlightMaterial = this.material('QuickSense cliff faces', 0x3b4045, 0.02, 0.97);
+    const mossCapMaterial = this.material('QuickSense moss cliff caps', 0x5b6548, 0.01, 1);
+    const cyanMaterial = this.emissiveMaterial('QuickSense cyan route', 0x23c6ea, 0x16b9e4);
+    const magentaMaterial = this.emissiveMaterial('QuickSense magenta route', 0xdf3da5, 0xd42b9a);
+    const amberMaterial = this.emissiveMaterial('QuickSense amber safety', 0xce841b, 0xb96b0d);
+    const whiteMaterial = this.material('QuickSense gunmetal structure trim', 0x5f666a, 0.48, 0.58);
+    groundMaterial.vertexColors = true;
+    rockMaterial.vertexColors = true;
+    rockHighlightMaterial.vertexColors = true;
+    deckMaterial.bumpMap = panelTexture;
+    deckMaterial.bumpScale = 0.035;
 
-    this.createGround(groundMaterial, rockMaterial);
-
-    const leftLoop = this.createPath(
-      'Cyan outer circulation loop',
-      ellipsePoints(-42, 0, 31, 57, 24, 2.2, Math.PI * 0.5),
-      8.2,
-      0.12,
+    this.createPath(
+      'Cyan outer basin circuit',
+      splinePoints([
+        { x: 0, y: 2.2, z: -72 }, { x: -30, y: 3.4, z: -73 }, { x: -59, y: 6.8, z: -62 },
+        { x: -75, y: 4.4, z: -38 }, { x: -79, y: 9.4, z: -7 }, { x: -75, y: 6.8, z: 25 },
+        { x: -61, y: 13.5, z: 51 }, { x: -36, y: 12.0, z: 67 }, { x: 0, y: 18.0, z: 72 },
+      ], 32),
+      9.2,
+      0.18,
       deckMaterial,
+      sideMaterial,
       cyanMaterial,
-      true,
+      amberMaterial,
+      false,
     );
-    const rightLoop = this.createPath(
-      'Magenta outer circulation loop',
-      ellipsePoints(42, 0, 31, 57, 24, 2.2, Math.PI * 0.5),
-      8.2,
-      -0.12,
+    this.createPath(
+      'Magenta outer basin circuit',
+      splinePoints([
+        { x: 0, y: 2.2, z: -72 }, { x: 30, y: 3.4, z: -73 }, { x: 59, y: 6.8, z: -62 },
+        { x: 75, y: 4.4, z: -38 }, { x: 79, y: 9.4, z: -7 }, { x: 75, y: 6.8, z: 25 },
+        { x: 61, y: 13.5, z: 51 }, { x: 36, y: 12.0, z: 67 }, { x: 0, y: 18.0, z: 72 },
+      ], 32),
+      9.2,
+      -0.18,
       deckMaterial,
+      sideMaterial,
       magentaMaterial,
-      true,
+      amberMaterial,
+      false,
     );
-    void leftLoop;
-    void rightLoop;
-
+    this.createPath(
+      'Cyan inner momentum spiral',
+      splinePoints([
+        { x: -4, y: 3.0, z: -59 }, { x: -24, y: 5.7, z: -52 }, { x: -44, y: 4.2, z: -39 },
+        { x: -56, y: 9.0, z: -17 }, { x: -53, y: 6.6, z: 8 }, { x: -40, y: 12.8, z: 27 },
+        { x: -19, y: 10.2, z: 37 }, { x: 0, y: 16.2, z: 35 },
+      ], 26),
+      7.8,
+      0.16,
+      deckMaterial,
+      sideMaterial,
+      cyanMaterial,
+      amberMaterial,
+      false,
+    );
+    this.createPath(
+      'Magenta inner momentum spiral',
+      splinePoints([
+        { x: 4, y: 3.0, z: -59 }, { x: 24, y: 5.7, z: -52 }, { x: 44, y: 4.2, z: -39 },
+        { x: 56, y: 9.0, z: -17 }, { x: 53, y: 6.6, z: 8 }, { x: 40, y: 12.8, z: 27 },
+        { x: 19, y: 10.2, z: 37 }, { x: 0, y: 16.2, z: 35 },
+      ], 26),
+      7.8,
+      -0.16,
+      deckMaterial,
+      sideMaterial,
+      magentaMaterial,
+      amberMaterial,
+      false,
+    );
     this.createPath(
       'Central uphill spine',
-      [
-        { x: 0, y: 1.8, z: -69 },
-        { x: 0, y: 3.0, z: -50 },
-        { x: 0, y: 6.4, z: -26 },
-        { x: 0, y: 10.2, z: 0 },
-        { x: 0, y: 13.2, z: 26 },
-        { x: 0, y: 16.0, z: 50 },
-        { x: 0, y: 17.5, z: 69 },
-      ],
-      8.6,
+      splinePoints([
+        { x: 0, y: 2.0, z: -69 }, { x: 0, y: 4.0, z: -50 }, { x: 0, y: 7.2, z: -30 },
+        { x: 0, y: 12.0, z: 0 }, { x: 0, y: 17.0, z: 30 }, { x: 0, y: 21.0, z: 50 },
+        { x: 0, y: 24.0, z: 69 },
+      ], 24),
+      8.8,
       0,
       deckMaterial,
+      sideMaterial,
+      amberMaterial,
       amberMaterial,
       false,
     );
     this.createPath(
-      'West transfer bridge',
-      [
-        { x: -73, y: 3.0, z: 0 },
-        { x: -57, y: 3.2, z: 0 },
-        { x: -35, y: 5.0, z: 0 },
-        { x: -13, y: 8.6, z: 0 },
-      ],
-      7.8,
-      0.08,
+      'Lower velocity cross',
+      splinePoints([
+        { x: -69, y: 5.5, z: -25 }, { x: -48, y: 8.2, z: -23 }, { x: -27, y: 6.8, z: -14 },
+        { x: 0, y: 11.8, z: 3 }, { x: 27, y: 6.8, z: -14 }, { x: 48, y: 8.2, z: -23 },
+        { x: 69, y: 5.5, z: -25 },
+      ], 22),
+      7.6,
+      0,
       deckMaterial,
-      cyanMaterial,
+      sideMaterial,
+      amberMaterial,
+      amberMaterial,
       false,
     );
     this.createPath(
-      'East transfer bridge',
-      [
-        { x: 73, y: 3.0, z: 0 },
-        { x: 57, y: 3.2, z: 0 },
-        { x: 35, y: 5.0, z: 0 },
-        { x: 13, y: 8.6, z: 0 },
-      ],
-      7.8,
-      -0.08,
+      'Upper velocity cross',
+      splinePoints([
+        { x: -63, y: 11.0, z: 33 }, { x: -40, y: 14.2, z: 29 }, { x: -20, y: 12.2, z: 20 },
+        { x: 0, y: 16.6, z: 12 }, { x: 20, y: 12.2, z: 20 }, { x: 40, y: 14.2, z: 29 },
+        { x: 63, y: 11.0, z: 33 },
+      ], 22),
+      7.4,
+      0,
       deckMaterial,
-      magentaMaterial,
+      sideMaterial,
+      amberMaterial,
+      amberMaterial,
       false,
     );
     this.createPath(
-      'Upper cross transfer',
-      [
-        { x: -49, y: 9.5, z: 32 },
-        { x: -27, y: 11.2, z: 31 },
-        { x: 0, y: 13.5, z: 31 },
-        { x: 27, y: 11.2, z: 31 },
-        { x: 49, y: 9.5, z: 32 },
-      ],
+      'Flux Core orbital transfer',
+      rollerEllipsePoints(0, 7, 28, 22, 24, 12.3, 2.1, 2, Math.PI * 0.5),
       7.2,
-      0,
+      0.09,
       deckMaterial,
+      sideMaterial,
       amberMaterial,
-      false,
+      amberMaterial,
+      true,
     );
 
     this.createRamps(deckMaterial, cyanMaterial, magentaMaterial, amberMaterial);
+    this.createGround(groundMaterial, groundFoundationMaterial, rockMaterial, rockHighlightMaterial, mossCapMaterial);
     this.createBoundaryArchitecture(sideMaterial, amberMaterial);
 
     this.addPlatform('Flux Core central dais', 0, 0, 12.2, 24, 3.2, 20, deckMaterial, true);
-    this.addPlatform('North grapple roof', 0, 61, 21.4, 19, 3.0, 13, deckMaterial, true);
-    this.addPlatform('South launch roof', 0, -61, 7.1, 19, 2.4, 13, deckMaterial, true);
-    this.addPlatform('West overlook roof', -67, 31, 11.4, 16, 2.2, 14, deckMaterial, true);
-    this.addPlatform('East overlook roof', 67, -31, 11.4, 16, 2.2, 14, deckMaterial, true);
+    this.addPlatform('North grapple west roof', -10.6, 61, 21.4, 8.4, 3.0, 13, deckMaterial, true);
+    this.addPlatform('North grapple east roof', 10.6, 61, 21.4, 8.4, 3.0, 13, deckMaterial, true);
+    this.addPlatform('South launch west roof', -10.6, -61, 7.1, 8.4, 2.4, 13, deckMaterial, true);
+    this.addPlatform('South launch east roof', 10.6, -61, 7.1, 8.4, 2.4, 13, deckMaterial, true);
+    this.addPlatform('West ridge overlook roof', -82, 42, 11.4, 16, 2.2, 14, deckMaterial, true);
+    this.addPlatform('East ridge overlook roof', 82, -42, 11.4, 16, 2.2, 14, deckMaterial, true);
 
     this.createCentralStructures(sideMaterial, whiteMaterial, cyanMaterial, magentaMaterial, amberMaterial);
-    this.createPeripheralBuildings(sideMaterial, whiteMaterial, cyanMaterial, magentaMaterial);
-    this.createFloatingStructures(sideMaterial, whiteMaterial, cyanMaterial, magentaMaterial);
-    this.createRouteSupports(sideMaterial, cyanMaterial, magentaMaterial);
+    this.createPeripheralBuildings(sideMaterial, whiteMaterial, cyanMaterial, magentaMaterial, amberMaterial);
+    this.createFloatingStructures(sideMaterial, whiteMaterial, cyanMaterial, magentaMaterial, amberMaterial);
+    this.createSkylineGateways(sideMaterial, whiteMaterial, cyanMaterial, magentaMaterial, amberMaterial);
+    this.createRouteSupports(sideMaterial, whiteMaterial, cyanMaterial, magentaMaterial);
 
     const cyanPad = this.createJumpPad(new THREE.Vector3(-42, 2.5, -54), new THREE.Vector3(0.22, 0.76, 0.6), cyanMaterial);
     const magentaPad = this.createJumpPad(new THREE.Vector3(42, 2.5, 54), new THREE.Vector3(-0.22, 0.76, -0.6), magentaMaterial);
@@ -346,7 +510,7 @@ export class QuickSenseArena implements ArenaRuntime {
     const eastPad = this.createJumpPad(new THREE.Vector3(62, 3.35, 0), new THREE.Vector3(-0.78, 0.45, 0), magentaMaterial);
     this.jumpPads.push(cyanPad, magentaPad, centerPad, westPad, eastPad);
 
-    this.corePosition = new THREE.Vector3(0, 19.6, 0);
+    this.corePosition = this.localToWorld(new THREE.Vector3(0, 19.6, 0));
     this.spawnPoints = [
       this.pointOnFloor(-42, -47),
       this.pointOnFloor(42, 47),
@@ -363,33 +527,42 @@ export class QuickSenseArena implements ArenaRuntime {
       armor: this.pointOnFloor(-24, 31, 0.8),
       damage: this.corePosition.clone().add(new THREE.Vector3(0, 0.9, 0)),
       speed: this.pointOnFloor(24, -31, 0.8),
-      rail: new THREE.Vector3(0, 23.05, 61),
+      rail: this.localToWorld(new THREE.Vector3(0, 23.05, 61)),
       rocket: this.pointOnFloor(-42, 0, 0.8),
       plasma: this.pointOnFloor(42, 0, 0.8),
       shotgun: this.pointOnFloor(-24, -31, 0.8),
-      sniper: new THREE.Vector3(0, 23.05, -61),
+      sniper: this.localToWorld(new THREE.Vector3(0, 23.05, -61)),
       laser: this.pointOnFloor(24, 31, 0.8),
     };
 
-    const renderTriangles = this.geometries.reduce((sum, geometry) => {
+    let renderTriangles = 0;
+    this.group.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.visible) return;
+      const geometry = mesh.geometry;
       const position = geometry.getAttribute('position');
-      return sum + (position ? position.count / 3 : 0);
-    }, 0);
+      if (!position) return;
+      const triangleCount = geometry.index ? geometry.index.count / 3 : position.count / 3;
+      const instanceCount = (mesh as THREE.InstancedMesh).isInstancedMesh
+        ? (mesh as THREE.InstancedMesh).count
+        : 1;
+      renderTriangles += triangleCount * instanceCount;
+    });
     this.collisionTriangles = Math.round(this.colliders.length * 12 + this.rampSurfaces.length * 72 + this.pathSurfaces.length * 48);
     this.mapInfo = {
       name: QUICKSENSE.name,
       seed,
       generationVersion: QUICKSENSE.generationVersion,
       ready: true,
-      topologyHash: `quicksense-${seed.toString(16)}-flow-v1`,
+      topologyHash: `quicksense-${seed.toString(16)}-skyline-v2`,
       bounds: { width: QUICKSENSE.width, depth: QUICKSENSE.depth },
-      altitudeRange: { min: 0, max: 32 },
+      altitudeRange: { min: 0, max: 96 },
       renderTriangles: Math.round(renderTriangles),
       collisionTriangles: this.collisionTriangles,
       spawnCount: this.spawnPoints.length,
       pickupCount: Object.keys(this.itemPoints).length,
       jumpPadCount: this.jumpPads.length,
-      skiRoutes: 6,
+      skiRoutes: 8,
     };
   }
 
@@ -399,7 +572,7 @@ export class QuickSenseArena implements ArenaRuntime {
       prop.object.rotation.y = prop.phase + time * prop.spin;
       prop.object.position.y = prop.baseY + (reducedMotion ? 0 : Math.sin(time * 1.8 + prop.phase) * 0.16);
     }
-    const pulse = reducedMotion ? 0.72 : 0.86 + Math.sin(time * 2.8) * 0.18;
+    const pulse = reducedMotion ? 0.42 : 0.46 + Math.sin(time * 2.8) * 0.09;
     for (const material of this.pulseMaterials) material.emissiveIntensity = pulse;
     const weather = this.weatherGameplaySnapshot;
     if (weather) {
@@ -431,7 +604,7 @@ export class QuickSenseArena implements ArenaRuntime {
   }
 
   setPlayerInfluence(position: THREE.Vector3): void {
-    this.playerInfluence.copy(position);
+    this.worldToLocal(position, this.playerInfluence);
   }
 
   resolvePlayerCapsule(position: THREE.Vector3, velocity: THREE.Vector3): CapsuleContact {
@@ -444,16 +617,51 @@ export class QuickSenseArena implements ArenaRuntime {
     radius: number,
     height: number,
   ): CapsuleContact {
+    this.worldToLocal(position, this.localPosition);
+    this.worldVectorToLocal(velocity, this.localVelocity);
+    const localContact = this.resolveLocalCapsule(
+      this.localPosition,
+      this.localVelocity,
+      radius / QUICK_HORIZONTAL_SCALE,
+      height / QUICK_VERTICAL_SCALE,
+    );
+    this.localToWorld(this.localPosition, position);
+    this.localVectorToWorld(this.localVelocity, velocity);
+    const result = this.worldContactResults[this.worldContactCursor];
+    this.worldContactCursor = (this.worldContactCursor + 1) % this.worldContactResults.length;
+    result.grounded = localContact.grounded;
+    this.localNormalToWorld(localContact.contactNormal, result.contactNormal);
+    result.wallContact = localContact.wallContact;
+    this.localNormalToWorld(localContact.wallNormal, result.wallNormal);
+    this.localVectorToWorld(localContact.correction, result.correction);
+    result.contacts = localContact.contacts;
+    return result;
+  }
+
+  private resolveLocalCapsule(
+    position: THREE.Vector3,
+    velocity: THREE.Vector3,
+    radius: number,
+    height: number,
+  ): CapsuleContact {
     this.correction.set(0, 0, 0);
     this.wallNormal.set(0, 0, 0);
     let grounded = false;
     let wallContact = false;
     let contacts = 0;
-    const floor = this.floorSurfaceAt(position.x, position.z, position.y + MOVEMENT.groundSnapDistance + 0.08);
+    const localGroundSnap = MOVEMENT.groundSnapDistance / QUICK_VERTICAL_SCALE;
+    const floor = this.floorSurfaceAt(
+      position.x,
+      position.z,
+      position.y + localGroundSnap + 0.08 / QUICK_VERTICAL_SCALE,
+    );
     if (floor) {
       this.contactNormal.copy(floor.normal);
       const gap = position.y - floor.height;
-      if (gap <= 0.015 || (velocity.y <= 0.5 && gap <= MOVEMENT.groundSnapDistance + 0.025)) {
+      if (
+        gap <= 0.015 / QUICK_VERTICAL_SCALE
+        || (velocity.y <= 0.5 && gap <= localGroundSnap + 0.025 / QUICK_VERTICAL_SCALE)
+      ) {
         const correctionY = floor.height - position.y;
         position.y = floor.height;
         this.correction.y += correctionY;
@@ -519,44 +727,71 @@ export class QuickSenseArena implements ArenaRuntime {
       contacts += 1;
     }
 
-    return {
-      grounded,
-      contactNormal: this.contactNormal.clone(),
-      wallContact,
-      wallNormal: this.wallNormal.clone(),
-      correction: this.correction.clone(),
-      contacts,
-    };
+    const result = this.localContactResults[this.localContactCursor];
+    this.localContactCursor = (this.localContactCursor + 1) % this.localContactResults.length;
+    result.grounded = grounded;
+    result.contactNormal.copy(this.contactNormal);
+    result.wallContact = wallContact;
+    result.wallNormal.copy(this.wallNormal);
+    result.correction.copy(this.correction);
+    result.contacts = contacts;
+    return result;
   }
 
   floorHeightAt(x: number, z: number, fromY = 96): number | null {
-    return this.floorSurfaceAt(x, z, fromY)?.height ?? null;
+    const local = this.floorSurfaceAt(
+      x / QUICK_HORIZONTAL_SCALE,
+      z / QUICK_HORIZONTAL_SCALE,
+      fromY / QUICK_VERTICAL_SCALE,
+    );
+    return local ? local.height * QUICK_VERTICAL_SCALE : null;
   }
 
   surfaceAt(x: number, z: number, fromY = Number.POSITIVE_INFINITY): ArenaSurface {
-    const floor = this.floorSurfaceAt(x, z, fromY);
+    const localX = x / QUICK_HORIZONTAL_SCALE;
+    const localZ = z / QUICK_HORIZONTAL_SCALE;
+    const floor = this.floorSurfaceAt(localX, localZ, fromY / QUICK_VERTICAL_SCALE);
     if (!floor) return 'water';
-    if (this.isConcretePoint(x, z, floor.height)) return 'concrete';
+    if (this.isConcretePoint(localX, localZ, floor.height)) return 'concrete';
     return 'grass';
   }
 
   segmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null {
-    const direction = end.clone().sub(start);
+    this.worldToLocal(start, this.localStart);
+    this.worldToLocal(end, this.localEnd);
+    const localHit = this.localSegmentHitDetails(this.localStart, this.localEnd);
+    if (!localHit) return null;
+    const result = this.worldSurfaceHit;
+    this.localToWorld(localHit.point, result.point);
+    this.localNormalToWorld(localHit.normal, result.normal);
+    result.distance = result.point.distanceTo(start);
+    result.surface = localHit.surface;
+    return result;
+  }
+
+  private localSegmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null {
+    const direction = this.segmentDirection.copy(end).sub(start);
     const distance = direction.length();
     if (distance < EPSILON) return null;
     direction.multiplyScalar(1 / distance);
-    const ray = new THREE.Ray(start, direction);
-    let closest: SurfaceHit | null = null;
-    const point = new THREE.Vector3();
+    const ray = this.segmentRay.set(start, direction);
+    let closestDistance = Number.POSITIVE_INFINITY;
     for (const box of this.shotBoxes) {
-      const hit = ray.intersectBox(box, point);
+      const hit = ray.intersectBox(box, this.segmentPoint);
       if (!hit) continue;
       const hitDistance = hit.distanceTo(start);
-      if (hitDistance > distance || (closest && hitDistance >= closest.distance)) continue;
-      const normal = this.boxNormal(box, hit, direction);
-      closest = { point: hit.clone(), normal, distance: hitDistance, surface: 'concrete' };
+      if (hitDistance > distance || hitDistance >= closestDistance) continue;
+      closestDistance = hitDistance;
+      this.segmentClosestPoint.copy(hit);
+      this.boxNormal(box, hit, direction, this.segmentClosestNormal);
     }
-    return closest;
+    if (!Number.isFinite(closestDistance)) return null;
+    const result = this.localSurfaceHit;
+    result.point.copy(this.segmentClosestPoint);
+    result.normal.copy(this.segmentClosestNormal);
+    result.distance = closestDistance;
+    result.surface = 'concrete';
+    return result;
   }
 
   segmentHit(start: THREE.Vector3, end: THREE.Vector3): THREE.Vector3 | null {
@@ -569,30 +804,34 @@ export class QuickSenseArena implements ArenaRuntime {
   }
 
   safeSpawnPoint(candidate: THREE.Vector3, radius = MOVEMENT.playerRadius, height = MOVEMENT.playerHeight): THREE.Vector3 | null {
-    const floor = this.floorHeightAt(candidate.x, candidate.z, Number.POSITIVE_INFINITY);
+    const localCandidate = this.worldToLocal(candidate);
+    const localRadius = radius / QUICK_HORIZONTAL_SCALE;
+    const localHeight = height / QUICK_VERTICAL_SCALE;
+    const floor = this.floorSurfaceAt(localCandidate.x, localCandidate.z, Number.POSITIVE_INFINITY)?.height ?? null;
     if (floor === null) return null;
     for (let index = 0; index < 8; index += 1) {
       const angle = index / 8 * Math.PI * 2;
-      const sample = this.floorHeightAt(
-        candidate.x + Math.cos(angle) * (radius + 0.12),
-        candidate.z + Math.sin(angle) * (radius + 0.12),
+      const sample = this.floorSurfaceAt(
+        localCandidate.x + Math.cos(angle) * (localRadius + 0.06),
+        localCandidate.z + Math.sin(angle) * (localRadius + 0.06),
         Number.POSITIVE_INFINITY,
-      );
-      if (sample === null || Math.abs(sample - floor) > 1.2) return null;
+      )?.height ?? null;
+      if (sample === null || Math.abs(sample - floor) > 1.2 / QUICK_VERTICAL_SCALE) return null;
     }
-    const seated = new THREE.Vector3(candidate.x, floor, candidate.z);
+    const seated = new THREE.Vector3(localCandidate.x, floor, localCandidate.z);
     const capsuleBox = new THREE.Box3(
-      new THREE.Vector3(seated.x - radius, seated.y + 0.02, seated.z - radius),
-      new THREE.Vector3(seated.x + radius, seated.y + height, seated.z + radius),
+      new THREE.Vector3(seated.x - localRadius, seated.y + 0.02, seated.z - localRadius),
+      new THREE.Vector3(seated.x + localRadius, seated.y + localHeight, seated.z + localRadius),
     );
     if (this.colliders.some((collider) => collider.blocksMovement && collider.box.intersectsBox(capsuleBox))) return null;
-    const contact = this.resolvePlayerCapsule(seated, new THREE.Vector3(0, -0.1, 0));
-    return contact.grounded && !contact.wallContact ? seated : null;
+    const contact = this.resolveLocalCapsule(seated, new THREE.Vector3(0, -0.1, 0), localRadius, localHeight);
+    return contact.grounded && !contact.wallContact ? this.localToWorld(seated) : null;
   }
 
   isTraversablePoint(candidate: THREE.Vector3, fromY = candidate.y + 4): boolean {
-    const floor = this.floorSurfaceAt(candidate.x, candidate.z, fromY);
-    return floor !== null && floor.normal.y >= MOVEMENT.maxSlopeCosine;
+    const local = this.worldToLocal(candidate);
+    const floor = this.floorSurfaceAt(local.x, local.z, fromY / QUICK_VERTICAL_SCALE);
+    return floor !== null && this.localNormalToWorld(floor.normal).y >= MOVEMENT.maxSlopeCosine;
   }
 
   addFootTrack(_position: THREE.Vector3, _movement: THREE.Vector3, _elapsed: number): void {
@@ -632,20 +871,20 @@ export class QuickSenseArena implements ArenaRuntime {
   };
 
   private readonly emissiveMaterial = (name: string, color: number, emissive: number): THREE.MeshStandardMaterial => {
-    const material = this.material(name, color, 0.35, 0.3);
+    const material = this.material(name, color, 0.42, 0.38);
     material.emissive.setHex(emissive);
-    material.emissiveIntensity = 0.86;
+    material.emissiveIntensity = 0.46;
     this.pulseMaterials.push(material);
     return material;
   };
 
   private addMesh(
     geometry: THREE.BufferGeometry,
-    material: THREE.Material,
+    material: THREE.Material | THREE.Material[],
     name: string,
     position?: THREE.Vector3,
   ): THREE.Mesh {
-    this.geometries.push(geometry);
+    this.trackGeometry(geometry);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = name;
     if (position) mesh.position.copy(position);
@@ -655,31 +894,251 @@ export class QuickSenseArena implements ArenaRuntime {
     return mesh;
   }
 
-  private createGround(groundMaterial: THREE.MeshStandardMaterial, rockMaterial: THREE.MeshStandardMaterial): void {
+  private trackGeometry(geometry: THREE.BufferGeometry): void {
+    if (!this.geometries.includes(geometry)) this.geometries.push(geometry);
+  }
+
+  private addInstancedMeshes(
+    name: string,
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    transforms: InstanceTransform[],
+    shadows = true,
+  ): THREE.InstancedMesh | null {
+    if (transforms.length === 0) return null;
+    this.trackGeometry(geometry);
+    const mesh = new THREE.InstancedMesh(geometry, material, transforms.length);
+    mesh.name = name;
+    mesh.castShadow = shadows;
+    mesh.receiveShadow = shadows;
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion();
+    const defaultEuler = new THREE.Euler();
+    transforms.forEach((transform, index) => {
+      const rotation = transform.rotation ?? defaultEuler.set(0, transform.yaw ?? 0, 0);
+      quaternion.setFromEuler(rotation);
+      matrix.compose(transform.position, quaternion, transform.scale);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingBox();
+    mesh.computeBoundingSphere();
+    this.group.add(mesh);
+    return mesh;
+  }
+
+  private createCragGeometry(): THREE.BufferGeometry {
+    const sides = 7;
+    const rings = [
+      { y: 0, radius: 1, phase: 0 },
+      { y: 0.42, radius: 0.72, phase: 0.18 },
+      { y: 0.74, radius: 0.43, phase: -0.12 },
+    ];
+    const positions: number[] = [];
+    const indices: number[] = [];
+    for (const ring of rings) {
+      for (let index = 0; index < sides; index += 1) {
+        const angle = ring.phase + index / sides * Math.PI * 2;
+        const irregularity = 0.88 + ((index * 5 + rings.indexOf(ring) * 3) % 7) * 0.035;
+        positions.push(
+          Math.cos(angle) * ring.radius * irregularity,
+          ring.y,
+          Math.sin(angle) * ring.radius * (1.04 - (index % 3) * 0.045),
+        );
+      }
+    }
+    const apexIndex = positions.length / 3;
+    positions.push(0.14, 1, -0.08);
+    for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
+      for (let index = 0; index < sides; index += 1) {
+        const next = (index + 1) % sides;
+        const lower = ringIndex * sides + index;
+        const lowerNext = ringIndex * sides + next;
+        const upper = (ringIndex + 1) * sides + index;
+        const upperNext = (ringIndex + 1) * sides + next;
+        indices.push(lower, upperNext, lowerNext, lower, upper, upperNext);
+      }
+    }
+    const topRing = (rings.length - 1) * sides;
+    for (let index = 0; index < sides; index += 1) {
+      indices.push(topRing + index, apexIndex, topRing + (index + 1) % sides);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    const faceted = geometry.toNonIndexed();
+    geometry.dispose();
+    const colors: number[] = [];
+    const faceCount = faceted.getAttribute('position').count / 3;
+    for (let face = 0; face < faceCount; face += 1) {
+      const factor = 0.72 + ((face * 17) % 7) * 0.075;
+      const color = new THREE.Color(factor, factor, factor);
+      for (let vertex = 0; vertex < 3; vertex += 1) colors.push(color.r, color.g, color.b);
+    }
+    faceted.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    faceted.computeVertexNormals();
+    faceted.computeBoundingBox();
+    faceted.computeBoundingSphere();
+    return faceted;
+  }
+
+  private createGround(
+    groundMaterial: THREE.MeshStandardMaterial,
+    groundFoundationMaterial: THREE.MeshStandardMaterial,
+    rockMaterial: THREE.MeshStandardMaterial,
+    rockHighlightMaterial: THREE.MeshStandardMaterial,
+    mossCapMaterial: THREE.MeshStandardMaterial,
+  ): void {
     this.addMesh(
-      new THREE.BoxGeometry(QUICKSENSE.width, 1.4, QUICKSENSE.depth),
+      this.createTerrainGeometry(),
       groundMaterial,
-      'QuickSense playable ground',
-      new THREE.Vector3(0, -0.7, 0),
+      'QuickSense faceted playable terrain',
+    );
+    this.addMesh(
+      new THREE.BoxGeometry(QUICK_LOCAL_WIDTH, 2.4, QUICK_LOCAL_DEPTH),
+      groundFoundationMaterial,
+      'QuickSense terrain foundation',
+      new THREE.Vector3(0, -1.4, 0),
     );
     this.colliders.push({
       box: new THREE.Box3(
-        new THREE.Vector3(-QUICKSENSE.width * 0.5, -4, -QUICKSENSE.depth * 0.5),
-        new THREE.Vector3(QUICKSENSE.width * 0.5, 0, QUICKSENSE.depth * 0.5),
+        new THREE.Vector3(-QUICK_LOCAL_WIDTH * 0.5, -4, -QUICK_LOCAL_DEPTH * 0.5),
+        new THREE.Vector3(QUICK_LOCAL_WIDTH * 0.5, -0.2, QUICK_LOCAL_DEPTH * 0.5),
       ),
-      name: 'ground slab',
+      name: 'terrain foundation',
       blocksMovement: true,
     });
-    const ridgePositions = [
-      [-75, -72, 9, 22], [-40, -76, 12, 24], [4, -78, 10, 20], [47, -74, 13, 26], [78, -60, 8, 20],
-      [-78, 60, 12, 25], [-45, 74, 9, 22], [6, 77, 13, 24], [48, 72, 10, 22], [78, 52, 11, 24],
-      [-86, -22, 9, 20], [-86, 25, 12, 26], [86, -18, 11, 24], [86, 28, 9, 21],
+    const ridgeClusters = [
+      [-84, -82, 36, 20, 0.14], [-60, -86, 27, 17, 0.72], [-35, -85, 45, 23, -0.22],
+      [-8, -87, 31, 18, 0.42], [20, -86, 40, 22, -0.52], [49, -85, 30, 18, 0.24], [77, -82, 43, 22, -0.14],
+      [-94, -58, 30, 18, 0.54], [-96, -30, 39, 21, -0.36], [-97, 0, 48, 24, 0.18],
+      [-96, 31, 34, 19, 0.48], [-93, 60, 43, 22, -0.1],
+      [94, -58, 40, 21, -0.4], [96, -29, 31, 18, 0.31], [97, 1, 46, 23, -0.12],
+      [96, 32, 36, 20, 0.26], [93, 61, 48, 24, -0.18],
+      [-80, 82, 42, 22, 0.52], [-53, 86, 31, 18, -0.24], [-27, 86, 47, 24, 0.16],
+      [1, 87, 29, 17, -0.44], [29, 86, 42, 22, 0.34], [57, 85, 34, 19, -0.2], [82, 81, 45, 23, 0.08],
     ] as const;
-    for (const [x, z, height, radius] of ridgePositions) {
-      const dramaticHeight = height * 2.2;
-      const geometry = new THREE.ConeGeometry(radius * 0.82, dramaticHeight, 6, 1);
-      this.addMesh(geometry, rockMaterial, 'low-poly boundary ridge', new THREE.Vector3(x * 1.18, dramaticHeight * 0.5 - 0.2, z * 1.18));
+    const darkCrags: InstanceTransform[] = [];
+    const lightCrags: InstanceTransform[] = [];
+    const mossCaps: InstanceTransform[] = [];
+    for (const [x, z, height, radius, yaw] of ridgeClusters) {
+      darkCrags.push({
+        position: new THREE.Vector3(x, -0.25, z),
+        scale: new THREE.Vector3(radius, height, radius * 0.86),
+        yaw,
+      });
+      lightCrags.push({
+        position: new THREE.Vector3(x + radius * 0.52, -0.3, z - radius * 0.22),
+        scale: new THREE.Vector3(radius * 0.64, height * 0.7, radius * 0.56),
+        yaw: yaw + 0.8,
+      });
+      darkCrags.push({
+        position: new THREE.Vector3(x - radius * 0.46, -0.28, z + radius * 0.28),
+        scale: new THREE.Vector3(radius * 0.52, height * 0.56, radius * 0.48),
+        yaw: yaw - 0.65,
+      });
+      if (height >= 38) {
+        mossCaps.push({
+          position: new THREE.Vector3(x + radius * 0.03, height * 0.7, z - radius * 0.025),
+          scale: new THREE.Vector3(radius * 0.27, Math.max(0.5, height * 0.018), radius * 0.22),
+          yaw: yaw + 0.08,
+        });
+      }
     }
+    const cragGeometry = this.createCragGeometry();
+    this.addInstancedMeshes('QuickSense dark cliff massifs', cragGeometry, rockMaterial, darkCrags);
+    this.addInstancedMeshes('QuickSense lit cliff facets', cragGeometry, rockHighlightMaterial, lightCrags);
+    const capGeometry = new THREE.CylinderGeometry(1, 1.18, 1, 7);
+    this.addInstancedMeshes('QuickSense moss summit shelves', capGeometry, mossCapMaterial, mossCaps);
+  }
+
+  private createTerrainGeometry(): THREE.BufferGeometry {
+    const segmentsX = 38;
+    const segmentsZ = 34;
+    const positions: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+    for (let zIndex = 0; zIndex <= segmentsZ; zIndex += 1) {
+      const v = zIndex / segmentsZ;
+      const z = THREE.MathUtils.lerp(-QUICK_LOCAL_DEPTH * 0.5, QUICK_LOCAL_DEPTH * 0.5, v);
+      for (let xIndex = 0; xIndex <= segmentsX; xIndex += 1) {
+        const u = xIndex / segmentsX;
+        const x = THREE.MathUtils.lerp(-QUICK_LOCAL_WIDTH * 0.5, QUICK_LOCAL_WIDTH * 0.5, u);
+        positions.push(x, this.terrainHeightAt(x, z), z);
+        uvs.push(u * 6, v * 6);
+      }
+    }
+    const row = segmentsX + 1;
+    for (let zIndex = 0; zIndex < segmentsZ; zIndex += 1) {
+      for (let xIndex = 0; xIndex < segmentsX; xIndex += 1) {
+        const a = zIndex * row + xIndex;
+        const b = a + 1;
+        const c = a + row;
+        const d = c + 1;
+        indices.push(a, c, d, a, d, b);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    const faceted = geometry.toNonIndexed();
+    geometry.dispose();
+    const colorChoices = [0x4a4f3e, 0x505443, 0x464b3a, 0x555947, 0x4c513f];
+    const colors: number[] = [];
+    const faceCount = faceted.getAttribute('position').count / 3;
+    for (let face = 0; face < faceCount; face += 1) {
+      const color = new THREE.Color(colorChoices[(face * 7 + Math.floor(face / 11)) % colorChoices.length]);
+      for (let vertex = 0; vertex < 3; vertex += 1) colors.push(color.r, color.g, color.b);
+    }
+    faceted.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    faceted.computeVertexNormals();
+    faceted.computeBoundingBox();
+    faceted.computeBoundingSphere();
+    return faceted;
+  }
+
+  private terrainHeightAt(x: number, z: number): number {
+    const hills = [
+      { x: -68, z: -48, height: 7.4, radiusX: 27, radiusZ: 22 },
+      { x: 68, z: -48, height: 6.4, radiusX: 25, radiusZ: 20 },
+      { x: -66, z: 48, height: 6.8, radiusX: 26, radiusZ: 21 },
+      { x: 67, z: 49, height: 7.8, radiusX: 28, radiusZ: 22 },
+      { x: -37, z: 4, height: 5.2, radiusX: 22, radiusZ: 25 },
+      { x: 39, z: -2, height: 4.8, radiusX: 23, radiusZ: 24 },
+      { x: 0, z: 55, height: 4.2, radiusX: 35, radiusZ: 19 },
+    ];
+    let height = 0.24;
+    for (const hill of hills) {
+      const nx = (x - hill.x) / hill.radiusX;
+      const nz = (z - hill.z) / hill.radiusZ;
+      const distance = nx * nx + nz * nz;
+      if (distance >= 1) continue;
+      const blend = 1 - THREE.MathUtils.smoothstep(distance, 0.08, 1);
+      height += hill.height * blend * blend;
+    }
+    height += (Math.sin(x * 0.095 + z * 0.041) + Math.cos(z * 0.083 - x * 0.027)) * 0.14;
+
+    let corridorBlend = 1;
+    for (const path of this.pathSurfaces) {
+      const nearest = closestSegment(path.points, path.closed, x, z);
+      if (!nearest) continue;
+      const edgeDistance = Math.sqrt(nearest.distanceSquared) - path.width * 0.5;
+      corridorBlend = Math.min(corridorBlend, THREE.MathUtils.smoothstep(edgeDistance, 0.45, 6.5));
+    }
+    for (const ramp of this.rampSurfaces) {
+      if (ramp.flow.contains(x, z)) corridorBlend = 0;
+    }
+    return Math.max(0.06, height * THREE.MathUtils.lerp(0.08, 1, corridorBlend));
+  }
+
+  private terrainNormalAt(x: number, z: number, target: THREE.Vector3): THREE.Vector3 {
+    const epsilon = 0.32;
+    const left = this.terrainHeightAt(x - epsilon, z);
+    const right = this.terrainHeightAt(x + epsilon, z);
+    const back = this.terrainHeightAt(x, z - epsilon);
+    const front = this.terrainHeightAt(x, z + epsilon);
+    return target.set(left - right, epsilon * 2, back - front).normalize();
   }
 
   private createPath(
@@ -688,7 +1147,9 @@ export class QuickSenseArena implements ArenaRuntime {
     width: number,
     bank: number,
     deckMaterial: THREE.MeshStandardMaterial,
+    sideMaterial: THREE.MeshStandardMaterial,
     edgeMaterial: THREE.MeshStandardMaterial,
+    safetyMaterial: THREE.MeshStandardMaterial,
     closed: boolean,
   ): PathSurface {
     const path: PathSurface = {
@@ -708,18 +1169,28 @@ export class QuickSenseArena implements ArenaRuntime {
 
     const positions: number[] = [];
     const uvs: number[] = [];
-    const indices: number[] = [];
+    const topIndices: number[] = [];
+    const sideIndices: number[] = [];
     const segmentCount = closed ? points.length : points.length - 1;
     const bottomDepth = 1.8;
+    const pathDistances = [0];
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const current = points[index];
+      pathDistances.push(pathDistances[index - 1] + Math.hypot(
+        current.x - previous.x,
+        current.z - previous.z,
+      ));
+    }
     const addVertex = (point: THREE.Vector3, u: number, v: number): number => {
       positions.push(point.x, point.y, point.z);
-      uvs.push(u * 2.4, v);
+      uvs.push(u, v);
       return positions.length / 3 - 1;
     };
     for (let index = 0; index < points.length; index += 1) {
-      const previous = points[(index - 1 + points.length) % points.length];
+      const previous = points[closed ? (index - 1 + points.length) % points.length : Math.max(0, index - 1)];
       const current = points[index];
-      const next = points[(index + 1) % points.length];
+      const next = points[closed ? (index + 1) % points.length : Math.min(points.length - 1, index + 1)];
       const tangentX = next.x - previous.x;
       const tangentZ = next.z - previous.z;
       const tangentLength = Math.hypot(tangentX, tangentZ) || 1;
@@ -735,12 +1206,13 @@ export class QuickSenseArena implements ArenaRuntime {
         current.y + bank * width * 0.5,
         current.z + crossZ * width * 0.5,
       );
-      addVertex(left, index / Math.max(1, segmentCount), 0);
-      addVertex(right, index / Math.max(1, segmentCount), 1);
+      const textureU = pathDistances[index] / Math.max(width, 1);
+      addVertex(left, textureU, 0);
+      addVertex(right, textureU, 1);
       const leftBottom = left.clone(); leftBottom.y -= bottomDepth;
       const rightBottom = right.clone(); rightBottom.y -= bottomDepth;
-      addVertex(leftBottom, index / Math.max(1, segmentCount), 0);
-      addVertex(rightBottom, index / Math.max(1, segmentCount), 1);
+      addVertex(leftBottom, textureU, 0);
+      addVertex(rightBottom, textureU, 1);
     }
     for (let index = 0; index < segmentCount; index += 1) {
       const next = (index + 1) % points.length;
@@ -752,35 +1224,36 @@ export class QuickSenseArena implements ArenaRuntime {
       const nextTopRight = nextTopLeft + 1;
       const nextBottomLeft = nextTopLeft + 2;
       const nextBottomRight = nextTopLeft + 3;
-      indices.push(topLeft, nextTopLeft, nextTopRight, topLeft, nextTopRight, topRight);
-      indices.push(topLeft, bottomLeft, nextBottomLeft, topLeft, nextBottomLeft, nextTopLeft);
-      indices.push(topRight, nextTopRight, nextBottomRight, topRight, nextBottomRight, bottomRight);
-      indices.push(bottomLeft, bottomRight, nextBottomRight, bottomLeft, nextBottomRight, nextBottomLeft);
-
-      const a = points[index];
-      const b = points[next];
-      const length = Math.hypot(b.x - a.x, b.z - a.z);
-      if (length > 0.01) {
-        const heading = Math.atan2(b.x - a.x, b.z - a.z);
-        const center = new THREE.Vector3((a.x + b.x) * 0.5, Math.max(a.y, b.y) + 0.13, (a.z + b.z) * 0.5);
-        const tangent = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.14, length + 0.08), edgeMaterial);
-        tangent.name = `${name} route edge`;
-        tangent.position.copy(center);
-        tangent.rotation.y = heading;
-        tangent.castShadow = false;
-        tangent.receiveShadow = false;
-        this.geometries.push(tangent.geometry);
-        this.group.add(tangent);
-      }
+      topIndices.push(topLeft, nextTopLeft, nextTopRight, topLeft, nextTopRight, topRight);
+      sideIndices.push(topLeft, bottomLeft, nextBottomLeft, topLeft, nextBottomLeft, nextTopLeft);
+      sideIndices.push(topRight, nextTopRight, nextBottomRight, topRight, nextBottomRight, bottomRight);
+      sideIndices.push(bottomLeft, bottomRight, nextBottomRight, bottomLeft, nextBottomRight, nextBottomLeft);
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    geometry.setIndex(indices);
+    geometry.setIndex([...topIndices, ...sideIndices]);
+    geometry.addGroup(0, topIndices.length, 0);
+    geometry.addGroup(topIndices.length, sideIndices.length, 1);
     geometry.computeVertexNormals();
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
-    this.addMesh(geometry, deckMaterial, name);
+    this.addMesh(geometry, [deckMaterial, sideMaterial], name);
+    const safetyGeometry = this.createRibbonGeometry(
+      points,
+      closed,
+      [-width * 0.5 + 0.28, width * 0.5 - 0.28],
+      0.26,
+      bank,
+      0.17,
+    );
+    const safety = this.addMesh(safetyGeometry, safetyMaterial, `${name} amber edge trim`);
+    safety.castShadow = false;
+    safety.receiveShadow = false;
+    const factionGeometry = this.createRibbonGeometry(points, closed, [0], 0.16, bank, 0.185);
+    const faction = this.addMesh(factionGeometry, edgeMaterial, `${name} faction centerline`);
+    faction.castShadow = false;
+    faction.receiveShadow = false;
 
     // Route deck slabs are raycast-only. Keeping them out of the capsule
     // solver lets a skier pass underneath an elevated lane while still giving
@@ -799,6 +1272,61 @@ export class QuickSenseArena implements ArenaRuntime {
     return path;
   }
 
+  private createRibbonGeometry(
+    points: PathPoint[],
+    closed: boolean,
+    offsets: number[],
+    ribbonWidth: number,
+    bank: number,
+    lift: number,
+  ): THREE.BufferGeometry {
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const pointCount = points.length;
+    const segmentCount = closed ? pointCount : pointCount - 1;
+    for (const offset of offsets) {
+      const startVertex = positions.length / 3;
+      for (let index = 0; index < pointCount; index += 1) {
+        const previousIndex = closed ? (index - 1 + pointCount) % pointCount : Math.max(0, index - 1);
+        const nextIndex = closed ? (index + 1) % pointCount : Math.min(pointCount - 1, index + 1);
+        const previous = points[previousIndex];
+        const current = points[index];
+        const next = points[nextIndex];
+        const tangentX = next.x - previous.x;
+        const tangentZ = next.z - previous.z;
+        const tangentLength = Math.hypot(tangentX, tangentZ) || 1;
+        const crossX = tangentZ / tangentLength;
+        const crossZ = -tangentX / tangentLength;
+        const centerX = current.x + crossX * offset;
+        const centerZ = current.z + crossZ * offset;
+        const centerY = current.y + bank * offset + lift;
+        positions.push(
+          centerX - crossX * ribbonWidth * 0.5,
+          centerY - bank * ribbonWidth * 0.5,
+          centerZ - crossZ * ribbonWidth * 0.5,
+          centerX + crossX * ribbonWidth * 0.5,
+          centerY + bank * ribbonWidth * 0.5,
+          centerZ + crossZ * ribbonWidth * 0.5,
+        );
+      }
+      for (let index = 0; index < segmentCount; index += 1) {
+        const next = (index + 1) % pointCount;
+        const a = startVertex + index * 2;
+        const b = a + 1;
+        const c = startVertex + next * 2;
+        const d = c + 1;
+        indices.push(a, c, d, a, d, b);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return geometry;
+  }
+
   private createRamps(
     deckMaterial: THREE.MeshStandardMaterial,
     cyanMaterial: THREE.MeshStandardMaterial,
@@ -808,32 +1336,38 @@ export class QuickSenseArena implements ArenaRuntime {
     const ramps: Array<{ name: string; spec: LaunchRampSpec; edge: THREE.MeshStandardMaterial }> = [
       {
         name: 'South progressive launch',
-        spec: { origin: { x: -9, y: 2.0, z: -67 }, heading: 0, length: 22, width: 10, rise: 7.4, curveExponent: 1.7, solid: true, skirtDepth: 1.7 },
+        spec: { origin: { x: 0, y: 2.0, z: -69 }, heading: 0, length: 30, width: 11, rise: 12.4, curveExponent: 1.58, longitudinalSegments: 18, lateralSegments: 4, solid: true, skirtDepth: 2.4 },
         edge: amberMaterial,
       },
       {
         name: 'North return launch',
-        spec: { origin: { x: 9, y: 17.3, z: 67 }, heading: Math.PI, length: 22, width: 10, rise: -7.4, curveExponent: 1.7, solid: true, skirtDepth: 1.7 },
+        spec: { origin: { x: 0, y: 24.0, z: 69 }, heading: Math.PI, length: 30, width: 11, rise: -12.4, curveExponent: 1.58, longitudinalSegments: 18, lateralSegments: 4, solid: true, skirtDepth: 2.4 },
         edge: amberMaterial,
       },
       {
         name: 'West transfer ramp',
-        spec: { origin: { x: -72, y: 2.2, z: 9 }, heading: Math.PI * 0.5, length: 24, width: 9, rise: 7.4, curveExponent: 1.8, solid: true, skirtDepth: 1.7 },
+        spec: { origin: { x: -76, y: 5.6, z: -18 }, heading: Math.PI * 0.5, length: 31, width: 9.5, rise: 10.0, curveExponent: 1.62, longitudinalSegments: 16, lateralSegments: 4, solid: true, skirtDepth: 2.2 },
         edge: cyanMaterial,
       },
       {
         name: 'East transfer ramp',
-        spec: { origin: { x: 72, y: 2.2, z: -9 }, heading: -Math.PI * 0.5, length: 24, width: 9, rise: 7.4, curveExponent: 1.8, solid: true, skirtDepth: 1.7 },
+        spec: { origin: { x: 76, y: 5.6, z: 18 }, heading: -Math.PI * 0.5, length: 31, width: 9.5, rise: 10.0, curveExponent: 1.62, longitudinalSegments: 16, lateralSegments: 4, solid: true, skirtDepth: 2.2 },
         edge: magentaMaterial,
       },
       {
         name: 'Center hip ramp',
-        spec: { origin: { x: -4.5, y: 8.0, z: -16 }, heading: 0, length: 16, width: 8, rise: 4.8, curveExponent: 1.6, solid: true, skirtDepth: 1.4 },
-        edge: deckMaterial,
+        spec: { origin: { x: 0, y: 10.2, z: -15 }, heading: 0, length: 22, width: 9, rise: 7.2, curveExponent: 1.48, longitudinalSegments: 16, lateralSegments: 4, solid: true, skirtDepth: 2.0 },
+        edge: amberMaterial,
       },
     ];
     for (const ramp of ramps) {
       const flow = buildLaunchRamp(ramp.spec);
+      const rampUv = flow.geometry.getAttribute('uv') as THREE.BufferAttribute;
+      const textureLengthScale = Math.max(1, ramp.spec.length / 6);
+      for (let index = 0; index < rampUv.count; index += 1) {
+        rampUv.setXY(index, rampUv.getX(index) * textureLengthScale, rampUv.getY(index));
+      }
+      rampUv.needsUpdate = true;
       this.rampSurfaces.push({ name: ramp.name, spec: ramp.spec, flow });
       this.geometries.push(flow.geometry);
       const mesh = new THREE.Mesh(flow.geometry, deckMaterial);
@@ -841,25 +1375,37 @@ export class QuickSenseArena implements ArenaRuntime {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       this.group.add(mesh);
-      this.addRampRails(ramp.spec, ramp.edge);
+      this.addRampRails(ramp.spec, amberMaterial, ramp.edge);
       const box = flow.geometry.boundingBox?.clone();
       if (box) this.shotBoxes.push(box);
     }
   }
 
-  private addRampRails(spec: LaunchRampSpec, edgeMaterial: THREE.MeshStandardMaterial): void {
-    const points = 5;
-    for (let index = 0; index < points - 1; index += 1) {
-      const a = this.rampPoint(spec, index / (points - 1), spec.width * 0.5 + 0.32);
-      const b = this.rampPoint(spec, (index + 1) / (points - 1), spec.width * 0.5 + 0.32);
-      const length = a.distanceTo(b);
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, length), edgeMaterial);
-      rail.name = `${spec.origin.x < 0 ? 'west' : 'east'} ramp rail`;
-      rail.position.copy(a.clone().lerp(b, 0.5));
-      rail.rotation.y = Math.atan2(b.x - a.x, b.z - a.z);
-      this.geometries.push(rail.geometry);
-      this.group.add(rail);
-    }
+  private addRampRails(
+    spec: LaunchRampSpec,
+    safetyMaterial: THREE.MeshStandardMaterial,
+    routeMaterial: THREE.MeshStandardMaterial,
+  ): void {
+    const samples = 12;
+    const points = Array.from({ length: samples }, (_, index) => {
+      const point = this.rampPoint(spec, index / (samples - 1), 0);
+      return { x: point.x, y: point.y, z: point.z };
+    });
+    const safetyGeometry = this.createRibbonGeometry(
+      points,
+      false,
+      [-spec.width * 0.5 + 0.3, spec.width * 0.5 - 0.3],
+      0.28,
+      0,
+      0.04,
+    );
+    const safety = this.addMesh(safetyGeometry, safetyMaterial, 'QuickSense ramp amber edge trim');
+    safety.castShadow = false;
+    safety.receiveShadow = false;
+    const routeGeometry = this.createRibbonGeometry(points, false, [0], 0.18, 0, 0.06);
+    const route = this.addMesh(routeGeometry, routeMaterial, 'QuickSense ramp route signal');
+    route.castShadow = false;
+    route.receiveShadow = false;
   }
 
   private rampPoint(spec: LaunchRampSpec, u: number, lateral: number): THREE.Vector3 {
@@ -920,29 +1466,141 @@ export class QuickSenseArena implements ArenaRuntime {
     magentaMaterial: THREE.MeshStandardMaterial,
     amberMaterial: THREE.MeshStandardMaterial,
   ): void {
-    this.box('Flux Core central body', new THREE.Vector3(0, 15.3, 0), new THREE.Vector3(17, 6.2, 13), sideMaterial, true);
-    this.box('Flux Core upper cap', new THREE.Vector3(0, 19.0, 0), new THREE.Vector3(12.5, 1.0, 9.5), whiteMaterial, true);
-    this.box('Core cyan tower', new THREE.Vector3(-7.3, 20.0, 0), new THREE.Vector3(2.4, 8.8, 2.4), cyanMaterial, true);
-    this.box('Core magenta tower', new THREE.Vector3(7.3, 20.0, 0), new THREE.Vector3(2.4, 8.8, 2.4), magentaMaterial, true);
-    this.box('Core amber spine', new THREE.Vector3(0, 22.0, 0), new THREE.Vector3(1.4, 13.0, 1.4), amberMaterial, true);
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(8.6, 0.16, 6, 24), amberMaterial);
+    const taperedOctagon = new THREE.CylinderGeometry(0.82, 1, 1, 8);
+    const octagonalSlab = new THREE.CylinderGeometry(1, 1.08, 1, 8);
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const lowerBastions: InstanceTransform[] = [
+      { position: new THREE.Vector3(-10.2, 16.2, 0), scale: new THREE.Vector3(5.8, 8, 7.4), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(10.2, 16.2, 0), scale: new THREE.Vector3(5.8, 8, 7.4), yaw: -Math.PI / 8 },
+    ];
+    const towerShafts: InstanceTransform[] = [
+      { position: new THREE.Vector3(-8.8, 26.3, 0), scale: new THREE.Vector3(3.4, 20.2, 4.1), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(8.8, 26.3, 0), scale: new THREE.Vector3(3.4, 20.2, 4.1), yaw: -Math.PI / 8 },
+      { position: new THREE.Vector3(0, 25.2, 0), scale: new THREE.Vector3(1.55, 20, 1.55), yaw: Math.PI / 8 },
+    ];
+    const plinths: InstanceTransform[] = [
+      { position: new THREE.Vector3(-10.2, 12.9, 0), scale: new THREE.Vector3(7.5, 2.1, 8.7), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(10.2, 12.9, 0), scale: new THREE.Vector3(7.5, 2.1, 8.7), yaw: -Math.PI / 8 },
+      { position: new THREE.Vector3(-8.8, 36.7, 0), scale: new THREE.Vector3(5.1, 1.25, 5.7), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(8.8, 36.7, 0), scale: new THREE.Vector3(5.1, 1.25, 5.7), yaw: -Math.PI / 8 },
+    ];
+    this.addInstancedMeshes('Flux Core stepped bastions', taperedOctagon, sideMaterial, lowerBastions);
+    this.addInstancedMeshes('Flux Core vertical citadel', taperedOctagon, sideMaterial, towerShafts);
+    this.addInstancedMeshes('Flux Core octagonal crowns', octagonalSlab, whiteMaterial, plinths);
+
+    const shoulders: InstanceTransform[] = [];
+    const cyanSignals: InstanceTransform[] = [];
+    const magentaSignals: InstanceTransform[] = [];
+    for (const side of [-1, 1]) {
+      shoulders.push(
+        {
+          position: new THREE.Vector3(side * 12.9, 20.5, 0),
+          scale: new THREE.Vector3(2.6, 10.2, 7.8),
+          yaw: side * -0.08,
+        },
+        {
+          position: new THREE.Vector3(side * 8.8, 37.5, 0),
+          scale: new THREE.Vector3(5.6, 1.1, 6.2),
+          yaw: side * Math.PI / 8,
+        },
+      );
+      const signal = {
+        position: new THREE.Vector3(side * 8.8, 26.4, -4.2),
+        scale: new THREE.Vector3(0.32, 14.6, 0.2),
+        yaw: 0,
+      };
+      (side < 0 ? cyanSignals : magentaSignals).push(
+        signal,
+        {
+          position: new THREE.Vector3(side * 8.8, 31.2, -4.24),
+          scale: new THREE.Vector3(2.55, 0.38, 0.22),
+          yaw: 0,
+        },
+        {
+          position: new THREE.Vector3(side * 10.25, 18.6, -6.3),
+          scale: new THREE.Vector3(3.9, 0.32, 0.22),
+          yaw: 0,
+        },
+      );
+    }
+    shoulders.push(
+      { position: new THREE.Vector3(0, 34.2, 0), scale: new THREE.Vector3(22.2, 1.5, 4.4) },
+      { position: new THREE.Vector3(0, 17.8, 5.3), scale: new THREE.Vector3(19.5, 1.2, 2.4) },
+    );
+    this.addInstancedMeshes('Flux Core bridge shoulders', unitBox, sideMaterial, shoulders);
+    this.addInstancedMeshes('Flux Core cyan wayfinding', unitBox, cyanMaterial, cyanSignals, false);
+    this.addInstancedMeshes('Flux Core magenta wayfinding', unitBox, magentaMaterial, magentaSignals, false);
+    this.addInstancedMeshes('Flux Core amber reactor spine', unitBox, amberMaterial, [
+      { position: new THREE.Vector3(0, 25.3, -1.05), scale: new THREE.Vector3(0.42, 18.6, 0.24) },
+      { position: new THREE.Vector3(0, 34.35, -2.35), scale: new THREE.Vector3(10.8, 0.28, 0.2) },
+    ], false);
+
+    this.registerBoxCollision(
+      'Flux Core west bastion collision',
+      new THREE.Vector3(-10.2, 16.2, 0),
+      new THREE.Vector3(5.8, 8, 12.5),
+    );
+    this.registerBoxCollision(
+      'Flux Core east bastion collision',
+      new THREE.Vector3(10.2, 16.2, 0),
+      new THREE.Vector3(5.8, 8, 12.5),
+    );
+    this.registerBoxCollision(
+      'Flux Core west tower collision',
+      new THREE.Vector3(-8.8, 26.3, 0),
+      new THREE.Vector3(3.8, 20.2, 4.6),
+    );
+    this.registerBoxCollision(
+      'Flux Core east tower collision',
+      new THREE.Vector3(8.8, 26.3, 0),
+      new THREE.Vector3(3.8, 20.2, 4.6),
+    );
+
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(11.2, 0.13, 6, 32), amberMaterial);
     ring.name = 'Flux Core orbit ring';
     ring.rotation.x = Math.PI * 0.5;
-    ring.position.set(0, 23.6, 0);
+    ring.position.set(0, 35.5, 0);
     ring.castShadow = false;
-    this.geometries.push(ring.geometry);
+    this.trackGeometry(ring.geometry);
     this.group.add(ring);
-    this.animatedProps.push({ object: ring, baseY: 23.6, phase: 0.2, spin: 0.22 });
-    const coreLight = new THREE.PointLight(0x53eaff, 9, 32, 2);
-    coreLight.position.set(0, 22, 0);
+    this.animatedProps.push({ object: ring, baseY: 35.5, phase: 0.2, spin: 0.16 });
+    const coreLight = new THREE.PointLight(0x53eaff, 4.5, 28, 2);
+    coreLight.position.set(0, 29, 0);
     this.group.add(coreLight);
-    this.box('Flux Core upper citadel', new THREE.Vector3(0, 24.2, 0), new THREE.Vector3(15, 3.2, 10.5), sideMaterial, true);
-    this.box('Flux Core citadel roof', new THREE.Vector3(0, 26.1, 0), new THREE.Vector3(18, 0.7, 13.5), whiteMaterial, true);
-    this.box('Flux Core west buttress', new THREE.Vector3(-10.4, 21.2, 0), new THREE.Vector3(2.8, 10.0, 7.4), sideMaterial, true);
-    this.box('Flux Core east buttress', new THREE.Vector3(10.4, 21.2, 0), new THREE.Vector3(2.8, 10.0, 7.4), sideMaterial, true);
-    this.createTower(-17, 0, 12.5, 19, cyanMaterial, sideMaterial);
-    this.createTower(17, 0, 12.5, 19, magentaMaterial, sideMaterial);
-    this.createTower(0, 43, 17.0, 20, amberMaterial, sideMaterial);
+    this.createTower(-23, 7, 12.5, 24, cyanMaterial, sideMaterial);
+    this.createTower(23, 7, 12.5, 24, magentaMaterial, sideMaterial);
+
+    const northGateShafts: InstanceTransform[] = [
+      { position: new THREE.Vector3(-8.7, 20.2, 47), scale: new THREE.Vector3(3.25, 37.5, 3.8), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(8.7, 20.2, 47), scale: new THREE.Vector3(3.25, 37.5, 3.8), yaw: -Math.PI / 8 },
+    ];
+    const northGateCaps: InstanceTransform[] = [
+      { position: new THREE.Vector3(-8.7, 39.2, 47), scale: new THREE.Vector3(4.8, 1.1, 5.3), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(8.7, 39.2, 47), scale: new THREE.Vector3(4.8, 1.1, 5.3), yaw: -Math.PI / 8 },
+    ];
+    this.addInstancedMeshes('QuickSense north grapple gate shafts', taperedOctagon, sideMaterial, northGateShafts);
+    this.addInstancedMeshes('QuickSense north grapple gate crowns', octagonalSlab, whiteMaterial, northGateCaps);
+    this.addInstancedMeshes('QuickSense north grapple gate bridge', unitBox, sideMaterial, [
+      { position: new THREE.Vector3(0, 37.6, 47), scale: new THREE.Vector3(21.4, 2.2, 4.8) },
+    ]);
+    this.addInstancedMeshes('QuickSense north gate faction signals', unitBox, cyanMaterial, [
+      { position: new THREE.Vector3(-8.7, 21.2, 44.94), scale: new THREE.Vector3(0.34, 24, 0.2) },
+      { position: new THREE.Vector3(-5.1, 37.72, 44.48), scale: new THREE.Vector3(5.5, 0.3, 0.2) },
+    ], false);
+    this.addInstancedMeshes('QuickSense north gate magenta signals', unitBox, magentaMaterial, [
+      { position: new THREE.Vector3(8.7, 21.2, 44.94), scale: new THREE.Vector3(0.34, 24, 0.2) },
+      { position: new THREE.Vector3(5.1, 37.72, 44.48), scale: new THREE.Vector3(5.5, 0.3, 0.2) },
+    ], false);
+    this.addInstancedMeshes('QuickSense north gate amber crown', unitBox, amberMaterial, [
+      { position: new THREE.Vector3(0, 38.78, 44.46), scale: new THREE.Vector3(8.6, 0.3, 0.22) },
+    ], false);
+    for (const x of [-8.7, 8.7]) {
+      this.registerBoxCollision(
+        'QuickSense north grapple gate collision',
+        new THREE.Vector3(x, 20.2, 47),
+        new THREE.Vector3(3.7, 37.5, 4.3),
+      );
+    }
   }
 
   private createTower(
@@ -995,30 +1653,98 @@ export class QuickSenseArena implements ArenaRuntime {
     whiteMaterial: THREE.MeshStandardMaterial,
     cyanMaterial: THREE.MeshStandardMaterial,
     magentaMaterial: THREE.MeshStandardMaterial,
+    amberMaterial: THREE.MeshStandardMaterial,
   ): void {
-    this.buildings(-67, 31, 10.5, 16, 14, 11, sideMaterial, whiteMaterial, cyanMaterial);
-    this.buildings(67, -31, 10.5, 16, 14, 11, sideMaterial, whiteMaterial, magentaMaterial);
-    this.buildings(0, 61, 20.5, 19, 13, 16, sideMaterial, whiteMaterial, cyanMaterial);
-    this.buildings(0, -61, 6.2, 19, 13, 9, sideMaterial, whiteMaterial, magentaMaterial);
-  }
+    const specs: GroundBuildingSpec[] = [
+      { x: -67, z: 31, roofY: 10.5, width: 16, depth: 14, height: 11, yaw: -0.08, accent: 'cyan', collidable: true },
+      { x: 67, z: -31, roofY: 10.5, width: 16, depth: 14, height: 11, yaw: 0.08, accent: 'magenta', collidable: true },
+      { x: 0, z: 61, roofY: 20.5, width: 19, depth: 13, height: 16, yaw: 0, accent: 'cyan', collidable: true },
+      { x: 0, z: -61, roofY: 6.2, width: 19, depth: 13, height: 9, yaw: Math.PI, accent: 'magenta', collidable: true },
+      { x: -74, z: -51, roofY: 13.5, width: 15, depth: 12, height: 13.5, yaw: 0.26, accent: 'cyan', collidable: true },
+      { x: 74, z: 51, roofY: 14.5, width: 15, depth: 12, height: 14.5, yaw: -0.26, accent: 'magenta', collidable: true },
+      { x: -54, z: 63, roofY: 12.5, width: 14, depth: 11, height: 12.5, yaw: -0.18, accent: 'amber', collidable: true },
+      { x: 54, z: -63, roofY: 12.5, width: 14, depth: 11, height: 12.5, yaw: 0.18, accent: 'amber', collidable: true },
+    ];
+    const accentMaterials: Record<AccentRole, THREE.MeshStandardMaterial> = {
+      cyan: cyanMaterial,
+      magenta: magentaMaterial,
+      amber: amberMaterial,
+    };
+    const taperedParts: InstanceTransform[] = [];
+    const shellParts: InstanceTransform[] = [];
+    const roofCaps: InstanceTransform[] = [];
+    const roofDetails: InstanceTransform[] = [];
+    const accentParts: Record<AccentRole, InstanceTransform[]> = { cyan: [], magenta: [], amber: [] };
 
-  private buildings(
-    x: number,
-    z: number,
-    roofY: number,
-    width: number,
-    depth: number,
-    height: number,
-    sideMaterial: THREE.MeshStandardMaterial,
-    whiteMaterial: THREE.MeshStandardMaterial,
-    accent: THREE.MeshStandardMaterial,
-  ): void {
-    this.box('QuickSense building mass', new THREE.Vector3(x, roofY - height * 0.5, z), new THREE.Vector3(width, height, depth), sideMaterial, true);
-    this.box('QuickSense building roof', new THREE.Vector3(x, roofY + 0.45, z), new THREE.Vector3(width + 1.6, 0.9, depth + 1.6), whiteMaterial, true);
-    this.box('QuickSense vertical light panel', new THREE.Vector3(x - width * 0.5 - 0.12, roofY - height * 0.55, z), new THREE.Vector3(0.16, height * 0.56, depth * 0.56), accent, false);
-    this.box('QuickSense front light panel', new THREE.Vector3(x, roofY - height * 0.55, z - depth * 0.5 - 0.12), new THREE.Vector3(width * 0.55, height * 0.28, 0.16), accent, false);
-    this.box('QuickSense roof front rail', new THREE.Vector3(x, roofY + 0.98, z - depth * 0.5 - 0.15), new THREE.Vector3(width * 0.78, 0.18, 0.22), accent, false);
-    this.box('QuickSense roof side rail', new THREE.Vector3(x - width * 0.5 - 0.15, roofY + 0.98, z), new THREE.Vector3(0.22, 0.18, depth * 0.78), accent, false);
+    for (const spec of specs) {
+      const bottomY = spec.roofY - spec.height;
+      const lowerHeight = spec.height * 0.7;
+      const upperHeight = spec.height * 0.46;
+      taperedParts.push({
+        position: new THREE.Vector3(spec.x, bottomY + lowerHeight * 0.5, spec.z),
+        scale: new THREE.Vector3(spec.width * 0.48, lowerHeight, spec.depth * 0.48),
+        yaw: spec.yaw,
+      });
+      const upper = this.localOffset(spec.x, spec.roofY - upperHeight * 0.5, spec.z, spec.width * 0.06, spec.depth * 0.04, spec.yaw);
+      taperedParts.push({
+        position: upper,
+        scale: new THREE.Vector3(spec.width * 0.35, upperHeight, spec.depth * 0.36),
+        yaw: spec.yaw + Math.PI / 8,
+      });
+      for (const side of [-1, 1]) {
+        shellParts.push({
+          position: this.localOffset(spec.x, bottomY + spec.height * 0.37, spec.z, side * spec.width * 0.42, 0, spec.yaw),
+          scale: new THREE.Vector3(spec.width * 0.18, spec.height * 0.62, spec.depth * 0.58),
+          yaw: spec.yaw,
+        });
+        roofDetails.push({
+          position: this.localOffset(spec.x, spec.roofY + 1.65, spec.z, side * spec.width * 0.27, spec.depth * 0.04, spec.yaw),
+          scale: new THREE.Vector3(0.62, 2.45, 0.86),
+          yaw: spec.yaw,
+        });
+      }
+      roofCaps.push({
+        position: new THREE.Vector3(spec.x, spec.roofY + 0.38, spec.z),
+        scale: new THREE.Vector3(spec.width * 0.86, 0.76, spec.depth * 0.84),
+        yaw: spec.yaw,
+      });
+      accentParts[spec.accent].push(
+        {
+          position: this.localOffset(spec.x, bottomY + spec.height * 0.56, spec.z, 0, -spec.depth * 0.51, spec.yaw),
+          scale: new THREE.Vector3(spec.width * 0.5, spec.height * 0.24, 0.18),
+          yaw: spec.yaw,
+        },
+        {
+          position: this.localOffset(spec.x, bottomY + spec.height * 0.48, spec.z, -spec.width * 0.51, 0, spec.yaw),
+          scale: new THREE.Vector3(0.18, spec.height * 0.5, spec.depth * 0.3),
+          yaw: spec.yaw,
+        },
+        {
+          position: this.localOffset(spec.x, spec.roofY + 0.88, spec.z, 0, -spec.depth * 0.43, spec.yaw),
+          scale: new THREE.Vector3(spec.width * 0.66, 0.2, 0.24),
+          yaw: spec.yaw,
+        },
+      );
+      if (spec.collidable) {
+        this.registerBoxCollision(
+          'QuickSense stepped perimeter building',
+          new THREE.Vector3(spec.x, spec.roofY - spec.height * 0.5, spec.z),
+          new THREE.Vector3(spec.width, spec.height, spec.depth),
+          spec.yaw,
+        );
+      }
+    }
+
+    const taperedGeometry = new THREE.CylinderGeometry(0.82, 1, 1, 8);
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const capGeometry = new THREE.BoxGeometry(1, 1, 1);
+    this.addInstancedMeshes('QuickSense stepped building shells', taperedGeometry, sideMaterial, taperedParts);
+    this.addInstancedMeshes('QuickSense building buttresses', unitBox, sideMaterial, shellParts);
+    this.addInstancedMeshes('QuickSense octagonal roof crowns', capGeometry, whiteMaterial, roofCaps);
+    this.addInstancedMeshes('QuickSense rooftop fins', unitBox, whiteMaterial, roofDetails);
+    for (const role of ['cyan', 'magenta', 'amber'] as const) {
+      this.addInstancedMeshes(`QuickSense ${role} building signals`, unitBox, accentMaterials[role], accentParts[role], false);
+    }
   }
 
   private createFloatingStructures(
@@ -1026,86 +1752,388 @@ export class QuickSenseArena implements ArenaRuntime {
     whiteMaterial: THREE.MeshStandardMaterial,
     cyanMaterial: THREE.MeshStandardMaterial,
     magentaMaterial: THREE.MeshStandardMaterial,
+    amberMaterial: THREE.MeshStandardMaterial,
   ): void {
-    this.floatingBuilding(-29, -37, 32, 22, 10, 14, sideMaterial, whiteMaterial, cyanMaterial, 0.22);
-    this.floatingBuilding(29, 37, 34, 22, 10, 14, sideMaterial, whiteMaterial, magentaMaterial, -0.22);
-    this.floatingBuilding(34, -34, 26, 15, 8, 10, sideMaterial, whiteMaterial, magentaMaterial, 0);
-    this.floatingBuilding(-34, 34, 26, 15, 8, 10, sideMaterial, whiteMaterial, cyanMaterial, 0);
-    this.floatingBuilding(0, -12, 36, 20, 8, 13, sideMaterial, whiteMaterial, cyanMaterial, 0.12);
+    const specs: FloatingBuildingSpec[] = [
+      { x: -58, z: 23, y: 41, width: 19, height: 10, depth: 13, yaw: -0.24, accent: 'cyan' },
+      { x: 58, z: 23, y: 43, width: 19, height: 10, depth: 13, yaw: 0.24, accent: 'magenta' },
+      { x: 0, z: 61, y: 52, width: 27, height: 11, depth: 17, yaw: 0, accent: 'amber' },
+    ];
+    const accentMaterials: Record<AccentRole, THREE.MeshStandardMaterial> = {
+      cyan: cyanMaterial,
+      magenta: magentaMaterial,
+      amber: amberMaterial,
+    };
+    const hulls: InstanceTransform[] = [];
+    const undercarriages: InstanceTransform[] = [];
+    const wingBlocks: InstanceTransform[] = [];
+    const crownCaps: InstanceTransform[] = [];
+    const whiteDetails: InstanceTransform[] = [];
+    const accentPanels: Record<AccentRole, InstanceTransform[]> = { cyan: [], magenta: [], amber: [] };
+    const thrusters: Record<AccentRole, InstanceTransform[]> = { cyan: [], magenta: [], amber: [] };
+    const tethers: Record<AccentRole, InstanceTransform[]> = { cyan: [], magenta: [], amber: [] };
+    const rings: Record<AccentRole, InstanceTransform[]> = { cyan: [], magenta: [], amber: [] };
+
+    for (const spec of specs) {
+      hulls.push({
+        position: new THREE.Vector3(spec.x, spec.y, spec.z),
+        scale: new THREE.Vector3(spec.width * 0.38, spec.height, spec.depth * 0.43),
+        yaw: spec.yaw,
+      });
+      undercarriages.push({
+        position: new THREE.Vector3(spec.x, spec.y - spec.height * 0.72, spec.z),
+        scale: new THREE.Vector3(spec.width * 0.36, spec.height * 0.62, spec.depth * 0.38),
+        yaw: spec.yaw + Math.PI / 7,
+      });
+      for (const side of [-1, 1]) {
+        wingBlocks.push({
+          position: this.localOffset(spec.x, spec.y + spec.height * 0.02, spec.z, side * spec.width * 0.4, 0, spec.yaw),
+          scale: new THREE.Vector3(spec.width * 0.34, spec.height * 0.5, spec.depth * 0.72),
+          yaw: spec.yaw,
+        });
+        whiteDetails.push({
+          position: this.localOffset(spec.x, spec.y + spec.height * 0.25, spec.z, side * spec.width * 0.48, -spec.depth * 0.08, spec.yaw),
+          scale: new THREE.Vector3(0.55, spec.height * 0.66, spec.depth * 0.42),
+          yaw: spec.yaw,
+        });
+      }
+      crownCaps.push({
+        position: new THREE.Vector3(spec.x, spec.y + spec.height * 0.54, spec.z),
+        scale: new THREE.Vector3(spec.width * 0.82, 0.88, spec.depth * 0.78),
+        yaw: spec.yaw,
+      });
+      accentPanels[spec.accent].push(
+        {
+          position: this.localOffset(spec.x, spec.y + spec.height * 0.08, spec.z, 0, -spec.depth * 0.57, spec.yaw),
+          scale: new THREE.Vector3(spec.width * 0.55, spec.height * 0.32, 0.2),
+          yaw: spec.yaw,
+        },
+        {
+          position: this.localOffset(spec.x, spec.y + spec.height * 0.55, spec.z, 0, -spec.depth * 0.42, spec.yaw),
+          scale: new THREE.Vector3(spec.width * 0.62, 0.22, 0.24),
+          yaw: spec.yaw,
+        },
+      );
+      for (const sideX of [-1, 1]) {
+        for (const sideZ of [-1, 1]) {
+          thrusters[spec.accent].push({
+            position: this.localOffset(
+              spec.x,
+              spec.y - spec.height * 0.65,
+              spec.z,
+              sideX * spec.width * 0.3,
+              sideZ * spec.depth * 0.28,
+              spec.yaw,
+            ),
+            scale: new THREE.Vector3(0.72, 2.1, 0.72),
+            rotation: new THREE.Euler(0, spec.yaw, Math.PI),
+          });
+        }
+      }
+      const tetherHeight = Math.max(7, spec.y - spec.height * 0.5 - 2);
+      tethers[spec.accent].push({
+        position: new THREE.Vector3(spec.x, tetherHeight * 0.5, spec.z),
+        scale: new THREE.Vector3(0.2, tetherHeight, 0.2),
+      });
+      const ringScale = Math.max(spec.width, spec.depth) * 0.38;
+      rings[spec.accent].push({
+        position: new THREE.Vector3(spec.x, spec.y + spec.height * 0.65 + 1.1, spec.z),
+        scale: new THREE.Vector3(ringScale, ringScale, ringScale),
+        rotation: new THREE.Euler(Math.PI * 0.5, spec.yaw, 0),
+      });
+      const roofY = spec.y + spec.height * 0.54 + 0.44;
+      this.platformSurfaces.push({
+        name: 'QuickSense floating station landing roof',
+        minX: spec.x - spec.width * 0.39,
+        maxX: spec.x + spec.width * 0.39,
+        minZ: spec.z - spec.depth * 0.36,
+        maxZ: spec.z + spec.depth * 0.36,
+        y: roofY,
+      });
+      this.registerBoxCollision(
+        'QuickSense floating grapple station',
+        new THREE.Vector3(spec.x, spec.y, spec.z),
+        new THREE.Vector3(spec.width * 1.08, spec.height, spec.depth),
+        spec.yaw,
+      );
+    }
+
+    const taperedHull = new THREE.CylinderGeometry(0.8, 1, 1, 8);
+    const undercarriage = new THREE.CylinderGeometry(1, 0.12, 1, 7);
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const crown = new THREE.BoxGeometry(1, 1, 1);
+    const thruster = new THREE.ConeGeometry(1, 1, 6);
+    const tether = new THREE.CylinderGeometry(1, 1, 1, 6);
+    const ring = new THREE.TorusGeometry(1, 0.035, 5, 24);
+    this.addInstancedMeshes('QuickSense floating station hulls', taperedHull, sideMaterial, hulls);
+    this.addInstancedMeshes('QuickSense floating station undercarriages', undercarriage, sideMaterial, undercarriages);
+    this.addInstancedMeshes('QuickSense floating station wings', unitBox, sideMaterial, wingBlocks);
+    this.addInstancedMeshes('QuickSense floating station crowns', crown, whiteMaterial, crownCaps);
+    this.addInstancedMeshes('QuickSense floating station fins', unitBox, whiteMaterial, whiteDetails);
+    for (const role of ['cyan', 'magenta', 'amber'] as const) {
+      this.addInstancedMeshes(`QuickSense ${role} floating panels`, unitBox, accentMaterials[role], accentPanels[role], false);
+      this.addInstancedMeshes(`QuickSense ${role} station thrusters`, thruster, accentMaterials[role], thrusters[role], false);
+      this.addInstancedMeshes(`QuickSense ${role} energy tethers`, tether, accentMaterials[role], tethers[role], false);
+      this.addInstancedMeshes(`QuickSense ${role} grapple halos`, ring, accentMaterials[role], rings[role], false);
+    }
   }
 
-  private floatingBuilding(
+  private localOffset(
     x: number,
-    z: number,
     y: number,
-    width: number,
-    height: number,
-    depth: number,
+    z: number,
+    localX: number,
+    localZ: number,
+    yaw: number,
+  ): THREE.Vector3 {
+    const cosine = Math.cos(yaw);
+    const sine = Math.sin(yaw);
+    return new THREE.Vector3(
+      x + localX * cosine + localZ * sine,
+      y,
+      z - localX * sine + localZ * cosine,
+    );
+  }
+
+  private registerBoxCollision(
+    name: string,
+    center: THREE.Vector3,
+    size: THREE.Vector3,
+    yaw = 0,
+    blocksMovement = true,
+  ): void {
+    const cosine = Math.abs(Math.cos(yaw));
+    const sine = Math.abs(Math.sin(yaw));
+    const halfX = (size.x * cosine + size.z * sine) * 0.5;
+    const halfZ = (size.x * sine + size.z * cosine) * 0.5;
+    const box = new THREE.Box3(
+      new THREE.Vector3(center.x - halfX, center.y - size.y * 0.5, center.z - halfZ),
+      new THREE.Vector3(center.x + halfX, center.y + size.y * 0.5, center.z + halfZ),
+    );
+    this.colliders.push({ box, name, blocksMovement });
+    this.shotBoxes.push(box.clone());
+  }
+
+  private createSkylineGateways(
     sideMaterial: THREE.MeshStandardMaterial,
     whiteMaterial: THREE.MeshStandardMaterial,
-    accent: THREE.MeshStandardMaterial,
-    yaw: number,
+    cyanMaterial: THREE.MeshStandardMaterial,
+    magentaMaterial: THREE.MeshStandardMaterial,
+    amberMaterial: THREE.MeshStandardMaterial,
   ): void {
-    const body = this.box('Floating grapple building', new THREE.Vector3(x, y, z), new THREE.Vector3(width, height, depth), sideMaterial, true, yaw);
-    this.box('Floating building crown', new THREE.Vector3(x, y + height * 0.5 + 0.45, z), new THREE.Vector3(width + 1.4, 0.9, depth + 1.4), whiteMaterial, true, yaw);
-    this.box('Floating building signal face', new THREE.Vector3(x, y, z - depth * 0.5 - 0.12), new THREE.Vector3(width * 0.6, height * 0.4, 0.18), accent, false, yaw);
-    const tether = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, y - 1.2, 6), accent);
-    tether.name = 'Floating building energy tether';
-    tether.position.set(x, y * 0.5, z);
-    this.geometries.push(tether.geometry);
-    this.group.add(tether);
-    for (const cornerX of [-1, 1]) {
-      for (const cornerZ of [-1, 1]) {
-        const thruster = new THREE.Mesh(new THREE.ConeGeometry(0.62, 1.8, 5), accent);
-        thruster.name = 'Floating building undercarriage thruster';
-        thruster.position.set(
-          x + cornerX * (width * 0.34),
-          y - height * 0.5 - 0.9,
-          z + cornerZ * (depth * 0.34),
-        );
-        this.geometries.push(thruster.geometry);
-        this.group.add(thruster);
+    const pylons = [
+      { x: -84.5, z: -16, height: 34, yaw: -0.08, accent: cyanMaterial, role: 'cyan' },
+      { x: 84.5, z: 16, height: 36, yaw: 0.08, accent: magentaMaterial, role: 'magenta' },
+    ] as const;
+    const shafts: InstanceTransform[] = [];
+    const bases: InstanceTransform[] = [];
+    const shoulders: InstanceTransform[] = [];
+    const crowns: InstanceTransform[] = [];
+    const signals: Record<'cyan' | 'magenta', InstanceTransform[]> = { cyan: [], magenta: [] };
+    const halos: Record<'cyan' | 'magenta', InstanceTransform[]> = { cyan: [], magenta: [] };
+    for (const pylon of pylons) {
+      const shaftBottom = 2.2;
+      shafts.push({
+        position: new THREE.Vector3(pylon.x, shaftBottom + pylon.height * 0.5, pylon.z),
+        scale: new THREE.Vector3(4.4, pylon.height, 3.7),
+        yaw: pylon.yaw,
+      });
+      bases.push({
+        position: new THREE.Vector3(pylon.x, 1.5, pylon.z),
+        scale: new THREE.Vector3(6.4, 3, 5.6),
+        yaw: pylon.yaw,
+      });
+      for (const side of [-1, 1]) {
+        shoulders.push({
+          position: this.localOffset(pylon.x, pylon.height + 5.2, pylon.z, side * 2.65, 0, pylon.yaw),
+          scale: new THREE.Vector3(1.55, 7.2, 2.05),
+          yaw: pylon.yaw,
+        });
       }
+      crowns.push(
+        {
+          position: new THREE.Vector3(pylon.x, pylon.height + 8.45, pylon.z),
+          scale: new THREE.Vector3(7.2, 1.25, 3.8),
+          yaw: pylon.yaw,
+        },
+        {
+          position: new THREE.Vector3(pylon.x, pylon.height + 2.15, pylon.z),
+          scale: new THREE.Vector3(5.9, 0.7, 4.6),
+          yaw: pylon.yaw,
+        },
+      );
+      signals[pylon.role].push(
+        {
+          position: this.localOffset(pylon.x, shaftBottom + pylon.height * 0.52, pylon.z, 0, -2.02, pylon.yaw),
+          scale: new THREE.Vector3(0.55, pylon.height * 0.78, 0.2),
+          yaw: pylon.yaw,
+        },
+        {
+          position: new THREE.Vector3(pylon.x, pylon.height + 8.55, pylon.z - 2.08),
+          scale: new THREE.Vector3(3.2, 0.28, 0.22),
+          yaw: pylon.yaw,
+        },
+      );
+      const haloScale = 5.5;
+      halos[pylon.role].push({
+        position: new THREE.Vector3(pylon.x, pylon.height + 4.2, pylon.z),
+        scale: new THREE.Vector3(haloScale, haloScale, haloScale),
+        rotation: new THREE.Euler(Math.PI * 0.5, pylon.yaw, 0),
+      });
+      this.registerBoxCollision(
+        `QuickSense ${pylon.role} skyline pylon`,
+        new THREE.Vector3(pylon.x, shaftBottom + pylon.height * 0.5, pylon.z),
+        new THREE.Vector3(8.8, pylon.height + 5, 7.4),
+        pylon.yaw,
+      );
     }
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(Math.max(width, depth) * 0.65, 0.12, 6, 18), accent);
-    ring.name = 'Floating building grapple ring';
-    ring.rotation.x = Math.PI * 0.5;
-    ring.position.set(x, y + height * 0.5 + 1.0, z);
-    this.geometries.push(ring.geometry);
-    this.group.add(ring);
-    this.animatedProps.push({ object: ring, baseY: ring.position.y, phase: yaw, spin: yaw >= 0 ? 0.3 : -0.3 });
-    void body;
+
+    const shaftGeometry = new THREE.CylinderGeometry(0.58, 1, 1, 6);
+    const baseGeometry = new THREE.CylinderGeometry(1, 1.16, 1, 8);
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const haloGeometry = new THREE.TorusGeometry(1, 0.05, 5, 24);
+    this.addInstancedMeshes('QuickSense skyline pylon shafts', shaftGeometry, sideMaterial, shafts);
+    this.addInstancedMeshes('QuickSense skyline pylon bases', baseGeometry, sideMaterial, bases);
+    this.addInstancedMeshes('QuickSense skyline pylon forks', unitBox, sideMaterial, shoulders);
+    this.addInstancedMeshes('QuickSense skyline pylon crowns', unitBox, whiteMaterial, crowns);
+    this.addInstancedMeshes('QuickSense cyan pylon signals', unitBox, cyanMaterial, signals.cyan, false);
+    this.addInstancedMeshes('QuickSense magenta pylon signals', unitBox, magentaMaterial, signals.magenta, false);
+    this.addInstancedMeshes('QuickSense cyan pylon halo', haloGeometry, cyanMaterial, halos.cyan, false);
+    this.addInstancedMeshes('QuickSense magenta pylon halo', haloGeometry, magentaMaterial, halos.magenta, false);
+
+    const cyanPylonTop = new THREE.Vector3(-84.5, 42.5, -16);
+    const magentaPylonTop = new THREE.Vector3(84.5, 44.5, 16);
+    const cyanStation = new THREE.Vector3(-58, 48, 23);
+    const magentaStation = new THREE.Vector3(58, 50, 23);
+    const flagship = new THREE.Vector3(0, 59, 61);
+    this.createSuspendedCable('QuickSense cyan skyline cable', cyanPylonTop, cyanStation, 8, cyanMaterial, 0.22);
+    this.createSuspendedCable('QuickSense magenta skyline cable', magentaPylonTop, magentaStation, 8, magentaMaterial, 0.22);
+    this.createSuspendedCable('QuickSense west flagship cable', cyanStation, flagship, 10, amberMaterial, 0.19);
+    this.createSuspendedCable('QuickSense east flagship cable', magentaStation, flagship, 12, amberMaterial, 0.19);
+  }
+
+  private createSuspendedCable(
+    name: string,
+    start: THREE.Vector3,
+    end: THREE.Vector3,
+    sag: number,
+    material: THREE.MeshStandardMaterial,
+    radius: number,
+  ): void {
+    const midpoint = start.clone().lerp(end, 0.5);
+    midpoint.y = Math.min(start.y, end.y) - sag;
+    const quarter = start.clone().lerp(midpoint, 0.5);
+    const threeQuarter = midpoint.clone().lerp(end, 0.5);
+    const curve = new THREE.CatmullRomCurve3([start, quarter, midpoint, threeQuarter, end]);
+    const geometry = new THREE.TubeGeometry(curve, 28, radius, 5, false);
+    const cable = this.addMesh(geometry, material, name);
+    cable.castShadow = false;
+    cable.receiveShadow = false;
+    let previous = curve.getPoint(0);
+    for (let index = 1; index <= 12; index += 1) {
+      const next = curve.getPoint(index / 12);
+      this.shotBoxes.push(new THREE.Box3().setFromPoints([previous, next]).expandByScalar(radius + 0.22));
+      previous = next;
+    }
   }
 
   private createBoundaryArchitecture(sideMaterial: THREE.MeshStandardMaterial, accent: THREE.MeshStandardMaterial): void {
     const walls = [
-      { center: new THREE.Vector3(0, 1.4, -80), size: new THREE.Vector3(168, 2.8, 1.2) },
-      { center: new THREE.Vector3(0, 1.4, 80), size: new THREE.Vector3(168, 2.8, 1.2) },
-      { center: new THREE.Vector3(-90, 1.4, 0), size: new THREE.Vector3(1.2, 2.8, 148) },
-      { center: new THREE.Vector3(90, 1.4, 0), size: new THREE.Vector3(1.2, 2.8, 148) },
+      { center: new THREE.Vector3(-50, 2.8, -79.1), size: new THREE.Vector3(72, 5.6, 2.2) },
+      { center: new THREE.Vector3(50, 2.8, -79.1), size: new THREE.Vector3(72, 5.6, 2.2) },
+      { center: new THREE.Vector3(-50, 2.8, 79.1), size: new THREE.Vector3(72, 5.6, 2.2) },
+      { center: new THREE.Vector3(50, 2.8, 79.1), size: new THREE.Vector3(72, 5.6, 2.2) },
+      { center: new THREE.Vector3(-89, 2.8, -43), size: new THREE.Vector3(2.2, 5.6, 31) },
+      { center: new THREE.Vector3(-89, 2.8, 0), size: new THREE.Vector3(2.2, 5.6, 31) },
+      { center: new THREE.Vector3(-89, 2.8, 43), size: new THREE.Vector3(2.2, 5.6, 31) },
+      { center: new THREE.Vector3(89, 2.8, -43), size: new THREE.Vector3(2.2, 5.6, 31) },
+      { center: new THREE.Vector3(89, 2.8, 0), size: new THREE.Vector3(2.2, 5.6, 31) },
+      { center: new THREE.Vector3(89, 2.8, 43), size: new THREE.Vector3(2.2, 5.6, 31) },
     ];
-    for (const wall of walls) this.box('QuickSense perimeter wall', wall.center, wall.size, sideMaterial, false);
-    for (let index = -3; index <= 3; index += 1) {
-      this.box('QuickSense perimeter light', new THREE.Vector3(index * 24, 2.95, -80.68), new THREE.Vector3(7.5, 0.14, 0.12), accent, false);
-      this.box('QuickSense perimeter light', new THREE.Vector3(index * 24, 2.95, 80.68), new THREE.Vector3(7.5, 0.14, 0.12), accent, false);
+    const wallTransforms: InstanceTransform[] = [];
+    const capTransforms: InstanceTransform[] = [];
+    for (const wall of walls) {
+      wallTransforms.push({ position: wall.center, scale: wall.size });
+      capTransforms.push({
+        position: new THREE.Vector3(wall.center.x, 5.76, wall.center.z),
+        scale: new THREE.Vector3(wall.size.x * 1.03, 0.34, wall.size.z * 1.08),
+      });
+      this.registerBoxCollision('QuickSense fortified perimeter', wall.center, wall.size);
     }
+    const buttresses: InstanceTransform[] = [];
+    const amberStrips: InstanceTransform[] = [];
+    for (const x of [-84, -66, -42, 42, 66, 84]) {
+      for (const z of [-79.1, 79.1]) {
+        buttresses.push({ position: new THREE.Vector3(x, 3.7, z), scale: new THREE.Vector3(3.4, 7.4, 4.8) });
+        amberStrips.push({ position: new THREE.Vector3(x, 6.04, z - Math.sign(z) * 1.22), scale: new THREE.Vector3(7.8, 0.24, 0.18) });
+      }
+    }
+    for (const z of [-64, -43, -21, 0, 21, 43, 64]) {
+      for (const x of [-89, 89]) {
+        buttresses.push({ position: new THREE.Vector3(x, 3.7, z), scale: new THREE.Vector3(4.8, 7.4, 3.4) });
+        amberStrips.push({ position: new THREE.Vector3(x - Math.sign(x) * 1.22, 6.04, z), scale: new THREE.Vector3(0.18, 0.24, 7.8) });
+      }
+    }
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const octagon = new THREE.CylinderGeometry(1, 1.18, 1, 8);
+    this.addInstancedMeshes('QuickSense perimeter retaining walls', unitBox, sideMaterial, wallTransforms);
+    this.addInstancedMeshes('QuickSense perimeter armored caps', unitBox, sideMaterial, capTransforms);
+    this.addInstancedMeshes('QuickSense perimeter buttresses', octagon, sideMaterial, buttresses);
+    this.addInstancedMeshes('QuickSense perimeter amber signals', unitBox, accent, amberStrips, false);
   }
 
   private createRouteSupports(
     sideMaterial: THREE.MeshStandardMaterial,
+    trimMaterial: THREE.MeshStandardMaterial,
     cyanMaterial: THREE.MeshStandardMaterial,
     magentaMaterial: THREE.MeshStandardMaterial,
   ): void {
-    const supports = [
-      [-67, 0, 3.0, cyanMaterial], [-42, 0, 2.0, cyanMaterial], [-18, 0, 7.5, cyanMaterial],
-      [67, 0, 3.0, magentaMaterial], [42, 0, 2.0, magentaMaterial], [18, 0, 7.5, magentaMaterial],
-      [-42, -48, 2.2, sideMaterial], [42, 48, 2.2, sideMaterial], [0, -48, 3.0, sideMaterial], [0, 48, 15.0, sideMaterial],
-    ] as const;
-    for (const [x, z, top, material] of supports) {
-      this.box('Flow bridge support', new THREE.Vector3(x, top * 0.5, z), new THREE.Vector3(1.8, Math.max(1.5, top), 1.8), material, true);
-      const light = this.box('Flow bridge support light', new THREE.Vector3(x, top * 0.56, z - 0.95), new THREE.Vector3(0.18, Math.max(0.9, top * 0.58), 0.08), material, false);
-      light.castShadow = false;
+    const columns: InstanceTransform[] = [];
+    const caps: InstanceTransform[] = [];
+    const cyanSignals: InstanceTransform[] = [];
+    const magentaSignals: InstanceTransform[] = [];
+    const neutralSignals: InstanceTransform[] = [];
+    for (const path of this.pathSurfaces) {
+      const stride = path.closed ? 4 : 5;
+      for (let index = Math.floor(stride * 0.55); index < path.points.length; index += stride) {
+        const point = path.points[index];
+        if (point.y < 2.35 || (Math.abs(point.x) < 15 && Math.abs(point.z) < 17)) continue;
+        const terrain = this.terrainHeightAt(point.x, point.z);
+        const height = Math.max(1.4, point.y - terrain - 0.18);
+        const baseY = terrain;
+        columns.push({
+          position: new THREE.Vector3(point.x, baseY + height * 0.5, point.z),
+          scale: new THREE.Vector3(1.02, height, 1.02),
+          yaw: index * 0.17,
+        });
+        caps.push({
+          position: new THREE.Vector3(point.x, point.y - 0.32, point.z),
+          scale: new THREE.Vector3(1.72, 0.62, 1.72),
+          yaw: index * 0.17,
+        });
+        const signal = {
+          position: new THREE.Vector3(point.x, baseY + height * 0.52, point.z - 0.83),
+          scale: new THREE.Vector3(0.16, Math.max(0.7, height * 0.58), 0.1),
+          yaw: 0,
+        };
+        if (path.name.startsWith('Cyan')) cyanSignals.push(signal);
+        else if (path.name.startsWith('Magenta')) magentaSignals.push(signal);
+        else neutralSignals.push(signal);
+        this.registerBoxCollision(
+          'QuickSense elevated route support',
+          new THREE.Vector3(point.x, baseY + height * 0.5, point.z),
+          new THREE.Vector3(2.0, height, 2.0),
+        );
+      }
     }
+    const columnGeometry = new THREE.CylinderGeometry(0.72, 1, 1, 6);
+    const capGeometry = new THREE.CylinderGeometry(1, 1.14, 1, 8);
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    this.addInstancedMeshes('QuickSense route support columns', columnGeometry, sideMaterial, columns);
+    this.addInstancedMeshes('QuickSense route support caps', capGeometry, trimMaterial, caps);
+    this.addInstancedMeshes('QuickSense cyan support signals', unitBox, cyanMaterial, cyanSignals, false);
+    this.addInstancedMeshes('QuickSense magenta support signals', unitBox, magentaMaterial, magentaSignals, false);
+    this.addInstancedMeshes('QuickSense neutral support signals', unitBox, trimMaterial, neutralSignals, false);
   }
 
   private createJumpPad(position: THREE.Vector3, direction: THREE.Vector3, material: THREE.MeshStandardMaterial): JumpPad {
@@ -1120,26 +2148,64 @@ export class QuickSenseArena implements ArenaRuntime {
     this.geometries.push(inner.geometry);
     this.group.add(inner);
     return {
-      position: position.clone(),
-      direction: direction.normalize().clone(),
-      radius: 4.2,
-      launchSpeed: 25,
+      position: this.localToWorld(position),
+      direction: this.localVectorToWorld(direction.clone()).normalize(),
+      radius: 4.2 * QUICK_HORIZONTAL_SCALE,
+      launchSpeed: 27,
     };
   }
 
   private pointOnFloor(x: number, z: number, lift = 0.04): THREE.Vector3 {
-    const floor = this.floorHeightAt(x, z, Number.POSITIVE_INFINITY) ?? 0;
-    return new THREE.Vector3(x, floor + lift, z);
+    const floor = this.floorSurfaceAt(x, z, Number.POSITIVE_INFINITY)?.height ?? 0;
+    return new THREE.Vector3(
+      x * QUICK_HORIZONTAL_SCALE,
+      floor * QUICK_VERTICAL_SCALE + lift,
+      z * QUICK_HORIZONTAL_SCALE,
+    );
+  }
+
+  private worldToLocal(source: THREE.Vector3, target = new THREE.Vector3()): THREE.Vector3 {
+    return target.set(
+      source.x / QUICK_HORIZONTAL_SCALE,
+      source.y / QUICK_VERTICAL_SCALE,
+      source.z / QUICK_HORIZONTAL_SCALE,
+    );
+  }
+
+  private localToWorld(source: THREE.Vector3, target = new THREE.Vector3()): THREE.Vector3 {
+    return target.set(
+      source.x * QUICK_HORIZONTAL_SCALE,
+      source.y * QUICK_VERTICAL_SCALE,
+      source.z * QUICK_HORIZONTAL_SCALE,
+    );
+  }
+
+  private worldVectorToLocal(source: THREE.Vector3, target = new THREE.Vector3()): THREE.Vector3 {
+    return this.worldToLocal(source, target);
+  }
+
+  private localVectorToWorld(source: THREE.Vector3, target = new THREE.Vector3()): THREE.Vector3 {
+    return this.localToWorld(source, target);
+  }
+
+  private localNormalToWorld(source: THREE.Vector3, target = new THREE.Vector3()): THREE.Vector3 {
+    return target.set(
+      source.x / QUICK_HORIZONTAL_SCALE,
+      source.y / QUICK_VERTICAL_SCALE,
+      source.z / QUICK_HORIZONTAL_SCALE,
+    ).normalize();
   }
 
   private floorSurfaceAt(x: number, z: number, fromY: number): { height: number; normal: THREE.Vector3 } | null {
-    if (Math.abs(x) > QUICKSENSE.width * 0.5 || Math.abs(z) > QUICKSENSE.depth * 0.5) return null;
+    if (Math.abs(x) > QUICK_LOCAL_WIDTH * 0.5 || Math.abs(z) > QUICK_LOCAL_DEPTH * 0.5) return null;
     let hasSurface = false;
     let highestHeight = Number.NEGATIVE_INFINITY;
     this.floorNormal.set(0, 1, 0);
-    if (0 <= fromY + 0.04) {
+    const terrainHeight = this.terrainHeightAt(x, z);
+    if (terrainHeight <= fromY + 0.04) {
       hasSurface = true;
-      highestHeight = 0;
+      highestHeight = terrainHeight;
+      this.terrainNormalAt(x, z, this.floorNormal);
     }
     for (const platform of this.platformSurfaces) {
       if (x < platform.minX || x > platform.maxX || z < platform.minZ || z > platform.maxZ) continue;
@@ -1180,19 +2246,38 @@ export class QuickSenseArena implements ArenaRuntime {
     ));
   }
 
-  private boxNormal(box: THREE.Box3, point: THREE.Vector3, direction: THREE.Vector3): THREE.Vector3 {
-    const distances = [
-      { distance: Math.abs(point.x - box.min.x), normal: new THREE.Vector3(-1, 0, 0) },
-      { distance: Math.abs(point.x - box.max.x), normal: new THREE.Vector3(1, 0, 0) },
-      { distance: Math.abs(point.y - box.min.y), normal: new THREE.Vector3(0, -1, 0) },
-      { distance: Math.abs(point.y - box.max.y), normal: new THREE.Vector3(0, 1, 0) },
-      { distance: Math.abs(point.z - box.min.z), normal: new THREE.Vector3(0, 0, -1) },
-      { distance: Math.abs(point.z - box.max.z), normal: new THREE.Vector3(0, 0, 1) },
-    ];
-    distances.sort((a, b) => a.distance - b.distance);
-    const normal = distances[0].normal;
-    if (normal.dot(direction) > 0) normal.negate();
-    return normal;
+  private boxNormal(
+    box: THREE.Box3,
+    point: THREE.Vector3,
+    direction: THREE.Vector3,
+    target: THREE.Vector3,
+  ): THREE.Vector3 {
+    let closestDistance = Math.abs(point.x - box.min.x);
+    target.set(-1, 0, 0);
+    let faceDistance = Math.abs(point.x - box.max.x);
+    if (faceDistance < closestDistance) {
+      closestDistance = faceDistance;
+      target.set(1, 0, 0);
+    }
+    faceDistance = Math.abs(point.y - box.min.y);
+    if (faceDistance < closestDistance) {
+      closestDistance = faceDistance;
+      target.set(0, -1, 0);
+    }
+    faceDistance = Math.abs(point.y - box.max.y);
+    if (faceDistance < closestDistance) {
+      closestDistance = faceDistance;
+      target.set(0, 1, 0);
+    }
+    faceDistance = Math.abs(point.z - box.min.z);
+    if (faceDistance < closestDistance) {
+      closestDistance = faceDistance;
+      target.set(0, 0, -1);
+    }
+    faceDistance = Math.abs(point.z - box.max.z);
+    if (faceDistance < closestDistance) target.set(0, 0, 1);
+    if (target.dot(direction) > 0) target.negate();
+    return target;
   }
 
   private rampSolidContact(
@@ -1215,7 +2300,12 @@ export class QuickSenseArena implements ArenaRuntime {
     const bottomY = Math.min(spec.origin.y, spec.origin.y + spec.rise) - (spec.skirtDepth ?? 0.8);
     if (position.y + height <= bottomY + 0.01 || position.y >= surfaceY - 0.015) return null;
     const entryDepth = Math.max(radius + 0.35, spec.length * 0.08);
-    if (longitudinal <= entryDepth && Math.abs(lateral) <= halfWidth && surfaceY - position.y <= MOVEMENT.stepHeight + 0.16) return null;
+    const localStepHeight = MOVEMENT.stepHeight / QUICK_VERTICAL_SCALE;
+    if (
+      longitudinal <= entryDepth
+      && Math.abs(lateral) <= halfWidth
+      && surfaceY - position.y <= localStepHeight + 0.16 / QUICK_VERTICAL_SCALE
+    ) return null;
     let depth = longitudinal + radius;
     let normalX = -sine;
     let normalZ = -cosine;

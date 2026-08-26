@@ -155,22 +155,20 @@ export class SpeedTrailSystem {
   ): number {
     const sideX = this.side.x * halfWidth;
     const sideZ = this.side.z * halfWidth;
-    const vertices = [
-      [startX - sideX, startY, startZ - sideZ, alpha],
-      [startX + sideX, startY, startZ + sideZ, alpha],
-      [endX - sideX, endY, endZ - sideZ, 0],
-      [startX + sideX, startY, startZ + sideZ, alpha],
-      [endX + sideX, endY, endZ + sideZ, 0],
-      [endX - sideX, endY, endZ - sideZ, 0],
-    ] as const;
-    for (const vertex of vertices) {
-      const positionOffset = cursor * 3;
-      this.positions[positionOffset] = vertex[0];
-      this.positions[positionOffset + 1] = vertex[1];
-      this.positions[positionOffset + 2] = vertex[2];
-      this.opacities[cursor] = vertex[3];
-      cursor += 1;
-    }
-    return cursor;
+    cursor = this.writeVertex(cursor, startX - sideX, startY, startZ - sideZ, alpha);
+    cursor = this.writeVertex(cursor, startX + sideX, startY, startZ + sideZ, alpha);
+    cursor = this.writeVertex(cursor, endX - sideX, endY, endZ - sideZ, 0);
+    cursor = this.writeVertex(cursor, startX + sideX, startY, startZ + sideZ, alpha);
+    cursor = this.writeVertex(cursor, endX + sideX, endY, endZ + sideZ, 0);
+    return this.writeVertex(cursor, endX - sideX, endY, endZ - sideZ, 0);
+  }
+
+  private writeVertex(cursor: number, x: number, y: number, z: number, alpha: number): number {
+    const positionOffset = cursor * 3;
+    this.positions[positionOffset] = x;
+    this.positions[positionOffset + 1] = y;
+    this.positions[positionOffset + 2] = z;
+    this.opacities[cursor] = alpha;
+    return cursor + 1;
   }
 }

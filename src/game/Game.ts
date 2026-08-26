@@ -36,6 +36,10 @@ type Owner = 'player' | number;
 type PickupKind = 'health' | 'armor' | 'damage' | 'speed' | WeaponId;
 type CountdownCue = 'READY' | '3' | '2' | '1';
 type CoreAnchor = FluxCoreAnchor & { readonly position: THREE.Vector3 };
+type PlayerSweepResult = {
+  wallNormal: THREE.Vector3 | null;
+  ceilingNormal: THREE.Vector3 | null;
+};
 
 type Projectile = {
   root: THREE.Group;
@@ -271,6 +275,27 @@ export class Game {
   private readonly grappleOriginScratch = new THREE.Vector3();
   private readonly movementStartScratch = new THREE.Vector3();
   private readonly tangentGravityScratch = new THREE.Vector3();
+  private readonly substepStartPosition = new THREE.Vector3();
+  private readonly substepStartVelocity = new THREE.Vector3();
+  private readonly substepIntendedPosition = new THREE.Vector3();
+  private readonly substepBlockedPosition = new THREE.Vector3();
+  private readonly movementVectorScratchA = new THREE.Vector3();
+  private readonly movementVectorScratchB = new THREE.Vector3();
+  private readonly sweepDisplacement = new THREE.Vector3();
+  private readonly sweepHorizontal = new THREE.Vector3();
+  private readonly sweepSide = new THREE.Vector3();
+  private readonly sweepFront = new THREE.Vector3();
+  private readonly sweepHalfSide = new THREE.Vector3();
+  private readonly sweepRayStart = new THREE.Vector3();
+  private readonly sweepRayEnd = new THREE.Vector3();
+  private readonly sweepOffsets = Array.from({ length: 3 }, () => new THREE.Vector3());
+  private readonly sweepBestNormal = new THREE.Vector3();
+  private readonly sweepWallNormal = new THREE.Vector3();
+  private readonly sweepCeilingNormal = new THREE.Vector3();
+  private readonly sweepBoundaryNormal = new THREE.Vector3();
+  private readonly sweepResult: PlayerSweepResult = { wallNormal: null, ceilingNormal: null };
+  private sweepBestFraction = Number.POSITIVE_INFINITY;
+  private sweepBestKind: 'wall' | 'ceiling' | null = null;
   private nextHudUpdateAt = 0;
   private nextDiagnosticsUpdateAt = 0;
   private stepAttempts = 0;
@@ -338,7 +363,7 @@ export class Game {
     if (this.softwareRenderer && !visualCapture) this.renderer.shadowMap.enabled = false;
     this.renderer.info.autoReset = false;
     this.renderer.toneMappingExposure = new URLSearchParams(window.location.search).get('map') === 'quicksense'
-      ? 1.08
+      ? 0.98
       : 0.86;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.startButton = this.element<HTMLButtonElement>('#start-button');
@@ -384,6 +409,7 @@ export class Game {
     this.resetPlayerLoadout();
     this.buildWeaponModel();
     this.weaponVfx.prewarm(this.renderer);
+    this.prewarmSceneResources();
     this.respawnPlayer(false);
     this.startButton.addEventListener('click', this.onStartClick);
     this.applyMenuSettings();
@@ -401,6 +427,25 @@ export class Game {
 
   start(): void {
     this.loop.start();
+  }
+
+  private prewarmSceneResources(): void {
+    // Three.js uploads vertex/index buffers lazily on first visibility. A fast
+    // traversal can otherwise reveal a whole distant arena sector in one
+    // frame and make that frame pay every driver upload at once. Render once
+    // behind the ready screen with culling disabled, then restore authored
+    // culling before live play.
+    if (this.softwareRenderer) return;
+    const restoreCulling: THREE.Object3D[] = [];
+    this.scene.traverse((object) => {
+      if (!object.frustumCulled || !(object as THREE.Mesh).isMesh) return;
+      restoreCulling.push(object);
+      object.frustumCulled = false;
+    });
+    this.renderer.compile(this.scene, this.camera);
+    this.renderer.render(this.scene, this.camera);
+    for (const object of restoreCulling) object.frustumCulled = true;
+    this.renderer.info.reset();
   }
 
   dispose(): void {
@@ -881,14 +926,15 @@ export class Game {
   }
 
   private movePlayerSubstep(delta: number): void {
-    const startPosition = this.playerPosition.clone();
-    const startVelocity = this.playerVelocity.clone();
+    const startPosition = this.substepStartPosition.copy(this.playerPosition);
+    const startVelocity = this.substepStartVelocity.copy(this.playerVelocity);
     const wasGrounded = this.grounded;
-    const intendedPosition = this.playerPosition.clone().addScaledVector(this.playerVelocity, delta);
+    const intendedPosition = this.substepIntendedPosition.copy(this.playerPosition)
+      .addScaledVector(this.playerVelocity, delta);
     const sweptContact = this.sweepPlayerMotion(startPosition, intendedPosition);
     this.playerPosition.copy(intendedPosition);
     const impact = -this.playerVelocity.y;
-    const blockedPosition = this.playerPosition.clone();
+    const blockedPosition = this.substepBlockedPosition.copy(this.playerPosition);
     let contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
     if (sweptContact.wallNormal) {
       contact.wallContact = true;
@@ -949,69 +995,56 @@ export class Game {
   private sweepPlayerMotion(
     start: THREE.Vector3,
     intended: THREE.Vector3,
-  ): { wallNormal: THREE.Vector3 | null; ceilingNormal: THREE.Vector3 | null } {
-    const displacement = intended.clone().sub(start);
+  ): PlayerSweepResult {
+    const result = this.sweepResult;
+    result.wallNormal = null;
+    result.ceilingNormal = null;
+    const displacement = this.sweepDisplacement.copy(intended).sub(start);
     const distance = displacement.length();
-    let wallNormal: THREE.Vector3 | null = null;
-    let ceilingNormal: THREE.Vector3 | null = null;
     if (distance >= MOVEMENT.sweepMinDistance) {
       this.ccdSweeps += 1;
-      const horizontal = new THREE.Vector3(displacement.x, 0, displacement.z);
+      const horizontal = this.sweepHorizontal.set(displacement.x, 0, displacement.z);
       const horizontalDistance = horizontal.length();
-      const offsets: THREE.Vector3[] = [];
+      let wallOffsetCount = 0;
       if (horizontalDistance > 1e-5) {
         const forward = horizontal.multiplyScalar(1 / horizontalDistance);
-        const side = new THREE.Vector3(-forward.z, 0, forward.x);
-        const front = forward.multiplyScalar(MOVEMENT.playerRadius);
-        const halfSide = side.multiplyScalar(MOVEMENT.playerRadius * 0.68);
+        const side = this.sweepSide.set(-forward.z, 0, forward.x);
+        const front = this.sweepFront.copy(forward).multiplyScalar(MOVEMENT.playerRadius);
+        const halfSide = this.sweepHalfSide.copy(side).multiplyScalar(MOVEMENT.playerRadius * 0.68);
         const height = MOVEMENT.playerHeight * 0.5;
-        offsets.push(
-          front.clone().setY(height),
-          front.clone().add(halfSide).setY(height),
-          front.clone().sub(halfSide).setY(height),
-        );
+        this.sweepOffsets[0].copy(front).setY(height);
+        this.sweepOffsets[1].copy(front).add(halfSide).setY(height);
+        this.sweepOffsets[2].copy(front).sub(halfSide).setY(height);
+        wallOffsetCount = 3;
       }
 
-      type SweepCandidate = { fraction: number; normal: THREE.Vector3; kind: 'wall' | 'ceiling' };
-      const candidates: SweepCandidate[] = [];
-      const consider = (offset: THREE.Vector3, kind: SweepCandidate['kind']): void => {
-        const rayStart = start.clone().add(offset);
-        const rayEnd = intended.clone().add(offset);
-        const hit = this.arena.segmentHitDetails(rayStart, rayEnd);
-        if (!hit || hit.distance <= 1e-5) return;
-        const qualifies = kind === 'wall'
-          ? hit.normal.y < MOVEMENT.maxSlopeCosine && hit.normal.y > -0.55
-          : hit.normal.y < -0.42;
-        if (!qualifies) return;
-        const fraction = THREE.MathUtils.clamp(
-          (hit.distance - MOVEMENT.collisionSkin) / distance,
-          0,
-          1,
-        );
-        candidates.push({ fraction, normal: hit.normal.clone(), kind });
-      };
-
-      for (const offset of offsets) consider(offset, 'wall');
+      this.sweepBestFraction = Number.POSITIVE_INFINITY;
+      this.sweepBestKind = null;
+      for (let index = 0; index < wallOffsetCount; index += 1) {
+        this.considerPlayerSweep(start, intended, distance, this.sweepOffsets[index], 'wall');
+      }
       if (displacement.y > 0.001) {
         const radial = MOVEMENT.playerRadius * 0.72;
-        const horizontalDirection = new THREE.Vector2(displacement.x, displacement.z);
-        const sideX = horizontalDirection.lengthSq() > 1e-6 ? -horizontalDirection.y / horizontalDirection.length() : 1;
-        const sideZ = horizontalDirection.lengthSq() > 1e-6 ? horizontalDirection.x / horizontalDirection.length() : 0;
-        for (const [x, z] of [[0, 0], [sideX * radial, sideZ * radial], [-sideX * radial, -sideZ * radial]]) {
-          consider(new THREE.Vector3(x, MOVEMENT.playerHeight, z), 'ceiling');
+        const horizontalLength = Math.hypot(displacement.x, displacement.z);
+        const sideX = horizontalLength > 1e-6 ? -displacement.z / horizontalLength : 1;
+        const sideZ = horizontalLength > 1e-6 ? displacement.x / horizontalLength : 0;
+        this.sweepOffsets[0].set(0, MOVEMENT.playerHeight, 0);
+        this.sweepOffsets[1].set(sideX * radial, MOVEMENT.playerHeight, sideZ * radial);
+        this.sweepOffsets[2].set(-sideX * radial, MOVEMENT.playerHeight, -sideZ * radial);
+        for (let index = 0; index < 3; index += 1) {
+          this.considerPlayerSweep(start, intended, distance, this.sweepOffsets[index], 'ceiling');
         }
       }
 
-      const closest = candidates.sort((left, right) => left.fraction - right.fraction)[0];
-      if (closest !== undefined) {
-        intended.copy(start).addScaledVector(displacement, closest.fraction);
-        const intoSurface = this.playerVelocity.dot(closest.normal);
-        if (intoSurface < 0) this.playerVelocity.addScaledVector(closest.normal, -intoSurface);
-        if (closest.kind === 'wall') {
-          wallNormal = closest.normal;
+      if (this.sweepBestKind !== null) {
+        intended.copy(start).addScaledVector(displacement, this.sweepBestFraction);
+        const intoSurface = this.playerVelocity.dot(this.sweepBestNormal);
+        if (intoSurface < 0) this.playerVelocity.addScaledVector(this.sweepBestNormal, -intoSurface);
+        if (this.sweepBestKind === 'wall') {
+          result.wallNormal = this.sweepWallNormal.copy(this.sweepBestNormal);
           this.ccdWallHits += 1;
         } else {
-          ceilingNormal = closest.normal;
+          result.ceilingNormal = this.sweepCeilingNormal.copy(this.sweepBestNormal);
           this.ccdCeilingHits += 1;
         }
       }
@@ -1026,7 +1059,7 @@ export class Game {
     const clampedX = THREE.MathUtils.clamp(intended.x, -halfWidth, halfWidth);
     const clampedZ = THREE.MathUtils.clamp(intended.z, -halfDepth, halfDepth);
     if (clampedX !== intended.x || clampedZ !== intended.z) {
-      const boundaryNormal = new THREE.Vector3(
+      const boundaryNormal = this.sweepBoundaryNormal.set(
         clampedX !== intended.x ? -Math.sign(intended.x) : 0,
         0,
         clampedZ !== intended.z ? -Math.sign(intended.z) : 0,
@@ -1035,11 +1068,37 @@ export class Game {
       intended.z = clampedZ;
       const intoBoundary = this.playerVelocity.dot(boundaryNormal);
       if (intoBoundary < 0) this.playerVelocity.addScaledVector(boundaryNormal, -intoBoundary);
-      wallNormal = boundaryNormal;
+      result.wallNormal = this.sweepWallNormal.copy(boundaryNormal);
       this.ccdBoundaryHits += 1;
     }
 
-    return { wallNormal, ceilingNormal };
+    return result;
+  }
+
+  private considerPlayerSweep(
+    start: THREE.Vector3,
+    intended: THREE.Vector3,
+    distance: number,
+    offset: THREE.Vector3,
+    kind: 'wall' | 'ceiling',
+  ): void {
+    const rayStart = this.sweepRayStart.copy(start).add(offset);
+    const rayEnd = this.sweepRayEnd.copy(intended).add(offset);
+    const hit = this.arena.segmentHitDetails(rayStart, rayEnd);
+    if (!hit || hit.distance <= 1e-5) return;
+    const qualifies = kind === 'wall'
+      ? hit.normal.y < MOVEMENT.maxSlopeCosine && hit.normal.y > -0.55
+      : hit.normal.y < -0.42;
+    if (!qualifies) return;
+    const fraction = THREE.MathUtils.clamp(
+      (hit.distance - MOVEMENT.collisionSkin) / distance,
+      0,
+      1,
+    );
+    if (fraction >= this.sweepBestFraction) return;
+    this.sweepBestFraction = fraction;
+    this.sweepBestKind = kind;
+    this.sweepBestNormal.copy(hit.normal);
   }
 
   private tryStepMove(
@@ -1173,7 +1232,8 @@ export class Game {
     delta: number,
   ): void {
     if (direction.lengthSq() < 0.0001 || normal.y < 0.05) return;
-    const tangentWish = direction.clone().addScaledVector(normal, -direction.dot(normal));
+    const tangentWish = this.movementVectorScratchA.copy(direction)
+      .addScaledVector(normal, -direction.dot(normal));
     if (tangentWish.lengthSq() < 0.0001) return;
     tangentWish.normalize();
     const current = this.playerVelocity.dot(tangentWish);
@@ -1186,7 +1246,7 @@ export class Game {
     // toward forward/back input while preserving its magnitude and vertical arc.
     if (direction.lengthSq() < 0.0001 || Math.abs(this.moveInput.x) > 0.01 || Math.abs(this.moveInput.y) < 0.01) return;
     const verticalSpeed = this.playerVelocity.y;
-    const horizontal = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
+    const horizontal = this.movementVectorScratchA.set(this.playerVelocity.x, 0, this.playerVelocity.z);
     const speed = horizontal.length();
     if (speed < 0.001) return;
     horizontal.multiplyScalar(1 / speed);
@@ -1204,10 +1264,10 @@ export class Game {
 
   private applyAirCarve(direction: THREE.Vector3, delta: number): void {
     if (direction.lengthSq() < 0.0001) return;
-    const horizontal = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
+    const horizontal = this.movementVectorScratchA.set(this.playerVelocity.x, 0, this.playerVelocity.z);
     const speed = horizontal.length();
     if (speed < 0.25) return;
-    const target = direction.clone().setY(0).normalize();
+    const target = this.movementVectorScratchB.copy(direction).setY(0).normalize();
     const heading = horizontal.multiplyScalar(1 / speed);
     const dot = THREE.MathUtils.clamp(heading.dot(target), -1, 1);
     const angle = Math.acos(dot);
@@ -1230,10 +1290,12 @@ export class Game {
 
   private applySkiCarve(direction: THREE.Vector3, normal: THREE.Vector3, delta: number): void {
     if (direction.lengthSq() < 0.0001 || normal.y < 0.05) return;
-    const tangentVelocity = this.playerVelocity.clone().addScaledVector(normal, -this.playerVelocity.dot(normal));
+    const tangentVelocity = this.movementVectorScratchA.copy(this.playerVelocity)
+      .addScaledVector(normal, -this.playerVelocity.dot(normal));
     const speed = tangentVelocity.length();
     if (speed < 0.25) return;
-    const tangentWish = direction.clone().addScaledVector(normal, -direction.dot(normal));
+    const tangentWish = this.movementVectorScratchB.copy(direction)
+      .addScaledVector(normal, -direction.dot(normal));
     if (tangentWish.lengthSq() < 1e-4) return;
     tangentWish.normalize();
     const heading = tangentVelocity.multiplyScalar(1 / speed);
@@ -2909,54 +2971,65 @@ export class Game {
 
   private createScene(): void {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
-    this.scene.background = this.arena.skyTexture ?? new THREE.Color(quickSense ? 0x9ab7c4 : 0x8fcddd);
-    this.scene.backgroundIntensity = quickSense ? 1.05 : 0.78;
+    this.scene.background = this.arena.skyTexture ?? new THREE.Color(quickSense ? 0x78aee0 : 0x8fcddd);
+    this.scene.backgroundIntensity = quickSense ? 1 : 0.78;
     this.scene.backgroundBlurriness = 0.035;
-    this.scene.fog = new THREE.FogExp2(quickSense ? 0x687e8a : 0x7293a0, quickSense ? 0.00088 : 0.00146);
+    this.scene.fog = new THREE.FogExp2(quickSense ? 0x7d95a1 : 0x7293a0, quickSense ? 0.0008 : 0.00146);
     const environmentGenerator = new THREE.PMREMGenerator(this.renderer);
     // Keep the 4K panorama as the authored background. A compact PMREM studio
     // provides predictable PBR fill without prefiltering that large image on
     // startup (which is especially costly on integrated and software GPUs).
     this.environmentTexture = environmentGenerator.fromScene(new RoomEnvironment(), 0.03).texture;
     this.scene.environment = this.environmentTexture;
-    this.scene.environmentIntensity = quickSense ? 0.94 : 0.72;
+    this.scene.environmentIntensity = quickSense ? 0.82 : 0.72;
     environmentGenerator.dispose();
     if (!this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
-    this.scene.add(new THREE.AmbientLight(0x5d7888, quickSense ? 0.2 : 0.11));
-    const hemisphere = new THREE.HemisphereLight(0xb4d7e3, 0x263825, quickSense ? 0.98 : 0.76);
+    this.scene.add(new THREE.AmbientLight(0x708896, quickSense ? 0.18 : 0.11));
+    const hemisphere = new THREE.HemisphereLight(
+      quickSense ? 0xb8d5e7 : 0xb4d7e3,
+      quickSense ? 0x303627 : 0x263825,
+      quickSense ? 0.86 : 0.76,
+    );
     this.scene.add(hemisphere);
-    const sun = new THREE.DirectionalLight(0xffe2b7, quickSense ? 2.25 : 1.86);
-    sun.position.set(135, 190, 105);
+    const sun = new THREE.DirectionalLight(0xffe0b2, quickSense ? 1.62 : 1.86);
+    sun.position.set(quickSense ? -135 : 135, 190, quickSense ? -105 : 105);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.camera.near = 20;
-    sun.shadow.camera.far = 520;
-    sun.shadow.camera.left = -210;
-    sun.shadow.camera.right = 210;
-    sun.shadow.camera.top = 210;
-    sun.shadow.camera.bottom = -210;
+    sun.shadow.camera.far = quickSense ? 680 : 520;
+    const shadowExtent = quickSense ? 390 : 210;
+    sun.shadow.camera.left = -shadowExtent;
+    sun.shadow.camera.right = shadowExtent;
+    sun.shadow.camera.top = shadowExtent;
+    sun.shadow.camera.bottom = -shadowExtent;
     sun.shadow.bias = -0.00035;
     sun.shadow.normalBias = 0.035;
     this.scene.add(sun);
     this.coreLight.position.copy(this.arena.corePosition).add(new THREE.Vector3(0, 6, 0));
     this.coreLight.visible = false;
     this.scene.add(this.coreLight);
-    const rim = new THREE.DirectionalLight(0x5d86ab, quickSense ? 0.82 : 0.56);
+    const rim = new THREE.DirectionalLight(0x5d86ab, quickSense ? 0.5 : 0.56);
     rim.position.set(-90, 70, -120);
     this.scene.add(rim);
     this.scene.add(this.arena.group);
   }
 
   private createPostProcessing(): EffectComposer {
+    const quickSense = this.arena.mapInfo.name === 'QuickSense';
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    composer.addPass(new UnrealBloomPass(new THREE.Vector2(1, 1), this.mobileQuality ? 0.12 : 0.28, 0.34, 1.08));
+    composer.addPass(new UnrealBloomPass(
+      new THREE.Vector2(1, 1),
+      quickSense ? (this.mobileQuality ? 0.08 : 0.16) : (this.mobileQuality ? 0.12 : 0.28),
+      quickSense ? 0.26 : 0.34,
+      quickSense ? 1.14 : 1.08,
+    ));
     this.inkPass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
         resolution: { value: new THREE.Vector2(1, 1) },
-        edgeStrength: { value: this.mobileQuality ? 0.08 : 0.115 },
-        vignette: { value: 0.16 },
+        edgeStrength: { value: quickSense ? (this.mobileQuality ? 0.05 : 0.075) : (this.mobileQuality ? 0.08 : 0.115) },
+        vignette: { value: quickSense ? 0.1 : 0.16 },
         speedBlur: { value: 0 },
       },
       vertexShader: `varying vec2 vUv;
@@ -3023,12 +3096,13 @@ export class Game {
 
   private createSky(bright = false): THREE.Mesh {
     const uniforms = {
-      uTop: { value: new THREE.Color(bright ? 0x5f8292 : 0x152a43) },
-      uHorizon: { value: new THREE.Color(bright ? 0xc4dfe1 : 0x83a8b6) },
-      uLower: { value: new THREE.Color(bright ? 0x648c8e : 0x2d5567) },
-      uStorm: { value: new THREE.Color(bright ? 0x3a5566 : 0x101c31) },
+      uTop: { value: new THREE.Color(bright ? 0x4a97cf : 0x152a43) },
+      uHorizon: { value: new THREE.Color(bright ? 0xb0d5e9 : 0x83a8b6) },
+      uLower: { value: new THREE.Color(bright ? 0xd1e4ed : 0x2d5567) },
+      uStorm: { value: new THREE.Color(bright ? 0xbccbd4 : 0x101c31) },
       uSunColor: { value: new THREE.Color(0xffd7a4) },
-      uSunDir: { value: new THREE.Vector3(0.62, 0.22, 0.55).normalize() },
+      uSunDir: { value: new THREE.Vector3(bright ? -0.62 : 0.62, bright ? 0.32 : 0.22, bright ? -0.55 : 0.55).normalize() },
+      uCloudStrength: { value: bright ? 0.48 : 0.88 },
     };
     const sky = new THREE.Mesh(
       new THREE.SphereGeometry(850, 40, 22),
@@ -3040,6 +3114,7 @@ export class Game {
           void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
         fragmentShader: `varying vec3 vDir;
           uniform vec3 uTop, uHorizon, uLower, uStorm, uSunColor, uSunDir;
+          uniform float uCloudStrength;
           float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
           float noise(vec2 p){
             vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
@@ -3053,11 +3128,11 @@ export class Game {
             float cloudNoise = noise(vec2(azimuth * 2.8, vDir.y * 7.0)) * 0.62
               + noise(vec2(azimuth * 6.2 + 4.0, vDir.y * 13.0)) * 0.38;
             float stormSide = smoothstep(-0.3, 0.68, -vDir.x - vDir.z * 0.38);
-            float clouds = smoothstep(0.42, 0.76, cloudNoise + stormSide * 0.28)
+            float clouds = smoothstep(0.38, 0.7, cloudNoise + (uCloudStrength < 0.7 ? 0.1 : 0.0) + stormSide * 0.24)
               * smoothstep(0.28, 0.62, h);
-            col = mix(col, uStorm, clouds * 0.88);
+            col = mix(col, uStorm, clouds * uCloudStrength);
             float d = clamp(dot(normalize(vDir), normalize(uSunDir)), 0.0, 1.0);
-            col += uSunColor * (pow(d, 760.0) * 1.7 + pow(d, 10.0) * 0.32);
+            col += uSunColor * (pow(d, 900.0) * 1.25 + pow(d, 14.0) * 0.11);
             gl_FragColor = vec4(col, 1.0);
           }`,
       }),
@@ -3627,9 +3702,9 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(true);
           this.screenshotCameraFov = 45;
-          this.playerPosition.set(0, 150, 50);
+          this.playerPosition.set(0, 320, -235);
           this.playerVelocity.set(0, 0, 0);
-          const view = new THREE.Vector3(0, 5, 0).sub(this.playerPosition).normalize();
+          const view = new THREE.Vector3(0, 13, 0).sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -3637,10 +3712,10 @@ export class Game {
         } else if (name === 'quicksense-depth') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotCameraFov = 62;
-          this.playerPosition.set(-86, 30, 86);
+          this.screenshotCameraFov = 61;
+          this.playerPosition.set(-98, 27, -108);
           this.playerVelocity.set(0, 0, 0);
-          const view = new THREE.Vector3(0, 15, 4).sub(this.playerPosition).normalize();
+          const view = new THREE.Vector3(0, 15, 24).sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -3648,10 +3723,10 @@ export class Game {
         } else if (name === 'quicksense-ramp') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotCameraFov = 68;
-          this.playerPosition.set(0, 7, -57);
+          this.screenshotCameraFov = 58;
+          this.playerPosition.set(-48, 20, -126);
           this.playerVelocity.set(0, 0, 0);
-          const view = new THREE.Vector3(0, 12, -14).sub(this.playerPosition).normalize();
+          const view = new THREE.Vector3(0, 16.5, -91).sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -3661,8 +3736,8 @@ export class Game {
           this.audio.setPaused(true);
           this.hud.hideStart();
           this.pausedForScreenshot = true;
-          const floor = this.arena.floorHeightAt(0, -30) ?? 5.8;
-          this.playerPosition.set(0, floor, -30);
+          const floor = this.arena.floorHeightAt(0, -60) ?? 7.8;
+          this.playerPosition.set(0, floor, -60);
           this.playerVelocity.set(0, 0, 14);
           this.yaw = 0;
           this.pitch = 0.03;
