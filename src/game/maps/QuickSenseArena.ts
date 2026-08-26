@@ -441,15 +441,15 @@ export class QuickSenseArena implements ArenaRuntime {
 
     const panelTexture = createPanelTexture();
     this.textures.push(panelTexture);
-    const groundMaterial = this.material('QuickSense olive basin floor', 0xffffff, 0.01, 0.94);
-    const groundFoundationMaterial = this.material('QuickSense terrain foundation', 0x343a30, 0.01, 0.99);
-    const terrainRouteMaterial = this.material('QuickSense carved ski channels', 0x354044, 0.05, 0.86);
-    const deckMaterial = this.material('QuickSense graphite panels', 0xb8bdc0, 0.16, 0.62, panelTexture);
+    const groundMaterial = this.material('QuickSense sandstone basin floor', 0xffffff, 0.01, 0.94);
+    const groundFoundationMaterial = this.material('QuickSense umber terrain foundation', 0x46382e, 0.01, 0.99);
+    const terrainRouteMaterial = this.material('QuickSense carved umber ski channels', 0x4c3c32, 0.05, 0.86);
+    const deckMaterial = this.material('QuickSense graphite panels', 0x9aa1a4, 0.14, 0.68, panelTexture);
     const sideMaterial = this.material('QuickSense chamfered deck structure', 0x3d484e, 0.18, 0.76);
-    const structureMaterial = this.material('QuickSense architectural shells', 0x3b474d, 0.22, 0.7);
+    const structureMaterial = this.material('QuickSense panelled architectural shells', 0x4a555a, 0.2, 0.68, panelTexture);
     const rockMaterial = this.material('QuickSense volcanic cliffs', 0xffffff, 0.0, 0.96);
-    const rockHighlightMaterial = this.material('QuickSense cliff faces', 0x5b6567, 0.0, 0.94);
-    const mossCapMaterial = this.material('QuickSense moss cliff caps', 0x667254, 0.01, 1);
+    const rockHighlightMaterial = this.material('QuickSense sunlit sandstone cliff faces', 0x856548, 0.0, 0.94);
+    const mossCapMaterial = this.material('QuickSense dry scrub cliff caps', 0x756a4c, 0.01, 1);
     const cyanMaterial = this.emissiveMaterial('QuickSense cyan route', 0x28b9d5, 0x16b9e4);
     const magentaMaterial = this.emissiveMaterial('QuickSense terracotta route', 0xb47754, 0x9b5f3d);
     const amberMaterial = this.emissiveMaterial('QuickSense amber safety', 0xd18b28, 0xb96b0d);
@@ -460,6 +460,8 @@ export class QuickSenseArena implements ArenaRuntime {
     rockHighlightMaterial.vertexColors = true;
     deckMaterial.bumpMap = panelTexture;
     deckMaterial.bumpScale = 0.018;
+    structureMaterial.bumpMap = panelTexture;
+    structureMaterial.bumpScale = 0.012;
 
     this.createPath(
       'Cyan outer basin circuit',
@@ -1193,9 +1195,9 @@ export class QuickSenseArena implements ArenaRuntime {
     const colors: number[] = [];
     const vertices = faceted.getAttribute('position');
     const normals = faceted.getAttribute('normal');
-    const cliffDark = new THREE.Color(0x263136);
-    const cliffMid = new THREE.Color(0x3d4a4e);
-    const cliffLight = new THREE.Color(0x667174);
+    const cliffDark = new THREE.Color(0x3a302c);
+    const cliffMid = new THREE.Color(0x5b493d);
+    const cliffLight = new THREE.Color(0x876b4d);
     const faceCount = vertices.count / 3;
     for (let face = 0; face < faceCount; face += 1) {
       const height = (
@@ -1613,10 +1615,10 @@ export class QuickSenseArena implements ArenaRuntime {
     const faceted = geometry.toNonIndexed();
     geometry.dispose();
     faceted.computeVertexNormals();
-    const lowShadow = new THREE.Color(0x3d4936);
-    const lowSun = new THREE.Color(0x68705a);
-    const highRock = new THREE.Color(0x59615e);
-    const scree = new THREE.Color(0x46504d);
+    const lowShadow = new THREE.Color(0x4e3c2c);
+    const lowSun = new THREE.Color(0x896e49);
+    const highRock = new THREE.Color(0x75563e);
+    const scree = new THREE.Color(0x5f4938);
     const colors: number[] = [];
     const facetedPositions = faceted.getAttribute('position');
     const facetedNormals = faceted.getAttribute('normal');
@@ -1990,18 +1992,27 @@ export class QuickSenseArena implements ArenaRuntime {
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
     this.addMesh(geometry, [deckMaterial, sideMaterial], name);
+    const primaryRoute = name.includes('outer basin');
+    const secondaryRoute = name.includes('inner momentum');
     const safetyGeometry = this.createRibbonGeometry(
       points,
       closed,
       [-width * 0.5 + 0.28, width * 0.5 - 0.28],
-      0.26,
+      primaryRoute ? 0.3 : secondaryRoute ? 0.13 : 0.18,
       bank,
       0.17,
     );
     const safety = this.addMesh(safetyGeometry, safetyMaterial, `${name} amber edge trim`);
     safety.castShadow = false;
     safety.receiveShadow = false;
-    const factionGeometry = this.createRibbonGeometry(points, closed, [0], 0.16, bank, 0.185);
+    const factionGeometry = this.createRibbonGeometry(
+      points,
+      closed,
+      [0],
+      primaryRoute ? 0.24 : secondaryRoute ? 0.11 : 0.15,
+      bank,
+      0.185,
+    );
     const faction = this.addMesh(factionGeometry, edgeMaterial, `${name} faction centerline`);
     faction.castShadow = false;
     faction.receiveShadow = false;
@@ -2085,6 +2096,8 @@ export class QuickSenseArena implements ArenaRuntime {
     magentaMaterial: THREE.MeshStandardMaterial,
     amberMaterial: THREE.MeshStandardMaterial,
   ): void {
+    const junctionCollars: InstanceTransform[] = [];
+    const junctionSignals: InstanceTransform[] = [];
     const ramps: Array<{ name: string; spec: LaunchRampSpec; edge: THREE.MeshStandardMaterial }> = [
       {
         name: 'South progressive launch',
@@ -2144,7 +2157,44 @@ export class QuickSenseArena implements ArenaRuntime {
       this.addRampRails(ramp.spec, amberMaterial, ramp.edge);
       this.addRampSupportRibs(ramp.spec, sideMaterial, ramp.edge);
       this.addRampTopShotSurfaces(ramp.spec);
+      for (const u of [0, 1]) {
+        const surface = this.rampPoint(ramp.spec, u, 0);
+        const alongOffset = u === 0 ? 0.46 : -0.46;
+        const sine = Math.sin(ramp.spec.heading);
+        const cosine = Math.cos(ramp.spec.heading);
+        junctionCollars.push({
+          position: new THREE.Vector3(
+            surface.x + sine * alongOffset,
+            surface.y - 0.34,
+            surface.z + cosine * alongOffset,
+          ),
+          scale: new THREE.Vector3(ramp.spec.width + 1.15, 0.3, 1.7),
+          yaw: ramp.spec.heading,
+        });
+        junctionSignals.push({
+          position: new THREE.Vector3(
+            surface.x + sine * alongOffset,
+            surface.y - 0.16,
+            surface.z + cosine * alongOffset,
+          ),
+          scale: new THREE.Vector3(ramp.spec.width * 0.76, 0.055, 0.24),
+          yaw: ramp.spec.heading,
+        });
+      }
     }
+    this.addInstancedMeshes(
+      'QuickSense authored ramp junction collars',
+      this.createChamferedBlockGeometry(0.12),
+      deckMaterial,
+      junctionCollars,
+    );
+    this.addInstancedMeshes(
+      'QuickSense ramp junction load-path signals',
+      new THREE.BoxGeometry(1, 1, 1),
+      amberMaterial,
+      junctionSignals,
+      false,
+    );
   }
 
   private addRampTopShotSurfaces(spec: LaunchRampSpec): void {
@@ -2306,6 +2356,8 @@ export class QuickSenseArena implements ArenaRuntime {
       { position: new THREE.Vector3(-8.8, 26.3, 0), scale: new THREE.Vector3(3.4, 20.2, 4.1), yaw: Math.PI / 8 },
       { position: new THREE.Vector3(8.8, 26.3, 0), scale: new THREE.Vector3(3.4, 20.2, 4.1), yaw: -Math.PI / 8 },
       { position: new THREE.Vector3(0, 25.2, 0), scale: new THREE.Vector3(1.55, 20, 1.55), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(-8.8, 39.1, 0), scale: new THREE.Vector3(2.8, 4.2, 3.5), yaw: Math.PI / 8 },
+      { position: new THREE.Vector3(8.8, 39.1, 0), scale: new THREE.Vector3(2.8, 4.2, 3.5), yaw: -Math.PI / 8 },
     ];
     const plinths: InstanceTransform[] = [
       { position: new THREE.Vector3(-10.2, 12.9, 0), scale: new THREE.Vector3(7.5, 2.1, 8.7), yaw: Math.PI / 8 },
@@ -2331,6 +2383,21 @@ export class QuickSenseArena implements ArenaRuntime {
           position: new THREE.Vector3(side * 8.8, 37.5, 0),
           scale: new THREE.Vector3(5.6, 1.1, 6.2),
           yaw: side * Math.PI / 8,
+        },
+        {
+          position: new THREE.Vector3(side * 14.2, 21.2, -4.6),
+          scale: new THREE.Vector3(2.0, 13.6, 2.2),
+          rotation: new THREE.Euler(0, side * -0.08, side * 0.22),
+        },
+        {
+          position: new THREE.Vector3(side * 14.2, 21.2, 4.6),
+          scale: new THREE.Vector3(2.0, 13.6, 2.2),
+          rotation: new THREE.Euler(0, side * 0.08, side * 0.22),
+        },
+        {
+          position: new THREE.Vector3(side * 11.8, 33.2, -3.8),
+          scale: new THREE.Vector3(1.35, 8.6, 1.7),
+          rotation: new THREE.Euler(0, side * -0.12, side * -0.25),
         },
       );
       const signal = {
@@ -2576,13 +2643,13 @@ export class QuickSenseArena implements ArenaRuntime {
         rockShoulders.push({
           position: this.localOffset(
             spec.x,
-            bottomY + spec.height * 0.43,
+            bottomY + spec.height * 0.45,
             spec.z,
-            side * spec.width * 0.53,
-            spec.depth * 0.28,
+            side * spec.width * 0.5,
+            spec.depth * 0.3,
             spec.yaw,
           ),
-          scale: new THREE.Vector3(spec.width * 0.31, spec.height * 0.9, spec.depth * 0.7),
+          scale: new THREE.Vector3(spec.width * 0.23, spec.height * 0.78, spec.depth * 0.58),
           yaw: spec.yaw + (side > 0 ? 0.06 : -0.08),
         });
         structuralButtresses.push({
@@ -2665,10 +2732,10 @@ export class QuickSenseArena implements ArenaRuntime {
         yaw: spec.yaw,
       });
 
-      const portalCenterY = bottomY + spec.height * 0.2;
+      const portalCenterY = bottomY + spec.height * 0.25;
       portalOpenings.push({
         position: this.localOffset(spec.x, portalCenterY, spec.z, 0, -spec.depth * 0.515, spec.yaw),
-        scale: new THREE.Vector3(spec.width * 0.27, spec.height * 0.37, 1),
+        scale: new THREE.Vector3(spec.width * 0.27, spec.height * 0.34, 1),
         yaw: spec.yaw + Math.PI,
       });
       portalFrames.push({

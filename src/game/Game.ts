@@ -355,7 +355,15 @@ export class Game {
     const diagnosticCapture = qaMode !== null;
     const visualCapture = qaMode === 'visual' || qaMode === 'capture';
     this.visualCapture = visualCapture;
-    this.maxRenderDpr = this.softwareRenderer ? diagnosticCapture ? 0.75 : 0.25 : this.mobileQuality ? 1 : 1.25;
+    this.maxRenderDpr = this.softwareRenderer
+      ? visualCapture
+        ? 1
+        : diagnosticCapture
+          ? 0.75
+          : 0.25
+      : this.mobileQuality
+        ? 1
+        : 1.25;
     this.renderDprCap = this.maxRenderDpr;
     this.adaptiveQuality = new AdaptiveQualitySystem({
       minDpr: this.softwareRenderer ? this.maxRenderDpr : this.mobileQuality ? 0.7 : 0.75,
@@ -3845,10 +3853,10 @@ export class Game {
         } else if (name === 'quicksense-cliff') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotCameraFov = 52;
-          this.playerPosition.set(-105, 78, -78);
+          this.screenshotCameraFov = 56;
+          this.playerPosition.set(-110, 68, 62);
           this.playerVelocity.set(0, 0, 0);
-          this.screenshotLookTarget.set(-188, 34, -78);
+          this.screenshotLookTarget.set(-110, 36, 164);
           this.screenshotLookTargetActive = true;
           const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);

@@ -399,9 +399,9 @@ export class Arena implements ArenaRuntime {
       let skyTexture: THREE.Texture | undefined;
       try {
         skyTexture = await new THREE.TextureLoader().loadAsync(
-          assetUrl('assets/maps/quicksense-panorama-v1/quicksense-equirect-v2.png'),
+          assetUrl('assets/maps/quicksense-panorama-v1/quicksense-equirect-v3.png'),
         );
-        skyTexture.name = 'QuickSenseEquirectangularSkyV2';
+        skyTexture.name = 'QuickSenseEquirectangularSkyV3';
         skyTexture.colorSpace = THREE.SRGBColorSpace;
         skyTexture.mapping = THREE.EquirectangularReflectionMapping;
         skyTexture.minFilter = THREE.LinearFilter;
