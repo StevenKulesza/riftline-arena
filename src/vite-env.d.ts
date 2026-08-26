@@ -7,6 +7,7 @@ interface ThreeGameDiagnostics {
   targetScore: number;
   complete: boolean;
   state: string;
+  viewMode: 'first-person' | 'third-person';
   countdown: {
     remaining: number;
     cue: 'READY' | '3' | '2' | '1' | null;
@@ -145,6 +146,17 @@ interface ThreeGameDiagnostics {
     ceilingContact: boolean;
     yaw: number;
     pitch: number;
+    modelReady: boolean;
+    modelMeshCount: number;
+    modelHeight: number;
+    modelWidth: number;
+    modelDepth: number;
+    avatarVisible: boolean;
+  };
+  camera: {
+    distance: number;
+    position: { x: number; y: number; z: number };
+    thirdPersonObstructed: boolean;
   };
   speedEffects: {
     thresholdKmh: number;
@@ -272,6 +284,8 @@ interface ThreeGameTestHooks {
   setWeapon(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc'): void;
   /** Set deterministic camera aim for muzzle/beam tests. */
   setAim(yaw: number, pitch: number): void;
+  /** Toggle between the default first-person and over-shoulder views. */
+  toggleViewMode(): void;
   /** Sample procedural terrain floor height for deterministic controller QA. */
   sampleFloorHeight(x: number, z: number, fromY?: number): number | null;
   /** Return the grounded procedural arena spawn points. */

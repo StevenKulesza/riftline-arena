@@ -171,6 +171,11 @@
         <b class="hit-tick hit-tick--sw"></b>
         <b class="hit-tick hit-tick--se"></b>
       </div>
+      <div id="view-mode-indicator" aria-live="polite">
+        <span>View</span>
+        <strong id="view-mode-value">First person</strong>
+        <small>V // Switch</small>
+      </div>
       <div id="scope-overlay" aria-hidden="true">
         <div class="scope-glass">
           <span class="scope-axis scope-axis--horizontal"></span>
@@ -244,6 +249,7 @@
             <div><kbd>CAPS / E</kbd><span>Dash</span></div>
             <div><kbd>1—8</kbd><span>Weapons</span></div>
             <div><kbd>Q</kbd><span>Throw grenade</span></div>
+            <div><kbd>V</kbd><span>Switch view</span></div>
           </div>
           <div class="loadout-strip" aria-hidden="true">
             <span>8 weapon channels</span><i></i><span>mobility online</span><i></i><span>flux core live</span>
@@ -410,6 +416,7 @@
           <button id="grenade-button" class="touch-button touch-button--grenade" type="button"><span>Frag</span></button>
           <button id="weapon-button" class="touch-button touch-button--weapon" type="button"><span>Swap</span></button>
           <button id="zoom-button" class="touch-button touch-button--zoom" type="button" data-held="false"><span>Alt</span></button>
+          <button id="view-button" class="touch-button touch-button--view" type="button"><span>View</span></button>
           <button id="fire-button" class="touch-button touch-button--fire" type="button"><span>Fire</span></button>
         </div>
       </section>

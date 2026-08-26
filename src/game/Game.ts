@@ -8,6 +8,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createWeaponViewModel, updateWeaponViewModel, type WeaponViewModel } from '../assets/WeaponViewModel';
 import { JetpackRig } from '../assets/JetpackRig';
+import { PlayerAvatar } from '../assets/PlayerAvatar';
 import { InputController } from '../core/InputController';
 import { Loop } from '../core/Loop';
 import { createRenderer, getRenderDpr, resizeRenderer } from '../core/Renderer';
@@ -32,6 +33,7 @@ import { GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPO
 import { skiMomentumCurve, type SkiMomentumCurve } from './SkiMomentum';
 
 type GameMode = 'ready' | 'countdown' | 'running' | 'respawning' | 'paused' | 'complete';
+type ViewMode = 'first-person' | 'third-person';
 type Owner = 'player' | number;
 type PickupKind = 'health' | 'armor' | 'damage' | 'speed' | WeaponId;
 type CountdownCue = 'READY' | '3' | '2' | '1';
@@ -91,6 +93,7 @@ const MAX_FIXED_STEPS_PER_FRAME = 4;
 const HUD_UPDATE_INTERVAL = 1 / 15;
 const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
 const BASE_GAME_FOV = 80;
+const THIRD_PERSON_FOV = 72;
 const MAX_SPEED_FOV = 98;
 const QUICKSENSE_FOG_DENSITY = 0.00074;
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
@@ -109,6 +112,12 @@ const WEAPON_VIEW_SAFE_REACH: Record<WeaponId, number> = {
   sniper: 3.18,
   rail: 2.28,
 };
+const THIRD_PERSON_CAMERA_DISTANCE = 4.65;
+const THIRD_PERSON_CAMERA_SHOULDER = 0.85;
+const THIRD_PERSON_CAMERA_HEIGHT = 1.72;
+const THIRD_PERSON_CAMERA_TARGET_HEIGHT = 1.12;
+const THIRD_PERSON_CAMERA_SIDE_DISTANCE = 12.8;
+const THIRD_PERSON_CAMERA_CLEARANCE = 0.18;
 
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
@@ -124,6 +133,7 @@ export class Game {
   private readonly hud = new Hud();
   private readonly weaponVfx: WeaponVfxSystem;
   private readonly playerJetpack = new JetpackRig({ firstPerson: true });
+  private readonly playerAvatar = new PlayerAvatar();
   private readonly mobileQuality = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 600;
   // The arena uses several full-screen post passes. Letting a high-DPI display
   // render them at 1.75x multiplies fragment work by more than 3x, which is
@@ -172,6 +182,8 @@ export class Game {
   private readonly motionOption: HTMLButtonElement;
   private readonly fullscreenOption: HTMLButtonElement;
   private readonly optionsBack: HTMLButtonElement;
+  private readonly viewModeValue: HTMLElement;
+  private readonly viewButton: HTMLButtonElement;
   private readonly physicsQaMode = new URLSearchParams(window.location.search).get('qa') === 'physics';
   private environmentTexture?: THREE.Texture;
 
@@ -273,6 +285,15 @@ export class Game {
   private readonly cameraRightScratch = new THREE.Vector3();
   private readonly cameraDownScratch = new THREE.Vector3();
   private readonly cameraAimScratch = new THREE.Vector3();
+  private readonly thirdPersonAnchorScratch = new THREE.Vector3();
+  private readonly thirdPersonDesiredScratch = new THREE.Vector3();
+  private readonly thirdPersonPositionScratch = new THREE.Vector3();
+  private readonly thirdPersonOffsetScratch = new THREE.Vector3();
+  private readonly thirdPersonAlternateDesiredScratch = new THREE.Vector3();
+  private readonly thirdPersonAlternateOffsetScratch = new THREE.Vector3();
+  private readonly thirdPersonBestOffsetScratch = new THREE.Vector3();
+  private readonly thirdPersonBackScratch = new THREE.Vector3();
+  private readonly thirdPersonAimScratch = new THREE.Vector3();
   private readonly screenshotLookTarget = new THREE.Vector3();
   private screenshotLookTargetActive = false;
   private readonly cameraLocalAimScratch = new THREE.Vector3();
@@ -318,6 +339,7 @@ export class Game {
   private ccdWallHits = 0;
   private ccdCeilingHits = 0;
   private ccdBoundaryHits = 0;
+  private viewMode: ViewMode = 'first-person';
   private overtime = false;
   private overtimeBaselineScores: number[] = [];
   private playerShots = 0;
@@ -392,6 +414,8 @@ export class Game {
     this.motionOption = this.element<HTMLButtonElement>('#motion-option');
     this.fullscreenOption = this.element<HTMLButtonElement>('#fullscreen-option');
     this.optionsBack = this.element<HTMLButtonElement>('#options-back');
+    this.viewModeValue = this.element('#view-mode-value');
+    this.viewButton = this.element<HTMLButtonElement>('#view-button');
     this.input = new InputController(
       canvas,
       this.element('#touch-stick'),
@@ -404,9 +428,11 @@ export class Game {
       this.element('#dash-button'),
       this.element('#weapon-button'),
       this.element('#zoom-button'),
+      this.viewButton,
     );
     this.weaponVfx = new WeaponVfxSystem(this.scene, this.camera, () => this.rng());
     this.createScene();
+    this.scene.add(this.playerAvatar.root);
     this.composer = this.createPostProcessing();
     this.createBots();
     this.speedTrailSources.push({ position: this.playerPosition, velocity: this.playerVelocity, active: false });
@@ -437,6 +463,7 @@ export class Game {
     this.resizePostProcessing();
     this.installTestHooks();
     this.updateCamera(0);
+    this.updateViewModeUi();
     this.publishDiagnostics();
   }
 
@@ -472,6 +499,7 @@ export class Game {
     this.weaponVfx.dispose();
     this.speedTrails.dispose();
     this.playerJetpack.dispose();
+    this.playerAvatar.dispose();
     this.arena.dispose();
     for (const bot of this.bots) bot.dispose();
     for (const projectile of this.projectiles) this.disposeObject(projectile.root);
@@ -536,6 +564,30 @@ export class Game {
     else void document.documentElement.requestFullscreen();
   };
   private readonly onFullscreenChange = (): void => this.updateMenuToggles();
+
+  private isThirdPerson(): boolean {
+    return this.viewMode === 'third-person';
+  }
+
+  private toggleViewMode(): void {
+    this.viewMode = this.isThirdPerson() ? 'first-person' : 'third-person';
+    const thirdPerson = this.isThirdPerson();
+    this.weaponModel.visible = !thirdPerson;
+    this.playerAvatar.setVisible(thirdPerson);
+    this.updateViewModeUi();
+    if (this.mode === 'running') this.hud.message(thirdPerson ? 'THIRD-PERSON CAMERA' : 'FIRST-PERSON CAMERA');
+    this.updateCamera(0);
+    this.publishDiagnostics();
+  }
+
+  private updateViewModeUi(): void {
+    const thirdPerson = this.isThirdPerson();
+    this.viewModeValue.textContent = thirdPerson ? 'Third person' : 'First person';
+    this.viewModeValue.dataset.mode = this.viewMode;
+    this.viewButton.setAttribute('aria-label', thirdPerson ? 'Switch to first-person view' : 'Switch to third-person view');
+    this.viewButton.dataset.mode = this.viewMode;
+    document.body.dataset.viewMode = this.viewMode;
+  }
 
   private installMenuControls(): void {
     const sensitivity = Number(localStorage.getItem('rift:sensitivity') ?? '1');
@@ -613,6 +665,7 @@ export class Game {
       this.audio.setMuted(this.muted);
       this.hud.message(this.muted ? 'AUDIO MUTED' : 'AUDIO ONLINE');
     }
+    if (this.input.consumeViewToggle()) this.toggleViewMode();
     if (this.input.consumePause()) this.togglePause();
 
     if (!this.pausedForScreenshot) {
@@ -638,6 +691,18 @@ export class Game {
     this.updatePickupVisuals(delta, elapsed);
     this.updateEffects(this.pausedForScreenshot ? 0 : delta);
     this.playerJetpack.update(this.jetpackActive, this.pausedForScreenshot ? 0 : delta, elapsed, this.reducedMotion);
+    this.playerJetpack.root.visible = !this.isThirdPerson() && this.playerJetpack.root.visible;
+    this.playerAvatar.root.position.copy(this.playerPosition);
+    this.playerAvatar.setPose(this.yaw, this.moveInput.x);
+    this.playerAvatar.update(
+      this.pausedForScreenshot ? 0 : delta,
+      elapsed,
+      this.grounded,
+      Math.hypot(this.playerVelocity.x, this.playerVelocity.z),
+      this.input.isFireHeld(),
+      this.jetpackActive,
+      this.reducedMotion,
+    );
     this.audio.setJetpackActive(this.jetpackActive);
     this.updateCamera(delta);
     this.updateSpeedEffects(this.pausedForScreenshot ? 0 : delta, elapsed);
@@ -2599,12 +2664,156 @@ export class Game {
 
   private updateCamera(delta: number): void {
     const direction = this.viewDirection(this.cameraDirectionScratch);
+    this.playerAvatar.root.position.copy(this.playerPosition);
+    this.playerAvatar.setPose(this.yaw, this.moveInput.x);
     const eye = this.cameraEyeScratch.copy(this.playerPosition);
     eye.y += PLAYER_EYE;
-    this.camera.position.copy(eye);
+    this.thirdPersonAnchorScratch.copy(this.playerPosition);
+    this.thirdPersonAnchorScratch.y += THIRD_PERSON_CAMERA_TARGET_HEIGHT;
+    this.thirdPersonBackScratch.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    this.cameraRightScratch.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    this.thirdPersonDesiredScratch.copy(this.thirdPersonAnchorScratch)
+      .addScaledVector(this.thirdPersonBackScratch, THIRD_PERSON_CAMERA_DISTANCE)
+      .addScaledVector(this.cameraRightScratch, THIRD_PERSON_CAMERA_SHOULDER);
+    this.thirdPersonDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
+    this.thirdPersonPositionScratch.copy(this.thirdPersonDesiredScratch);
+    this.thirdPersonOffsetScratch.subVectors(this.thirdPersonDesiredScratch, this.thirdPersonAnchorScratch);
+    let thirdPersonHit = this.arena.segmentHitDetails(
+      this.thirdPersonAnchorScratch,
+      this.thirdPersonDesiredScratch,
+    );
+    const primaryFloor = this.arena.floorHeightAt(
+      this.thirdPersonDesiredScratch.x,
+      this.thirdPersonDesiredScratch.z,
+      Number.POSITIVE_INFINITY,
+    );
+    const primarySurfaceRise = primaryFloor !== null
+      && primaryFloor - this.playerPosition.y > 0.75;
+    let bestDistance = thirdPersonHit?.distance ?? this.thirdPersonOffsetScratch.length();
+    this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
+    this.thirdPersonAlternateDesiredScratch.copy(this.thirdPersonAnchorScratch)
+      .addScaledVector(this.thirdPersonBackScratch, THIRD_PERSON_CAMERA_DISTANCE)
+      .addScaledVector(this.cameraRightScratch, -THIRD_PERSON_CAMERA_SHOULDER * 1.35);
+    this.thirdPersonAlternateDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
+    this.thirdPersonAlternateOffsetScratch.subVectors(
+      this.thirdPersonAlternateDesiredScratch,
+      this.thirdPersonAnchorScratch,
+    );
+    let alternateHit = bestDistance < THIRD_PERSON_CAMERA_DISTANCE * 0.72
+      ? this.arena.segmentHitDetails(this.thirdPersonAnchorScratch, this.thirdPersonAlternateDesiredScratch)
+      : null;
+    let alternateDistance = alternateHit?.distance ?? this.thirdPersonAlternateOffsetScratch.length();
+    if (alternateDistance > bestDistance + 0.65) {
+      this.thirdPersonDesiredScratch.copy(this.thirdPersonAlternateDesiredScratch);
+      this.thirdPersonOffsetScratch.copy(this.thirdPersonAlternateOffsetScratch);
+      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
+      bestDistance = alternateDistance;
+      thirdPersonHit = alternateHit;
+    }
+    this.thirdPersonAlternateDesiredScratch.copy(this.thirdPersonAnchorScratch)
+      .addScaledVector(this.thirdPersonBackScratch, 0.55)
+      .addScaledVector(this.cameraRightScratch, THIRD_PERSON_CAMERA_SIDE_DISTANCE);
+    this.thirdPersonAlternateDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
+    this.thirdPersonAlternateOffsetScratch.subVectors(
+      this.thirdPersonAlternateDesiredScratch,
+      this.thirdPersonAnchorScratch,
+    );
+    const sideOrbitNeeded = primarySurfaceRise || bestDistance < THIRD_PERSON_CAMERA_DISTANCE * 0.88;
+    const alternateFloor = this.arena.floorHeightAt(
+      this.thirdPersonAlternateDesiredScratch.x,
+      this.thirdPersonAlternateDesiredScratch.z,
+      Number.POSITIVE_INFINITY,
+    );
+    const alternateSurfaceRise = alternateFloor !== null
+      && alternateFloor - this.playerPosition.y > 0.75;
+    alternateHit = sideOrbitNeeded
+      ? this.arena.segmentHitDetails(this.thirdPersonAnchorScratch, this.thirdPersonAlternateDesiredScratch)
+      : null;
+    alternateDistance = alternateHit?.distance ?? this.thirdPersonAlternateOffsetScratch.length();
+    if (alternateDistance > bestDistance + 0.65 && (!primarySurfaceRise || !alternateSurfaceRise)) {
+      this.thirdPersonDesiredScratch.copy(this.thirdPersonAlternateDesiredScratch);
+      this.thirdPersonOffsetScratch.copy(this.thirdPersonAlternateOffsetScratch);
+      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
+      bestDistance = alternateDistance;
+      thirdPersonHit = alternateHit;
+    }
+    this.thirdPersonAlternateDesiredScratch.copy(this.thirdPersonAnchorScratch)
+      .addScaledVector(this.thirdPersonBackScratch, 0.55)
+      .addScaledVector(this.cameraRightScratch, -THIRD_PERSON_CAMERA_SIDE_DISTANCE);
+    this.thirdPersonAlternateDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
+    this.thirdPersonAlternateOffsetScratch.subVectors(
+      this.thirdPersonAlternateDesiredScratch,
+      this.thirdPersonAnchorScratch,
+    );
+    const oppositeAlternateFloor = this.arena.floorHeightAt(
+      this.thirdPersonAlternateDesiredScratch.x,
+      this.thirdPersonAlternateDesiredScratch.z,
+      Number.POSITIVE_INFINITY,
+    );
+    const oppositeAlternateSurfaceRise = oppositeAlternateFloor !== null
+      && oppositeAlternateFloor - this.playerPosition.y > 0.75;
+    alternateHit = sideOrbitNeeded
+      ? this.arena.segmentHitDetails(this.thirdPersonAnchorScratch, this.thirdPersonAlternateDesiredScratch)
+      : null;
+    alternateDistance = alternateHit?.distance ?? this.thirdPersonAlternateOffsetScratch.length();
+    if (alternateDistance > bestDistance + 0.65 && (!primarySurfaceRise || !oppositeAlternateSurfaceRise)) {
+      this.thirdPersonDesiredScratch.copy(this.thirdPersonAlternateDesiredScratch);
+      this.thirdPersonOffsetScratch.copy(this.thirdPersonAlternateOffsetScratch);
+      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
+      bestDistance = alternateDistance;
+      thirdPersonHit = alternateHit;
+    }
+    if (primarySurfaceRise) {
+      // The camera ray can start on a launch surface and report the ramp's
+      // side wall as a hit even when a wide lateral orbit is outside it. Pick
+      // the lower side of the two lateral candidates and keep the full orbit
+      // so the character is not left behind the crest.
+      const useOppositeSide = oppositeAlternateFloor !== null
+        && (alternateFloor === null || oppositeAlternateFloor < alternateFloor);
+      this.thirdPersonDesiredScratch.copy(this.thirdPersonAnchorScratch)
+        .addScaledVector(this.thirdPersonBackScratch, 0.55)
+        .addScaledVector(this.cameraRightScratch, useOppositeSide ? -THIRD_PERSON_CAMERA_SIDE_DISTANCE : THIRD_PERSON_CAMERA_SIDE_DISTANCE);
+      this.thirdPersonDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
+      this.thirdPersonOffsetScratch.subVectors(
+        this.thirdPersonDesiredScratch,
+        this.thirdPersonAnchorScratch,
+      );
+      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
+      thirdPersonHit = null;
+    }
+    this.thirdPersonOffsetScratch.copy(this.thirdPersonBestOffsetScratch);
+    if (thirdPersonHit) {
+      const safeDistance = Math.max(0.8, thirdPersonHit.distance - THIRD_PERSON_CAMERA_CLEARANCE);
+      this.thirdPersonPositionScratch.copy(this.thirdPersonAnchorScratch)
+        .addScaledVector(this.thirdPersonOffsetScratch.normalize(), safeDistance);
+    } else {
+      this.thirdPersonPositionScratch.copy(this.thirdPersonAnchorScratch)
+        .add(this.thirdPersonOffsetScratch);
+    }
+    const floor = this.arena.floorHeightAt(
+      this.thirdPersonPositionScratch.x,
+      this.thirdPersonPositionScratch.z,
+      this.thirdPersonPositionScratch.y + 2,
+    );
+    if (floor !== null) this.thirdPersonPositionScratch.y = Math.max(
+      this.thirdPersonPositionScratch.y,
+      // On a steep ramp the authored surface can rise between the player and
+      // the rear camera. Keep the rig above that crest so the ramp cannot
+      // occlude the character silhouette.
+      floor + 0.9,
+    );
+    this.camera.position.copy(this.isThirdPerson() ? this.thirdPersonPositionScratch : eye);
     this.camera.rotation.order = 'YXZ';
     this.camera.rotation.y = this.yaw;
     this.camera.rotation.x = this.pitch;
+    if (this.isThirdPerson()) {
+      // Use a short aim target so vertical look input still tilts the camera,
+      // while the player stays in frame when collision avoidance orbits the
+      // rig to the side, including on the steep end ramps.
+      this.thirdPersonAimScratch.copy(this.thirdPersonAnchorScratch)
+        .addScaledVector(direction, 2.6);
+      this.camera.lookAt(this.thirdPersonAimScratch);
+    }
 
     if (!this.reducedMotion && this.trauma > 0) {
       const shake = this.trauma * this.trauma;
@@ -2631,7 +2840,11 @@ export class Game {
     if (this.scopeBlend < 0.001) this.scopeBlend = 0;
     const unscopedFov = Math.min(
       MAX_SPEED_FOV,
-      this.pausedForScreenshot ? this.screenshotCameraFov : BASE_GAME_FOV + speed * 0.24 + this.fovPunch,
+      this.pausedForScreenshot
+        ? this.screenshotCameraFov
+        : this.isThirdPerson()
+          ? THIRD_PERSON_FOV + speed * 0.1 + this.fovPunch * 0.45
+          : BASE_GAME_FOV + speed * 0.24 + this.fovPunch,
     );
     const baseFov = THREE.MathUtils.lerp(unscopedFov, 24, this.scopeBlend);
     this.fovPunch *= Math.exp(-delta / 0.2);
@@ -2711,11 +2924,17 @@ export class Game {
       this.weaponModel.rotation.set(0, Math.PI * 0.5, 0);
       this.weaponModel.scale.setScalar(1);
     }
+    if (this.isThirdPerson()) {
+      this.weaponTuck = 0;
+      this.weaponMuzzleOccluded = false;
+    }
     if (this.weaponVisual) updateWeaponViewModel(this.weaponVisual, this.elapsed, this.recoil, this.laserHeat, this.reducedMotion);
     this.forward.copy(direction);
     const grappleOrigin = this.grappleActive
-      ? this.grappleSocket.getWorldPosition(this.grappleOriginScratch)
-      : this.camera.position;
+      ? this.isThirdPerson()
+        ? this.grappleOriginScratch.copy(eye).addScaledVector(this.cameraRightScratch, -0.28)
+        : this.grappleSocket.getWorldPosition(this.grappleOriginScratch)
+      : this.isThirdPerson() ? eye : this.camera.position;
     this.weaponVfx.updateGrapple(grappleOrigin, this.grappleAnchor, this.grappleActive);
   }
 
@@ -3607,7 +3826,7 @@ export class Game {
         this.screenshotArenaTime = 0;
         this.screenshotCameraFov = BASE_GAME_FOV;
         this.screenshotLookTargetActive = false;
-        this.weaponModel.visible = true;
+        this.weaponModel.visible = !this.isThirdPerson();
         this.input.consumeJump();
         this.input.consumeDash();
         for (const bot of this.bots) bot.movementLocked = false;
@@ -3989,6 +4208,9 @@ export class Game {
         this.updateCamera(0);
         this.publishDiagnostics();
       },
+      toggleViewMode: () => {
+        this.toggleViewMode();
+      },
       sampleFloorHeight: (x: number, z: number, fromY = 8) => this.arena.floorHeightAt(x, z, fromY),
       getSpawnPoints: () => this.arena.spawnPoints.map((point) => ({ x: point.x, y: point.y, z: point.z })),
       sampleLineOfSight: (start, end) => this.arena.hasLineOfSight(
@@ -4151,6 +4373,7 @@ export class Game {
       targetScore: SCORE_LIMIT,
       complete: this.mode === 'complete',
       state: this.mode,
+      viewMode: this.viewMode,
       countdown: {
         remaining: this.countdownRemaining,
         cue: this.countdownCueIndex >= 0 ? MATCH_COUNTDOWN_CUES[this.countdownCueIndex] : null,
@@ -4264,6 +4487,22 @@ export class Game {
         ceilingContact: this.ceilingContactTimer > 0,
         yaw: this.yaw,
         pitch: this.pitch,
+        modelReady: this.playerAvatar.modelReady,
+        modelMeshCount: this.playerAvatar.modelMeshCount,
+        modelHeight: this.playerAvatar.modelHeight,
+        modelWidth: this.playerAvatar.modelWidth,
+        modelDepth: this.playerAvatar.modelDepth,
+        avatarVisible: this.playerAvatar.root.visible,
+      },
+      camera: {
+        distance: this.camera.position.distanceTo(this.playerPosition),
+        position: {
+          x: this.camera.position.x,
+          y: this.camera.position.y,
+          z: this.camera.position.z,
+        },
+        thirdPersonObstructed: this.isThirdPerson()
+          && this.camera.position.distanceTo(this.thirdPersonDesiredScratch) > 0.25,
       },
       speedEffects: {
         thresholdKmh: SPEED_EFFECT_START_KMH,

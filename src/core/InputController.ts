@@ -26,6 +26,7 @@ export class InputController {
   private weaponWheel = 0;
   private pauseQueued = false;
   private muteQueued = false;
+  private viewToggleQueued = false;
   private hasInteracted = false;
   private blurClearTimer = 0;
   private dragLookActive = false;
@@ -51,6 +52,7 @@ export class InputController {
     private readonly dashButton: HTMLElement,
     private readonly weaponButton: HTMLElement,
     private readonly zoomButton: HTMLElement,
+    private readonly viewButton: HTMLElement,
   ) {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -88,6 +90,7 @@ export class InputController {
     this.zoomButton.addEventListener('pointerdown', this.onZoomDown);
     this.zoomButton.addEventListener('pointerup', this.onZoomUp);
     this.zoomButton.addEventListener('pointercancel', this.onZoomUp);
+    this.viewButton.addEventListener('pointerdown', this.onViewDown);
   }
 
   readMovement(target: THREE.Vector2): THREE.Vector2 {
@@ -172,6 +175,12 @@ export class InputController {
   consumeMute(): boolean {
     const value = this.muteQueued;
     this.muteQueued = false;
+    return value;
+  }
+
+  consumeViewToggle(): boolean {
+    const value = this.viewToggleQueued;
+    this.viewToggleQueued = false;
     return value;
   }
 
@@ -269,6 +278,7 @@ export class InputController {
     this.zoomButton.removeEventListener('pointerdown', this.onZoomDown);
     this.zoomButton.removeEventListener('pointerup', this.onZoomUp);
     this.zoomButton.removeEventListener('pointercancel', this.onZoomUp);
+    this.viewButton.removeEventListener('pointerdown', this.onViewDown);
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -294,6 +304,7 @@ export class InputController {
     if (/^Digit[1-8]$/.test(event.code)) this.requestedWeapon = Number(event.code.slice(-1)) - 1;
     if (!event.repeat && (event.code === 'KeyP' || event.code === 'Escape')) this.pauseQueued = true;
     if (!event.repeat && event.code === 'KeyM') this.muteQueued = true;
+    if (!event.repeat && event.code === 'KeyV') this.viewToggleQueued = true;
 
   };
 
@@ -554,6 +565,12 @@ export class InputController {
 
   private readonly onZoomUp = (): void => {
     this.zoomButton.dataset.held = 'false';
+  };
+
+  private readonly onViewDown = (event: PointerEvent): void => {
+    event.preventDefault();
+    this.hasInteracted = true;
+    this.viewToggleQueued = true;
   };
 
   private updateStick(clientX: number, clientY: number): void {
