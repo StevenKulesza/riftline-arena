@@ -141,6 +141,11 @@ interface ThreeGameDiagnostics {
     grounded: boolean;
     skiing: boolean;
     jetpacking: boolean;
+    jetpackCharge: number;
+    jetpackLocked: boolean;
+    jetpackPhase: 'ready' | 'burning' | 'available' | 'cooldown' | 'recharging' | 'depleted';
+    jetpackRechargeDelay: number;
+    jetpackRestartIn: number;
     dashCooldown: number;
     wallContact: boolean;
     ceilingContact: boolean;
@@ -152,6 +157,7 @@ interface ThreeGameDiagnostics {
     modelWidth: number;
     modelDepth: number;
     avatarVisible: boolean;
+    firstPersonWeaponVisible: boolean;
   };
   camera: {
     distance: number;

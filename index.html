@@ -131,9 +131,17 @@
 
         <section class="mobility-cluster" aria-label="Movement telemetry">
           <span class="speed-chevron" aria-hidden="true"></span>
-          <div>
+          <div class="speed-readout">
             <span>Velocity</span>
             <strong id="speed-value">0</strong><small> KPH</small>
+          </div>
+          <i class="mobility-divider" aria-hidden="true"></i>
+          <div id="jetpack-readout" class="jetpack-readout" data-state="ready">
+            <span>Jetpack</span>
+            <div class="jetpack-reading"><strong id="jetpack-value">100</strong><small>%</small></div>
+            <div id="jetpack-track" class="jetpack-track" role="progressbar" aria-label="Jetpack charge" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" aria-valuetext="100 percent, ready">
+              <i id="jetpack-fill"></i>
+            </div>
           </div>
         </section>
 
@@ -244,7 +252,7 @@
             <div><kbd>LMB</kbd><span>Fire</span></div>
             <div><kbd>RMB / C</kbd><span>Weapon ability</span></div>
             <div><kbd>SHIFT</kbd><span>Ski</span></div>
-            <div><kbd>SPACE</kbd><span>Jump · hold for jetpack</span></div>
+            <div><kbd>SPACE</kbd><span>Jump · hold jet · land to recharge</span></div>
             <div><kbd>G</kbd><span>Hold to grapple</span></div>
             <div><kbd>CAPS / E</kbd><span>Dash</span></div>
             <div><kbd>1—8</kbd><span>Weapons</span></div>
@@ -409,7 +417,7 @@
           <span class="touch-caption">Move</span>
         </div>
         <div class="touch-actions">
-          <button id="jump-button" class="touch-button touch-button--jump" type="button"><span>Jump</span></button>
+          <button id="jump-button" class="touch-button touch-button--jump" type="button" data-jetpack-state="ready" aria-label="Jump; jetpack 100 percent, ready"><span>Jump</span><small id="touch-jetpack-value">100%</small></button>
           <button id="ski-button" class="touch-button touch-button--ski" type="button" data-held="false"><span>Ski</span></button>
           <button id="grapple-button" class="touch-button touch-button--grapple" type="button"><span>Hook</span></button>
           <button id="dash-button" class="touch-button touch-button--dash" type="button"><span>Dash</span></button>

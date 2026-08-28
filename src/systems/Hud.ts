@@ -25,6 +25,12 @@ export type HudWeatherState = {
   detail?: string;
 };
 
+export type HudJetpackState = {
+  /** Normalized 0–1 charge. */
+  charge: number;
+  phase: 'ready' | 'burning' | 'available' | 'cooldown' | 'recharging' | 'depleted';
+};
+
 export type HudState = {
   health: number;
   armor: number;
@@ -41,6 +47,7 @@ export type HudState = {
   fps: number;
   powerups: string[];
   railTimer: number;
+  jetpack: HudJetpackState;
   standings?: readonly HudStanding[];
   objective?: HudObjectiveState;
   style?: HudStyleState | null;
@@ -53,6 +60,12 @@ export class Hud {
   private readonly health = this.element('#health-value');
   private readonly armor = this.element('#armor-value');
   private readonly speed = this.element('#speed-value');
+  private readonly jetpackReadout = this.element('#jetpack-readout');
+  private readonly jetpackValue = this.element('#jetpack-value');
+  private readonly jetpackTrack = this.element('#jetpack-track');
+  private readonly jetpackFill = this.element('#jetpack-fill');
+  private readonly jumpButton = this.element<HTMLButtonElement>('#jump-button');
+  private readonly touchJetpackValue = this.element('#touch-jetpack-value');
   private readonly score = this.element('#score-value');
   private readonly botLead = this.element('#bot-lead-value');
   private readonly timer = this.element('#timer-value');
@@ -108,6 +121,7 @@ export class Hud {
     this.health.textContent = String(Math.max(0, Math.ceil(state.health)));
     this.armor.textContent = String(Math.max(0, Math.ceil(state.armor)));
     this.speed.textContent = `${Math.round(state.speed * 3.6)}`;
+    this.updateJetpack(state.jetpack);
     this.score.textContent = String(state.score);
     this.botLead.textContent = String(state.botLead);
     this.updateStandings(state);
@@ -127,6 +141,22 @@ export class Hud {
     this.health.parentElement?.classList.toggle('critical', state.health <= 30);
     this.health.closest<HTMLElement>('.vital')?.style.setProperty('--meter', `${Math.min(100, state.health)}%`);
     this.armor.closest<HTMLElement>('.vital')?.style.setProperty('--meter', `${Math.min(100, state.armor)}%`);
+  }
+
+  private updateJetpack(jetpack: HudJetpackState): void {
+    const charge = Number.isFinite(jetpack.charge) ? Math.max(0, Math.min(1, jetpack.charge)) : 0;
+    const percent = Math.round(charge * 100);
+    const phaseLabel = jetpack.phase.toUpperCase();
+    this.jetpackValue.textContent = String(percent);
+    this.jetpackReadout.dataset.state = jetpack.phase;
+    this.jetpackFill.style.setProperty('--jetpack-charge', `${percent}%`);
+    this.jetpackTrack.setAttribute('aria-valuenow', String(percent));
+    this.jetpackTrack.setAttribute('aria-valuetext', `${percent} percent, ${jetpack.phase}`);
+    this.touchJetpackValue.textContent = `${percent}%`;
+    this.jumpButton.dataset.jetpackState = jetpack.phase;
+    this.jumpButton.style.setProperty('--jetpack-charge', `${percent}%`);
+    this.jumpButton.setAttribute('aria-label', `Jump; jetpack ${percent} percent, ${jetpack.phase}`);
+    this.jumpButton.title = `Jetpack ${phaseLabel} · ${percent}%`;
   }
 
   hideStart(): void {

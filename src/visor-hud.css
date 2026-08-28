@@ -189,6 +189,104 @@
   }
 }
 
+/* Jetpack fuel is a movement decision, so keep it beside velocity and mirror
+   the same charge around the touch jump control. */
+.mobility-cluster {
+  min-width: 242px;
+}
+
+.speed-readout {
+  min-width: 66px;
+}
+
+.mobility-divider {
+  align-self: stretch;
+  width: 1px;
+  min-height: 30px;
+  background: linear-gradient(transparent, rgba(137, 255, 224, 0.38), transparent);
+}
+
+.jetpack-readout {
+  width: 86px;
+}
+
+.jetpack-reading {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.jetpack-reading strong {
+  color: #89ffe0;
+  font-size: 1rem;
+}
+
+.jetpack-reading small {
+  color: rgba(210, 251, 244, 0.62);
+  font-size: 0.56rem;
+}
+
+.jetpack-track {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  margin-top: 3px;
+  overflow: hidden;
+  background: rgba(118, 169, 165, 0.2);
+}
+
+#jetpack-fill {
+  position: absolute;
+  inset: 0;
+  width: var(--jetpack-charge, 100%);
+  background: linear-gradient(90deg, #52cfb6, #b8ffe8);
+  box-shadow: 0 0 8px rgba(137, 255, 224, 0.55);
+  transition: width 90ms linear, background-color 120ms linear;
+}
+
+.jetpack-readout[data-state="burning"] #jetpack-fill,
+.jetpack-readout[data-state="available"] #jetpack-fill {
+  background: linear-gradient(90deg, #f2ac43, #ffe1a0);
+  box-shadow: 0 0 9px rgba(255, 189, 80, 0.58);
+}
+
+.jetpack-readout[data-state="cooldown"] #jetpack-fill,
+.jetpack-readout[data-state="recharging"] #jetpack-fill {
+  background: linear-gradient(90deg, #ff5d92, #ffc268);
+}
+
+.jetpack-readout[data-state="depleted"] .jetpack-reading strong {
+  color: #ff6a98;
+}
+
+#jump-button {
+  --jetpack-charge: 100%;
+  position: relative;
+}
+
+#jump-button::after {
+  position: absolute;
+  z-index: -1;
+  inset: -5px;
+  border-radius: 50%;
+  background: conic-gradient(#89ffe0 var(--jetpack-charge), rgba(110, 151, 153, 0.2) 0);
+  content: "";
+  mask: radial-gradient(circle, transparent 66%, #000 68%);
+}
+
+#jump-button > small {
+  display: block;
+  margin-top: 1px;
+  font-size: 0.43rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+#jump-button[data-jetpack-state="depleted"]::after,
+#jump-button[data-jetpack-state="cooldown"]::after {
+  background: conic-gradient(#ff5d92 var(--jetpack-charge), rgba(130, 65, 88, 0.26) 0);
+}
+
 /* Compact tactical readout. Keep only the decisions a player must make while
    moving: match state, time, score, and the live Core callout. */
 .match-ribbon {

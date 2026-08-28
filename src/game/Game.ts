@@ -30,6 +30,7 @@ import { WeaponVfxSystem } from '../systems/WeaponVfxSystem';
 import { createSeededRandom } from '../utils/random';
 import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact } from './Arena';
 import { GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
+import { JetpackEnergy } from './JetpackEnergy';
 import { skiMomentumCurve, type SkiMomentumCurve } from './SkiMomentum';
 
 type GameMode = 'ready' | 'countdown' | 'running' | 'respawning' | 'paused' | 'complete';
@@ -139,6 +140,12 @@ export class Game {
   private readonly audio = new AudioSystem();
   private readonly hud = new Hud();
   private readonly weaponVfx: WeaponVfxSystem;
+  private readonly jetpackEnergy = new JetpackEnergy({
+    burnSeconds: MOVEMENT.jetpackBurnSeconds,
+    rechargeDelaySeconds: MOVEMENT.jetpackRechargeDelaySeconds,
+    rechargeSeconds: MOVEMENT.jetpackRechargeSeconds,
+    restartCharge: MOVEMENT.jetpackRestartCharge,
+  });
   private readonly playerJetpack = new JetpackRig({ firstPerson: true });
   private readonly playerAvatar = new PlayerAvatar();
   private readonly mobileQuality = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 600;
@@ -780,6 +787,7 @@ export class Game {
 
     if (this.mode !== 'running') {
       this.jetpackActive = false;
+      this.jetpackEnergy.update(0, false, this.grounded);
       this.weaponVfx.stopContinuousLaser();
       this.audio.setLaserBeamActive(false);
       this.updateProjectiles(delta);
@@ -898,7 +906,11 @@ export class Game {
       this.audio.jump();
     }
 
-    this.jetpackActive = !this.grounded && this.input.isJumpHeld();
+    this.jetpackActive = this.jetpackEnergy.update(
+      delta,
+      this.input.isJumpHeld(),
+      this.grounded,
+    ).active;
 
     if (this.grounded) {
       if (this.skiHeld) {
@@ -2672,6 +2684,10 @@ export class Game {
 
   private updateCamera(delta: number): void {
     const direction = this.viewDirection(this.cameraDirectionScratch);
+    // Reassert this every frame because weapon rebuilds and deterministic QA
+    // state changes may occur after the view toggle. The first-person model
+    // must never cover the local avatar in third-person flight.
+    this.weaponModel.visible = !this.isThirdPerson();
     this.playerAvatar.root.position.copy(this.playerPosition);
     this.playerAvatar.setPose(this.yaw, this.moveInput.x);
     const eye = this.cameraEyeScratch.copy(this.playerPosition);
@@ -2920,6 +2936,7 @@ export class Game {
 
   private updateHud(): void {
     const definition = WEAPONS[this.selectedWeapon];
+    const jetpackEnergy = this.jetpackEnergy.snapshot();
     const botLead = Math.max(...this.bots.map((bot) => bot.score));
     const coreDirectorState = this.coreDirector.snapshot();
     const coreLocation = coreDirectorState.active
@@ -2948,7 +2965,8 @@ export class Game {
     if (definition.id === 'laser' && this.laserHeat > 0.65) powerups.push(`HEAT ${Math.round(this.laserHeat * 100)}%`);
     powerups.push(this.grappleActive ? 'GRAPPLE ANCHORED' : 'GRAPPLE READY');
     powerups.push(this.dashCooldown > 0 ? `DASH ${this.dashCooldown.toFixed(1)}s` : 'DASH READY');
-    if (this.jetpackActive) powerups.push('JET THRUST');
+    if (this.jetpackActive) powerups.push(`JET THRUST ${Math.round(jetpackEnergy.charge * 100)}%`);
+    else if (jetpackEnergy.locked) powerups.push(`JET COOL ${jetpackEnergy.restartInSeconds.toFixed(1)}s`);
     powerups.push(this.grenadeCooldown > 0 ? `FRAG ${this.grenadeAmmo} · ${this.grenadeCooldown.toFixed(1)}s` : `FRAG GRENADES ${this.grenadeAmmo}`);
     const rail = this.pickups.find((pickup) => pickup.kind === 'rail');
     const style = this.styleSystem.snapshot();
@@ -2970,6 +2988,10 @@ export class Game {
       fps: this.fps,
       powerups,
       railTimer: rail?.active ? 0 : rail?.cooldown ?? 0,
+      jetpack: {
+        charge: jetpackEnergy.charge,
+        phase: jetpackEnergy.phase,
+      },
       standings: [
         { callsign: 'RIFT-01', score: this.score, isPlayer: true, isLeader: this.score === leadingScore },
         ...this.bots.map((bot) => ({
@@ -3171,6 +3193,7 @@ export class Game {
     this.playerPosition.copy(spawn);
     this.playerVelocity.set(0, 0, 0);
     this.jetpackActive = false;
+    this.jetpackEnergy.reset();
     this.dashBuffer = 0;
     this.dashCooldown = 0;
     this.dashMomentumTimer = 0;
@@ -3802,6 +3825,8 @@ export class Game {
       },
       setState: (name: string) => {
         this.cancelMatchCountdown();
+        this.jetpackActive = false;
+        this.jetpackEnergy.reset();
         this.pausedForScreenshot = false;
         this.screenshotArenaTime = 0;
         this.screenshotCameraFov = BASE_GAME_FOV;
@@ -4346,6 +4371,7 @@ export class Game {
     const info = this.renderer.info;
     const coreDirectorState = this.coreDirector.snapshot();
     const styleSnapshot = this.styleSystem.snapshot();
+    const jetpackEnergy = this.jetpackEnergy.snapshot();
     window.__THREE_GAME_DIAGNOSTICS__ = {
       frame: this.frame,
       elapsed: this.elapsed,
@@ -4462,6 +4488,11 @@ export class Game {
         grounded: this.grounded,
         skiing: this.skiHeld,
         jetpacking: this.jetpackActive,
+        jetpackCharge: jetpackEnergy.charge,
+        jetpackLocked: jetpackEnergy.locked,
+        jetpackPhase: jetpackEnergy.phase,
+        jetpackRechargeDelay: jetpackEnergy.rechargeDelayRemaining,
+        jetpackRestartIn: jetpackEnergy.restartInSeconds,
         dashCooldown: this.dashCooldown,
         wallContact: this.wallContactTimer > 0,
         ceilingContact: this.ceilingContactTimer > 0,
@@ -4473,6 +4504,7 @@ export class Game {
         modelWidth: this.playerAvatar.modelWidth,
         modelDepth: this.playerAvatar.modelDepth,
         avatarVisible: this.playerAvatar.root.visible,
+        firstPersonWeaponVisible: this.weaponModel.visible,
       },
       camera: {
         distance: this.camera.position.distanceTo(this.playerPosition),

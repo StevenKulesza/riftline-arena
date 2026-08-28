@@ -72,6 +72,8 @@ export class PlayerAvatar {
 
     const animation = firing
       ? 'shoot'
+      : jetpacking
+        ? 'idle_gun_pointing'
       : !grounded
         ? 'jump'
         : speed > 6

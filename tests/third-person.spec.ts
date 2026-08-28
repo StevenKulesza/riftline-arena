@@ -44,6 +44,7 @@ test('switches to a readable third-person player presentation', async ({ browser
   });
   const thirdPerson = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
   expect(thirdPerson?.player.avatarVisible).toBe(true);
+  expect(thirdPerson?.player.firstPersonWeaponVisible).toBe(false);
   expect(thirdPerson?.player.jetpacking).toBe(false);
   expect(thirdPerson?.camera.distance).toBeGreaterThan(2.5);
   expect(thirdPerson?.camera.distance).toBeLessThan(4.5);
