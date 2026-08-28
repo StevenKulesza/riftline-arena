@@ -197,28 +197,21 @@ export class PlayerAvatar {
     const accent = new THREE.MeshStandardMaterial({
       color: 0x43e8ff,
       emissive: 0x43e8ff,
-      emissiveIntensity: 0.85,
+      emissiveIntensity: 0.55,
       roughness: 0.3,
       metalness: 0.58,
     });
     this.materials.push(accent);
-    const beaconGeometry = new THREE.OctahedronGeometry(0.036, 1);
-    const ringGeometry = new THREE.TorusGeometry(0.18, 0.009, 6, 20);
-    this.geometries.push(beaconGeometry, ringGeometry);
+    const beaconGeometry = new THREE.BoxGeometry(0.12, 0.035, 0.025);
+    this.geometries.push(beaconGeometry);
     const beacons = new THREE.InstancedMesh(beaconGeometry, accent, 2);
     beacons.name = 'player-team-beacons';
     const matrix = new THREE.Matrix4();
     for (const [index, side] of [-1, 1].entries()) {
-      matrix.makeTranslation(side * 0.27, 1.38, 0.04);
+      matrix.makeTranslation(side * 0.2, 1.35, 0.04);
       beacons.setMatrixAt(index, matrix);
     }
     beacons.instanceMatrix.needsUpdate = true;
     this.root.add(beacons);
-
-    const identityRing = new THREE.Mesh(ringGeometry, accent);
-    identityRing.name = 'player-team-ring';
-    identityRing.position.set(0, 1.7, 0);
-    identityRing.rotation.x = Math.PI / 2;
-    this.root.add(identityRing);
   }
 }
