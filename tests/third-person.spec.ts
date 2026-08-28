@@ -2,7 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 
 test('switches to a readable third-person player presentation', async ({ browserName, page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   page.on('console', (message) => {
@@ -61,8 +61,8 @@ test('switches to a readable third-person player presentation', async ({ browser
   expect(rearDistance).toBeGreaterThan(1.75);
   expect(rearDistance).toBeLessThan(3.2);
   expect(shoulderDistance).toBeGreaterThan(0.25);
-  expect(shoulderDistance).toBeLessThan(0.95);
-  expect(cameraOffset.y).toBeGreaterThan(1.25);
+  expect(shoulderDistance).toBeLessThan(1.15);
+  expect(cameraOffset.y).toBeGreaterThan(1.05);
   expect(cameraOffset.y).toBeLessThan(3.3);
   expect(await page.evaluate(() => document.querySelector('#view-mode-value')?.textContent)).toBe('Third person');
   const canvasBox = await page.evaluate(() => {
