@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-type JetpackRigOptions = { color?: number; firstPerson?: boolean };
+type JetpackRigOptions = { color?: number; firstPerson?: boolean; thirdPersonPlayer?: boolean };
 
 /** Low-draw-call backpack and exhaust rig shared by the player and AI. */
 export class JetpackRig {
@@ -25,9 +25,13 @@ export class JetpackRig {
 
   constructor(options: JetpackRigOptions = {}) {
     const color = options.color ?? 0x43dfff;
-    this.nozzleSpread = options.firstPerson ? 0.82 : 0.23;
-    this.exhaustTravel = options.firstPerson ? 0.72 : 1.35;
-    this.root.name = options.firstPerson ? 'player-jetpack-vfx' : 'bot-jetpack-rig';
+    this.nozzleSpread = options.firstPerson ? 0.82 : options.thirdPersonPlayer ? 0.2 : 0.23;
+    this.exhaustTravel = options.firstPerson ? 0.72 : options.thirdPersonPlayer ? 0.78 : 1.35;
+    this.root.name = options.firstPerson
+      ? 'player-jetpack-vfx'
+      : options.thirdPersonPlayer
+        ? 'third-person-player-jetpack-rig'
+        : 'bot-jetpack-rig';
     this.root.userData.jetpackVfx = true;
     const dark = new THREE.MeshStandardMaterial({ color: 0x101820, roughness: 0.32, metalness: 0.86 });
     const accent = new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.55), emissive: color, emissiveIntensity: 1.35, roughness: 0.2, metalness: 0.68 });
@@ -71,7 +75,7 @@ export class JetpackRig {
     sparkGeometry.setAttribute('position', new THREE.BufferAttribute(this.sparkPositions, 3));
     this.geometries.push(sparkGeometry);
     for (let index = 0; index < 36; index += 1) this.sparkSeeds[index] = (index * 0.61803398875) % 1;
-    this.sparkMaterial = new THREE.PointsMaterial({ color: 0x9df4ff, size: options.firstPerson ? 0.055 : 0.075, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true });
+    this.sparkMaterial = new THREE.PointsMaterial({ color: 0x9df4ff, size: options.firstPerson ? 0.055 : options.thirdPersonPlayer ? 0.045 : 0.075, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true });
     this.materials.push(this.sparkMaterial);
     this.sparks = new THREE.Points(sparkGeometry, this.sparkMaterial);
     this.sparks.frustumCulled = false;
@@ -81,6 +85,9 @@ export class JetpackRig {
       this.root.position.set(0, -0.52, -0.5);
       this.root.scale.setScalar(0.58);
       pack.visible = false;
+    } else if (options.thirdPersonPlayer) {
+      this.root.position.set(0, 0.76, -0.2);
+      this.root.scale.setScalar(0.62);
     } else {
       this.root.position.set(0, 0.82, -0.3);
     }

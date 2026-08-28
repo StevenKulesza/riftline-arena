@@ -25,7 +25,7 @@ const playerAssetPromise: Promise<PlayerAsset> = new Promise((resolve, reject) =
  */
 export class PlayerAvatar {
   readonly root = new THREE.Group();
-  readonly jetpack = new JetpackRig({ color: 0x43e8ff });
+  readonly jetpack = new JetpackRig({ color: 0x43e8ff, thirdPersonPlayer: true });
   modelReady = false;
   modelMeshCount = 0;
   modelHeight = 0;
@@ -116,13 +116,16 @@ export class PlayerAvatar {
               material.emissive.set(0x000000);
               material.emissiveIntensity = 0;
             } else if (role.includes('black')) {
-              material.color.set(0x111820).lerp(teamColor, 0.1);
-              material.emissive.copy(teamColor).multiplyScalar(0.022);
-              material.emissiveIntensity = 0.18;
+              material.color.set(0x111820).lerp(teamColor, 0.035);
+              material.emissive.copy(teamColor).multiplyScalar(0.008);
+              material.emissiveIntensity = 0.08;
             } else {
-              material.color.set(0x40515d).lerp(teamColor, 0.28);
-              material.emissive.copy(teamColor).multiplyScalar(0.045);
-              material.emissiveIntensity = 0.34;
+              // Preserve the authored SWAT palette and texture contrast. Team
+              // color belongs on the visor and hardware; washing every suit
+              // material cyan makes the character read as a glowing blob.
+              material.color.multiplyScalar(0.82).lerp(new THREE.Color(0x53616a), 0.18);
+              material.emissive.copy(teamColor).multiplyScalar(0.01);
+              material.emissiveIntensity = 0.12;
             }
             material.roughness = Math.max(0.28, material.roughness * 0.84);
             material.metalness = Math.min(0.8, material.metalness + 0.12);

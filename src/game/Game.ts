@@ -93,7 +93,7 @@ const MAX_FIXED_STEPS_PER_FRAME = 4;
 const HUD_UPDATE_INTERVAL = 1 / 15;
 const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
 const BASE_GAME_FOV = 80;
-const THIRD_PERSON_FOV = 72;
+const THIRD_PERSON_FOV = 62;
 const MAX_SPEED_FOV = 98;
 const QUICKSENSE_FOG_DENSITY = 0.00074;
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
@@ -112,12 +112,19 @@ const WEAPON_VIEW_SAFE_REACH: Record<WeaponId, number> = {
   sniper: 3.18,
   rail: 2.28,
 };
-const THIRD_PERSON_CAMERA_DISTANCE = 4.65;
-const THIRD_PERSON_CAMERA_SHOULDER = 0.85;
-const THIRD_PERSON_CAMERA_HEIGHT = 1.72;
-const THIRD_PERSON_CAMERA_TARGET_HEIGHT = 1.12;
-const THIRD_PERSON_CAMERA_SIDE_DISTANCE = 12.8;
-const THIRD_PERSON_CAMERA_CLEARANCE = 0.18;
+const THIRD_PERSON_CAMERA_DISTANCE = 2.2;
+const THIRD_PERSON_CAMERA_PORTRAIT_DISTANCE_SCALE = 0.72;
+const THIRD_PERSON_CAMERA_PORTRAIT_DISTANCE_MAX = 0.45;
+const THIRD_PERSON_CAMERA_SHOULDER_MIN = 0.3;
+const THIRD_PERSON_CAMERA_SHOULDER_MAX = 0.82;
+const THIRD_PERSON_CAMERA_SHOULDER_ASPECT_SCALE = 0.46;
+const THIRD_PERSON_CAMERA_HEIGHT = 1.55;
+const THIRD_PERSON_CAMERA_TARGET_HEIGHT = 1.08;
+const THIRD_PERSON_CAMERA_CLEARANCE = 0.26;
+const THIRD_PERSON_CAMERA_GROUND_CLEARANCE = 0.42;
+const THIRD_PERSON_CAMERA_TERRAIN_HEADROOM = 1.25;
+const THIRD_PERSON_CAMERA_MAX_LIFT = 1.65;
+const THIRD_PERSON_CAMERA_TERRAIN_PROBES = 4;
 
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
@@ -290,10 +297,11 @@ export class Game {
   private readonly thirdPersonPositionScratch = new THREE.Vector3();
   private readonly thirdPersonOffsetScratch = new THREE.Vector3();
   private readonly thirdPersonAlternateDesiredScratch = new THREE.Vector3();
-  private readonly thirdPersonAlternateOffsetScratch = new THREE.Vector3();
-  private readonly thirdPersonBestOffsetScratch = new THREE.Vector3();
+  private readonly thirdPersonSmoothedOffset = new THREE.Vector3();
   private readonly thirdPersonBackScratch = new THREE.Vector3();
   private readonly thirdPersonAimScratch = new THREE.Vector3();
+  private thirdPersonCameraInitialized = false;
+  private thirdPersonCameraObstructed = false;
   private readonly screenshotLookTarget = new THREE.Vector3();
   private screenshotLookTargetActive = false;
   private readonly cameraLocalAimScratch = new THREE.Vector3();
@@ -2672,146 +2680,118 @@ export class Game {
     this.thirdPersonAnchorScratch.y += THIRD_PERSON_CAMERA_TARGET_HEIGHT;
     this.thirdPersonBackScratch.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.cameraRightScratch.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const shoulderOffset = THREE.MathUtils.clamp(
+      this.camera.aspect * THIRD_PERSON_CAMERA_SHOULDER_ASPECT_SCALE,
+      THIRD_PERSON_CAMERA_SHOULDER_MIN,
+      THIRD_PERSON_CAMERA_SHOULDER_MAX,
+    );
+    const cameraDistance = THIRD_PERSON_CAMERA_DISTANCE + THREE.MathUtils.clamp(
+      (1 - this.camera.aspect) * THIRD_PERSON_CAMERA_PORTRAIT_DISTANCE_SCALE,
+      0,
+      THIRD_PERSON_CAMERA_PORTRAIT_DISTANCE_MAX,
+    );
     this.thirdPersonDesiredScratch.copy(this.thirdPersonAnchorScratch)
-      .addScaledVector(this.thirdPersonBackScratch, THIRD_PERSON_CAMERA_DISTANCE)
-      .addScaledVector(this.cameraRightScratch, THIRD_PERSON_CAMERA_SHOULDER);
+      .addScaledVector(this.thirdPersonBackScratch, cameraDistance)
+      .addScaledVector(this.cameraRightScratch, shoulderOffset);
     this.thirdPersonDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
-    this.thirdPersonPositionScratch.copy(this.thirdPersonDesiredScratch);
+    // Keep the rig compact. Terrain is handled by lifting the rear camera just
+    // enough to clear the sampled path; it must never solve an obstruction by
+    // flinging the camera sideways and shrinking the player into the distance.
+    let terrainLift = 0;
+    for (let index = 1; index <= THIRD_PERSON_CAMERA_TERRAIN_PROBES; index += 1) {
+      const t = index / THIRD_PERSON_CAMERA_TERRAIN_PROBES;
+      this.thirdPersonAlternateDesiredScratch.lerpVectors(
+        this.thirdPersonAnchorScratch,
+        this.thirdPersonDesiredScratch,
+        t,
+      );
+      const pathFloor = this.arena.floorHeightAt(
+        this.thirdPersonAlternateDesiredScratch.x,
+        this.thirdPersonAlternateDesiredScratch.z,
+        this.thirdPersonAlternateDesiredScratch.y + THIRD_PERSON_CAMERA_TERRAIN_HEADROOM,
+      );
+      if (pathFloor === null) continue;
+      const requiredLift = pathFloor + THIRD_PERSON_CAMERA_GROUND_CLEARANCE
+        - this.thirdPersonAlternateDesiredScratch.y;
+      if (requiredLift > 0) terrainLift = Math.max(terrainLift, requiredLift / t);
+    }
+    terrainLift = Math.min(terrainLift, THIRD_PERSON_CAMERA_MAX_LIFT);
+    this.thirdPersonDesiredScratch.y += terrainLift;
     this.thirdPersonOffsetScratch.subVectors(this.thirdPersonDesiredScratch, this.thirdPersonAnchorScratch);
+    const desiredDistance = this.thirdPersonOffsetScratch.length();
     let thirdPersonHit = this.arena.segmentHitDetails(
       this.thirdPersonAnchorScratch,
       this.thirdPersonDesiredScratch,
     );
-    const primaryFloor = this.arena.floorHeightAt(
-      this.thirdPersonDesiredScratch.x,
-      this.thirdPersonDesiredScratch.z,
-      Number.POSITIVE_INFINITY,
-    );
-    const primarySurfaceRise = primaryFloor !== null
-      && primaryFloor - this.playerPosition.y > 0.75;
-    let bestDistance = thirdPersonHit?.distance ?? this.thirdPersonOffsetScratch.length();
-    this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
-    this.thirdPersonAlternateDesiredScratch.copy(this.thirdPersonAnchorScratch)
-      .addScaledVector(this.thirdPersonBackScratch, THIRD_PERSON_CAMERA_DISTANCE)
-      .addScaledVector(this.cameraRightScratch, -THIRD_PERSON_CAMERA_SHOULDER * 1.35);
-    this.thirdPersonAlternateDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
-    this.thirdPersonAlternateOffsetScratch.subVectors(
-      this.thirdPersonAlternateDesiredScratch,
-      this.thirdPersonAnchorScratch,
-    );
-    let alternateHit = bestDistance < THIRD_PERSON_CAMERA_DISTANCE * 0.72
-      ? this.arena.segmentHitDetails(this.thirdPersonAnchorScratch, this.thirdPersonAlternateDesiredScratch)
-      : null;
-    let alternateDistance = alternateHit?.distance ?? this.thirdPersonAlternateOffsetScratch.length();
-    if (alternateDistance > bestDistance + 0.65) {
-      this.thirdPersonDesiredScratch.copy(this.thirdPersonAlternateDesiredScratch);
-      this.thirdPersonOffsetScratch.copy(this.thirdPersonAlternateOffsetScratch);
-      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
-      bestDistance = alternateDistance;
-      thirdPersonHit = alternateHit;
-    }
-    this.thirdPersonAlternateDesiredScratch.copy(this.thirdPersonAnchorScratch)
-      .addScaledVector(this.thirdPersonBackScratch, 0.55)
-      .addScaledVector(this.cameraRightScratch, THIRD_PERSON_CAMERA_SIDE_DISTANCE);
-    this.thirdPersonAlternateDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
-    this.thirdPersonAlternateOffsetScratch.subVectors(
-      this.thirdPersonAlternateDesiredScratch,
-      this.thirdPersonAnchorScratch,
-    );
-    const sideOrbitNeeded = primarySurfaceRise || bestDistance < THIRD_PERSON_CAMERA_DISTANCE * 0.88;
-    const alternateFloor = this.arena.floorHeightAt(
-      this.thirdPersonAlternateDesiredScratch.x,
-      this.thirdPersonAlternateDesiredScratch.z,
-      Number.POSITIVE_INFINITY,
-    );
-    const alternateSurfaceRise = alternateFloor !== null
-      && alternateFloor - this.playerPosition.y > 0.75;
-    alternateHit = sideOrbitNeeded
-      ? this.arena.segmentHitDetails(this.thirdPersonAnchorScratch, this.thirdPersonAlternateDesiredScratch)
-      : null;
-    alternateDistance = alternateHit?.distance ?? this.thirdPersonAlternateOffsetScratch.length();
-    if (alternateDistance > bestDistance + 0.65 && (!primarySurfaceRise || !alternateSurfaceRise)) {
-      this.thirdPersonDesiredScratch.copy(this.thirdPersonAlternateDesiredScratch);
-      this.thirdPersonOffsetScratch.copy(this.thirdPersonAlternateOffsetScratch);
-      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
-      bestDistance = alternateDistance;
-      thirdPersonHit = alternateHit;
-    }
-    this.thirdPersonAlternateDesiredScratch.copy(this.thirdPersonAnchorScratch)
-      .addScaledVector(this.thirdPersonBackScratch, 0.55)
-      .addScaledVector(this.cameraRightScratch, -THIRD_PERSON_CAMERA_SIDE_DISTANCE);
-    this.thirdPersonAlternateDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
-    this.thirdPersonAlternateOffsetScratch.subVectors(
-      this.thirdPersonAlternateDesiredScratch,
-      this.thirdPersonAnchorScratch,
-    );
-    const oppositeAlternateFloor = this.arena.floorHeightAt(
-      this.thirdPersonAlternateDesiredScratch.x,
-      this.thirdPersonAlternateDesiredScratch.z,
-      Number.POSITIVE_INFINITY,
-    );
-    const oppositeAlternateSurfaceRise = oppositeAlternateFloor !== null
-      && oppositeAlternateFloor - this.playerPosition.y > 0.75;
-    alternateHit = sideOrbitNeeded
-      ? this.arena.segmentHitDetails(this.thirdPersonAnchorScratch, this.thirdPersonAlternateDesiredScratch)
-      : null;
-    alternateDistance = alternateHit?.distance ?? this.thirdPersonAlternateOffsetScratch.length();
-    if (alternateDistance > bestDistance + 0.65 && (!primarySurfaceRise || !oppositeAlternateSurfaceRise)) {
-      this.thirdPersonDesiredScratch.copy(this.thirdPersonAlternateDesiredScratch);
-      this.thirdPersonOffsetScratch.copy(this.thirdPersonAlternateOffsetScratch);
-      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
-      bestDistance = alternateDistance;
-      thirdPersonHit = alternateHit;
-    }
-    if (primarySurfaceRise) {
-      // The camera ray can start on a launch surface and report the ramp's
-      // side wall as a hit even when a wide lateral orbit is outside it. Pick
-      // the lower side of the two lateral candidates and keep the full orbit
-      // so the character is not left behind the crest.
-      const useOppositeSide = oppositeAlternateFloor !== null
-        && (alternateFloor === null || oppositeAlternateFloor < alternateFloor);
-      this.thirdPersonDesiredScratch.copy(this.thirdPersonAnchorScratch)
-        .addScaledVector(this.thirdPersonBackScratch, 0.55)
-        .addScaledVector(this.cameraRightScratch, useOppositeSide ? -THIRD_PERSON_CAMERA_SIDE_DISTANCE : THIRD_PERSON_CAMERA_SIDE_DISTANCE);
-      this.thirdPersonDesiredScratch.y = this.playerPosition.y + THIRD_PERSON_CAMERA_HEIGHT;
-      this.thirdPersonOffsetScratch.subVectors(
-        this.thirdPersonDesiredScratch,
-        this.thirdPersonAnchorScratch,
-      );
-      this.thirdPersonBestOffsetScratch.copy(this.thirdPersonOffsetScratch);
-      thirdPersonHit = null;
-    }
-    this.thirdPersonOffsetScratch.copy(this.thirdPersonBestOffsetScratch);
+    this.thirdPersonCameraObstructed = terrainLift > 0.01 || thirdPersonHit !== null;
     if (thirdPersonHit) {
-      const safeDistance = Math.max(0.8, thirdPersonHit.distance - THIRD_PERSON_CAMERA_CLEARANCE);
+      const safeDistance = THREE.MathUtils.clamp(
+        thirdPersonHit.distance - THIRD_PERSON_CAMERA_CLEARANCE,
+        0.95,
+        desiredDistance,
+      );
       this.thirdPersonPositionScratch.copy(this.thirdPersonAnchorScratch)
         .addScaledVector(this.thirdPersonOffsetScratch.normalize(), safeDistance);
     } else {
-      this.thirdPersonPositionScratch.copy(this.thirdPersonAnchorScratch)
-        .add(this.thirdPersonOffsetScratch);
+      this.thirdPersonPositionScratch.copy(this.thirdPersonDesiredScratch);
     }
-    const floor = this.arena.floorHeightAt(
+
+    this.thirdPersonOffsetScratch.subVectors(this.thirdPersonPositionScratch, this.thirdPersonAnchorScratch);
+    if (!this.thirdPersonCameraInitialized || delta <= 0) {
+      this.thirdPersonSmoothedOffset.copy(this.thirdPersonOffsetScratch);
+      this.thirdPersonCameraInitialized = true;
+    } else if (this.thirdPersonCameraObstructed) {
+      // Collision response is immediate so the camera never eases through a
+      // wall. Returning to the authored shoulder distance remains smooth.
+      this.thirdPersonSmoothedOffset.copy(this.thirdPersonOffsetScratch);
+    } else {
+      const smoothing = 1 - Math.exp(-delta * 12);
+      this.thirdPersonSmoothedOffset.lerp(this.thirdPersonOffsetScratch, smoothing);
+    }
+    this.thirdPersonPositionScratch.copy(this.thirdPersonAnchorScratch)
+      .add(this.thirdPersonSmoothedOffset);
+
+    // The smoothed orbit can sweep across a nearby corner during a fast turn.
+    // Re-clip the final segment so interpolation never introduces wall pops.
+    thirdPersonHit = this.arena.segmentHitDetails(
+      this.thirdPersonAnchorScratch,
+      this.thirdPersonPositionScratch,
+    );
+    if (thirdPersonHit) {
+      this.thirdPersonCameraObstructed = true;
+      this.thirdPersonOffsetScratch.subVectors(this.thirdPersonPositionScratch, this.thirdPersonAnchorScratch);
+      const safeDistance = THREE.MathUtils.clamp(
+        thirdPersonHit.distance - THIRD_PERSON_CAMERA_CLEARANCE,
+        0.95,
+        this.thirdPersonOffsetScratch.length(),
+      );
+      this.thirdPersonPositionScratch.copy(this.thirdPersonAnchorScratch)
+        .addScaledVector(this.thirdPersonOffsetScratch.normalize(), safeDistance);
+      this.thirdPersonSmoothedOffset.subVectors(this.thirdPersonPositionScratch, this.thirdPersonAnchorScratch);
+    }
+    const cameraFloor = this.arena.floorHeightAt(
       this.thirdPersonPositionScratch.x,
       this.thirdPersonPositionScratch.z,
-      this.thirdPersonPositionScratch.y + 2,
+      this.thirdPersonPositionScratch.y + THIRD_PERSON_CAMERA_TERRAIN_HEADROOM,
     );
-    if (floor !== null) this.thirdPersonPositionScratch.y = Math.max(
-      this.thirdPersonPositionScratch.y,
-      // On a steep ramp the authored surface can rise between the player and
-      // the rear camera. Keep the rig above that crest so the ramp cannot
-      // occlude the character silhouette.
-      floor + 0.9,
-    );
+    if (
+      cameraFloor !== null
+      && this.thirdPersonPositionScratch.y < cameraFloor + THIRD_PERSON_CAMERA_GROUND_CLEARANCE
+    ) {
+      this.thirdPersonCameraObstructed = true;
+      this.thirdPersonPositionScratch.y = cameraFloor + THIRD_PERSON_CAMERA_GROUND_CLEARANCE;
+      this.thirdPersonSmoothedOffset.subVectors(this.thirdPersonPositionScratch, this.thirdPersonAnchorScratch);
+    }
     this.camera.position.copy(this.isThirdPerson() ? this.thirdPersonPositionScratch : eye);
+    if (!this.isThirdPerson()) this.thirdPersonCameraInitialized = false;
     this.camera.rotation.order = 'YXZ';
     this.camera.rotation.y = this.yaw;
     this.camera.rotation.x = this.pitch;
     if (this.isThirdPerson()) {
-      // Use a short aim target so vertical look input still tilts the camera,
-      // while the player stays in frame when collision avoidance orbits the
-      // rig to the side, including on the steep end ramps.
+      // Look through the reticle into the arena. The shoulder offset keeps the
+      // avatar low-left while the center of the screen stays on the aim line.
       this.thirdPersonAimScratch.copy(this.thirdPersonAnchorScratch)
-        .addScaledVector(direction, 2.6);
+        .addScaledVector(direction, 4.8);
       this.camera.lookAt(this.thirdPersonAimScratch);
     }
 
@@ -4502,7 +4482,7 @@ export class Game {
           z: this.camera.position.z,
         },
         thirdPersonObstructed: this.isThirdPerson()
-          && this.camera.position.distanceTo(this.thirdPersonDesiredScratch) > 0.25,
+          && this.thirdPersonCameraObstructed,
       },
       speedEffects: {
         thresholdKmh: SPEED_EFFECT_START_KMH,

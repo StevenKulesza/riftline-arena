@@ -1,6 +1,7 @@
+import { writeFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 
-test('switches to a readable third-person player presentation', async ({ page }) => {
+test('switches to a readable third-person player presentation', async ({ browserName, page }) => {
   test.setTimeout(120_000);
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
@@ -43,8 +44,26 @@ test('switches to a readable third-person player presentation', async ({ page })
   });
   const thirdPerson = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
   expect(thirdPerson?.player.avatarVisible).toBe(true);
+  expect(thirdPerson?.player.jetpacking).toBe(false);
   expect(thirdPerson?.camera.distance).toBeGreaterThan(2.5);
+  expect(thirdPerson?.camera.distance).toBeLessThan(4.5);
   expect(thirdPerson?.player.modelHeight).toBeGreaterThan(1.5);
+  if (!thirdPerson) throw new Error('Missing third-person diagnostics');
+  const cameraOffset = {
+    x: thirdPerson.camera.position.x - thirdPerson.player.position.x,
+    y: thirdPerson.camera.position.y - thirdPerson.player.position.y,
+    z: thirdPerson.camera.position.z - thirdPerson.player.position.z,
+  };
+  const rearDistance = cameraOffset.x * Math.sin(thirdPerson.player.yaw)
+    + cameraOffset.z * Math.cos(thirdPerson.player.yaw);
+  const shoulderDistance = cameraOffset.x * Math.cos(thirdPerson.player.yaw)
+    - cameraOffset.z * Math.sin(thirdPerson.player.yaw);
+  expect(rearDistance).toBeGreaterThan(1.75);
+  expect(rearDistance).toBeLessThan(2.8);
+  expect(shoulderDistance).toBeGreaterThan(0.25);
+  expect(shoulderDistance).toBeLessThan(0.95);
+  expect(cameraOffset.y).toBeGreaterThan(1.25);
+  expect(cameraOffset.y).toBeLessThan(3.3);
   expect(await page.evaluate(() => document.querySelector('#view-mode-value')?.textContent)).toBe('Third person');
   const canvasBox = await page.evaluate(() => {
     const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas');
@@ -52,7 +71,24 @@ test('switches to a readable third-person player presentation', async ({ page })
     const rect = canvas.getBoundingClientRect();
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   });
-  if (canvasBox) await page.screenshot({ path: '/tmp/riftline-third-person.png', clip: canvasBox, animations: 'disabled' });
+  if (canvasBox) {
+    if (browserName === 'chromium') {
+      // CDP capture avoids Playwright's global font-ready wait. The game uses
+      // local fonts, but a slow software-WebGL frame should not turn a camera
+      // regression into a screenshot timeout.
+      const session = await page.context().newCDPSession(page);
+      const capture = await session.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: false,
+        clip: { ...canvasBox, scale: 1 },
+      });
+      await session.detach();
+      await writeFile('/tmp/riftline-third-person.png', Buffer.from(capture.data, 'base64'));
+    } else {
+      await page.screenshot({ path: '/tmp/riftline-third-person.png', clip: canvasBox, animations: 'disabled' });
+    }
+  }
 
   await pressViewButton();
   await page.waitForFunction(() => window.__THREE_GAME_DIAGNOSTICS__?.viewMode === 'first-person', null, {
