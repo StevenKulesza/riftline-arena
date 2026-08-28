@@ -75,10 +75,10 @@ export class PlayerAvatar {
       : !grounded
         ? 'jump'
         : speed > 6
-          ? 'run'
+          ? 'run_shoot'
           : speed > 0.8
             ? 'walk'
-            : 'idle_gun';
+            : 'idle_gun_pointing';
     this.playAnimation(animation, 0.13);
     this.mixer.update(delta);
   }
