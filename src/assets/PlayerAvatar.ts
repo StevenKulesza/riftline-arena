@@ -116,7 +116,7 @@ export class PlayerAvatar {
               material.emissive.set(0x000000);
               material.emissiveIntensity = 0;
             } else if (role.includes('black')) {
-              material.color.set(0x111820).lerp(teamColor, 0.035);
+              material.color.set(0x28353e).lerp(teamColor, 0.035);
               material.emissive.copy(teamColor).multiplyScalar(0.008);
               material.emissiveIntensity = 0.08;
             } else {
@@ -197,19 +197,19 @@ export class PlayerAvatar {
     const accent = new THREE.MeshStandardMaterial({
       color: 0x43e8ff,
       emissive: 0x43e8ff,
-      emissiveIntensity: 2.2,
-      roughness: 0.22,
+      emissiveIntensity: 0.85,
+      roughness: 0.3,
       metalness: 0.58,
     });
     this.materials.push(accent);
-    const beaconGeometry = new THREE.OctahedronGeometry(0.075, 1);
-    const ringGeometry = new THREE.TorusGeometry(0.42, 0.018, 6, 28);
+    const beaconGeometry = new THREE.OctahedronGeometry(0.036, 1);
+    const ringGeometry = new THREE.TorusGeometry(0.18, 0.009, 6, 20);
     this.geometries.push(beaconGeometry, ringGeometry);
     const beacons = new THREE.InstancedMesh(beaconGeometry, accent, 2);
     beacons.name = 'player-team-beacons';
     const matrix = new THREE.Matrix4();
     for (const [index, side] of [-1, 1].entries()) {
-      matrix.makeTranslation(side * 0.34, 1.46, 0.06);
+      matrix.makeTranslation(side * 0.27, 1.38, 0.04);
       beacons.setMatrixAt(index, matrix);
     }
     beacons.instanceMatrix.needsUpdate = true;
@@ -217,7 +217,7 @@ export class PlayerAvatar {
 
     const identityRing = new THREE.Mesh(ringGeometry, accent);
     identityRing.name = 'player-team-ring';
-    identityRing.position.set(0, 1.82, 0);
+    identityRing.position.set(0, 1.7, 0);
     identityRing.rotation.x = Math.PI / 2;
     this.root.add(identityRing);
   }

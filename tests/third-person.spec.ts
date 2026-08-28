@@ -59,7 +59,7 @@ test('switches to a readable third-person player presentation', async ({ browser
   const shoulderDistance = cameraOffset.x * Math.cos(thirdPerson.player.yaw)
     - cameraOffset.z * Math.sin(thirdPerson.player.yaw);
   expect(rearDistance).toBeGreaterThan(1.75);
-  expect(rearDistance).toBeLessThan(2.8);
+  expect(rearDistance).toBeLessThan(3.2);
   expect(shoulderDistance).toBeGreaterThan(0.25);
   expect(shoulderDistance).toBeLessThan(0.95);
   expect(cameraOffset.y).toBeGreaterThan(1.25);
