@@ -18,7 +18,7 @@ test('jetpack energy has finite burn and grounded recovery', () => {
   expect(firstBurn.charge).toBeCloseTo(1 - 1 / MOVEMENT.jetpackBurnSeconds, 6);
 
   const depleted = energy.update(2, true, false);
-  expect(depleted).toMatchObject({ charge: 0, active: true, locked: true, phase: 'burning' });
+  expect(depleted).toMatchObject({ charge: 0, active: false, locked: true, phase: 'depleted' });
   expect(energy.update(1 / 120, true, false)).toMatchObject({ charge: 0, active: false, locked: true, phase: 'depleted' });
 
   const airborneWait = energy.update(20, false, false);
@@ -71,6 +71,8 @@ test('live jump input drains, locks, and recharges the player jetpack', async ({
   }, groundPosition);
 
   await page.keyboard.down('Space');
+  await expect.poll(() => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.audio.unlocked)).toBe(true);
+  const audioBefore = await page.evaluate(() => ({ ...window.__THREE_GAME_DIAGNOSTICS__!.audio.playCounts }));
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.stepSimulation(0.5));
   const burning = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.player);
   expect(burning.jetpacking).toBe(true);
@@ -87,6 +89,17 @@ test('live jump input drains, locks, and recharges the player jetpack', async ({
   expect(exhausted.jetpackLocked).toBe(true);
   expect(exhausted.jetpackPhase).toBe('depleted');
   await expect.poll(() => page.locator('#jetpack-value').textContent()).toBe('0');
+  await expect(page.locator('#kill-feed > div', { hasText: 'JETPACK DEPLETED · LAND TO RECHARGE' })).toHaveCount(1);
+  const depletedAudioCount = await page.evaluate(() => (
+    window.__THREE_GAME_DIAGNOSTICS__!.audio.playCounts['movement.jetpack-cut'] ?? 0
+  ));
+  expect(depletedAudioCount - (audioBefore['movement.jetpack-cut'] ?? 0)).toBe(1);
+
+  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.stepSimulation(0.5));
+  expect(await page.evaluate(() => (
+    window.__THREE_GAME_DIAGNOSTICS__!.audio.playCounts['movement.jetpack-cut'] ?? 0
+  ))).toBe(depletedAudioCount);
+  await expect(page.locator('#kill-feed > div', { hasText: 'JETPACK DEPLETED · LAND TO RECHARGE' })).toHaveCount(1);
 
   await page.evaluate((ground) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
@@ -112,5 +125,16 @@ test('live jump input drains, locks, and recharges the player jetpack', async ({
   expect(recovered.jetpackCharge).toBeGreaterThan(MOVEMENT.jetpackRestartCharge);
   expect(recovered.jetpackLocked).toBe(false);
   expect(recovered.jetpackPhase).toBe('recharging');
+  await expect(page.locator('#kill-feed > div', { hasText: 'JETPACK READY' })).toHaveCount(1);
+  const readyAudioCount = await page.evaluate(() => (
+    window.__THREE_GAME_DIAGNOSTICS__!.audio.playCounts['movement.jetpack-ready'] ?? 0
+  ));
+  expect(readyAudioCount - (audioBefore['movement.jetpack-ready'] ?? 0)).toBe(1);
+
+  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.stepSimulation(0.5));
+  expect(await page.evaluate(() => (
+    window.__THREE_GAME_DIAGNOSTICS__!.audio.playCounts['movement.jetpack-ready'] ?? 0
+  ))).toBe(readyAudioCount);
+  await expect(page.locator('#kill-feed > div', { hasText: 'JETPACK READY' })).toHaveCount(1);
   expect(pageErrors, pageErrors.join('\n')).toEqual([]);
 });

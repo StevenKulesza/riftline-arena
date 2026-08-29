@@ -64,6 +64,7 @@ export class JetpackEnergy {
       this.rechargeDelayRemaining = this.tuning.rechargeDelaySeconds;
       if (this.charge <= 0) {
         this.charge = 0;
+        this.active = false;
         this.locked = true;
       }
       return this.snapshot();

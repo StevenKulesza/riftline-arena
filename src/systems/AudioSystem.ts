@@ -7,6 +7,7 @@ import {
   EMPTY_TRIGGER_POOL,
   EQUIP_AUDIO_POOLS,
   IMPACT_AUDIO_POOLS,
+  JETPACK_READY_AUDIO_POOL,
   MOVEMENT_AUDIO_POOLS,
   PICKUP_AUDIO_POOLS,
   PLAYER_AUDIO_POOLS,
@@ -272,6 +273,16 @@ export class AudioSystem {
       'movement:land',
       Math.min(0.5, impact / 28),
     );
+  }
+
+  jetpackDepleted(): void {
+    if (this.jetpackLoopVoice) this.stopVoice(this.jetpackLoopVoice);
+    this.jetpackActive = false;
+    this.playPool(MOVEMENT_AUDIO_POOLS.jetpackCut, 'movement:jetpack-depleted', -0.18);
+  }
+
+  jetpackReady(): void {
+    this.playPool(JETPACK_READY_AUDIO_POOL, 'movement:jetpack-ready', 0.42);
   }
 
   setJetpackActive(active: boolean): void {

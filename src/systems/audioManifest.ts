@@ -133,6 +133,19 @@ export const MOVEMENT_AUDIO_POOLS = {
   jetpackCut: pool('movement.jetpack-cut', versions('movement/jetpack-cut', 2), 'movement', 0.46, 0.08, 2, 0.018),
 } as const;
 
+// The ready chirp intentionally reuses the authored ignition transients at a
+// lighter level and higher pitch. Keep this virtual pool out of AUDIO_POOLS:
+// its source URLs are already loaded by jetpackIgnite, and listing them twice
+// would make loader completion accounting wait for duplicate assets.
+export const JETPACK_READY_AUDIO_POOL: AudioPool = {
+  ...MOVEMENT_AUDIO_POOLS.jetpackIgnite,
+  id: 'movement.jetpack-ready',
+  volume: 0.34,
+  cooldown: 0.2,
+  maxVoices: 1,
+  pitchVariance: 0.035,
+};
+
 export const AMBIENCE_AUDIO_POOL: AudioPool = {
   ...pool('music.arena-bed', [assetUrl('assets/audio/music/riftline-monsoon-bed-clean-v1.mp3')], 'music', 0.25, 0, 1, 0),
   loop: true,

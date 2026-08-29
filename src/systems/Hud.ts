@@ -280,6 +280,21 @@ export class Hud {
     window.setTimeout(() => line.remove(), 4200);
   }
 
+  pulseJetpack(feedback: 'depleted' | 'ready'): void {
+    const accent = feedback === 'depleted' ? '#ff5d92' : '#b8ffe8';
+    const glow = feedback === 'depleted'
+      ? 'drop-shadow(0 0 8px rgba(255, 93, 146, 0.85))'
+      : 'drop-shadow(0 0 9px rgba(137, 255, 224, 0.9))';
+    const keyframes: Keyframe[] = [
+      { transform: 'scale(1)', filter: 'none' },
+      { transform: 'scale(1.12)', color: accent, filter: glow, offset: 0.42 },
+      { transform: 'scale(1)', filter: 'none' },
+    ];
+    const options: KeyframeAnimationOptions = { duration: 420, easing: 'ease-out' };
+    this.jetpackReadout.animate(keyframes, options);
+    this.jumpButton.animate(keyframes, options);
+  }
+
   pulseObjective(): void {
     this.coreStatus.animate(
       [{ transform: 'scale(1)', color: '#bdefff' }, { transform: 'scale(1.12)', color: '#ffffff' }, { transform: 'scale(1)', color: '#bdefff' }],

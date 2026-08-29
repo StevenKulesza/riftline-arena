@@ -906,11 +906,22 @@ export class Game {
       this.audio.jump();
     }
 
-    this.jetpackActive = this.jetpackEnergy.update(
+    const previousJetpackEnergy = this.jetpackEnergy.snapshot();
+    const jetpackEnergy = this.jetpackEnergy.update(
       delta,
       this.input.isJumpHeld(),
       this.grounded,
-    ).active;
+    );
+    this.jetpackActive = jetpackEnergy.active;
+    if (!previousJetpackEnergy.locked && jetpackEnergy.locked) {
+      this.hud.message('JETPACK DEPLETED · LAND TO RECHARGE');
+      this.hud.pulseJetpack('depleted');
+      this.audio.jetpackDepleted();
+    } else if (previousJetpackEnergy.locked && !jetpackEnergy.locked) {
+      this.hud.message('JETPACK READY');
+      this.hud.pulseJetpack('ready');
+      this.audio.jetpackReady();
+    }
 
     if (this.grounded) {
       if (this.skiHeld) {
