@@ -103,9 +103,7 @@ export class Hud {
   private readonly respawnOverlay = this.element('#respawn-overlay');
   private readonly respawnText = this.element('#respawn-text');
   private readonly killFeed = this.element('#kill-feed');
-  private readonly overlayKicker = this.element('#overlay-kicker');
   private readonly overlayTagline = this.element('#overlay-tagline');
-  private readonly overlayNetwork = this.element('#overlay-network');
   private readonly overlayFootnote = this.element('#overlay-footnote');
   private readonly startButton = this.element<HTMLButtonElement>('#start-button');
   private readonly matchReport = this.element('#match-report');
@@ -215,19 +213,13 @@ export class Hud {
   showStart(mode: OverlayMode = 'ready'): void {
     this.startOverlay.dataset.mode = mode;
     if (mode === 'paused') {
-      this.overlayKicker.textContent = 'Match control // Paused';
       this.overlayTagline.innerHTML = 'Combat frame held <strong>· Resume when ready</strong>';
-      this.overlayNetwork.textContent = 'SESSION HELD';
       this.overlayFootnote.textContent = 'Pointer release is safe · audio is paused';
     } else if (mode === 'complete') {
-      this.overlayKicker.textContent = 'Match report // Session complete';
       this.overlayTagline.innerHTML = 'Arena result <strong>· Review the line</strong>';
-      this.overlayNetwork.textContent = 'SESSION CLOSED';
       this.overlayFootnote.textContent = 'Restart to redeploy · first to 20 or highest score at 06:00';
     } else {
-      this.overlayKicker.textContent = 'Arena FPS // Live combat';
       this.overlayTagline.innerHTML = 'WCA1 // Rift Sector <strong>· First to 20</strong>';
-      this.overlayNetwork.textContent = 'NETWORK READY';
       this.overlayFootnote.textContent = 'Six minute arena match · mouse captures on deploy';
     }
     this.startOverlay.classList.remove('hidden');

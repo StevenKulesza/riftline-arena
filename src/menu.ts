@@ -1,4 +1,5 @@
 import { assetUrl } from './assets/assetUrl';
+import './asciiLogo';
 
 type RiftSettings = {
   sensitivity: number;
@@ -21,12 +22,16 @@ const sensitivityValue = element<HTMLOutputElement>('#sensitivity-value');
 const audioOption = element<HTMLButtonElement>('#audio-option');
 const motionOption = element<HTMLButtonElement>('#motion-option');
 const fullscreenOption = element<HTMLButtonElement>('#fullscreen-option');
+const startButton = element<HTMLButtonElement>('#start-button');
 const mapChoices = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-map-choice]'));
 
-const menuMusic = new Audio(assetUrl('assets/audio/music/rift-menu-loop-clean-v1.mp3'));
+const MENU_MUSIC_VOLUME = 0.32;
+const menuMusic = new Audio(assetUrl('assets/audio/music/rift-menu-lofi-depth-v2.mp3'));
 menuMusic.loop = true;
 menuMusic.preload = 'auto';
-menuMusic.volume = 0.32;
+menuMusic.volume = MENU_MUSIC_VOLUME;
+let menuHandoffTimer = 0;
+let leavingMenu = false;
 
 const readSettings = (): RiftSettings => ({
   sensitivity: Number(localStorage.getItem('rift:sensitivity') ?? '1'),
@@ -42,7 +47,8 @@ const overlayIsVisible = (): boolean => Boolean(startOverlay && !startOverlay.cl
 
 const syncMusic = (): void => {
   const shouldPlay = overlayIsVisible() && !readSettings().muted && document.visibilityState === 'visible';
-  if (!shouldPlay) {
+  const allowBriefHandoff = leavingMenu && !readSettings().muted && document.visibilityState === 'visible';
+  if (!shouldPlay && !allowBriefHandoff) {
     menuMusic.pause();
     return;
   }
@@ -144,6 +150,18 @@ fullscreenOption?.addEventListener('click', () => {
   else void document.documentElement.requestFullscreen();
 });
 mapChoices.forEach((choice) => choice.addEventListener('click', () => selectMap(choice)));
+startButton?.addEventListener('click', () => {
+  // This is the most common first gesture. Let the browser unlock the menu
+  // track before Game hides the overlay, then give the ambience bed a moment
+  // to take over during the countdown.
+  leavingMenu = true;
+  void menuMusic.play().catch(() => undefined);
+  window.clearTimeout(menuHandoffTimer);
+  menuHandoffTimer = window.setTimeout(() => {
+    leavingMenu = false;
+    syncMusic();
+  }, 1_600);
+});
 document.addEventListener('fullscreenchange', refreshOptions);
 document.addEventListener('visibilitychange', syncMusic);
 document.addEventListener('pointerdown', syncMusic);
@@ -154,3 +172,4 @@ refreshOptions();
 syncMapChoice();
 emitSettings();
 if (startPanel) startPanel.dataset.menuView = 'play';
+syncMusic();

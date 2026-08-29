@@ -16,6 +16,7 @@ function parseArgs(argv) {
     url: 'http://127.0.0.1:5190',
     out: 'artifacts/canvas-inspection',
     mobile: false,
+    headed: false,
     wait: 750,
     state: null,
     seed: undefined,
@@ -26,12 +27,13 @@ function parseArgs(argv) {
     if (value === '--url') args.url = argv[++i];
     else if (value === '--out') args.out = argv[++i];
     else if (value === '--mobile') args.mobile = true;
+    else if (value === '--headed') args.headed = true;
     else if (value === '--wait') args.wait = Number(argv[++i]);
     else if (value === '--state') args.state = argv[++i];
     else if (value === '--seed') args.seed = Number(argv[++i]);
     else if (value === '-h' || value === '--help') {
       console.log(
-        'Usage: inspect-threejs-canvas.mjs [--url URL] [--out DIR] [--mobile] [--wait MS] [--state NAME] [--seed N]\n' +
+        'Usage: inspect-threejs-canvas.mjs [--url URL] [--out DIR] [--mobile] [--headed] [--wait MS] [--state NAME] [--seed N]\n' +
           '  --state/--seed drive window.__THREE_GAME_TEST_HOOKS__ (setState/seed) before capture\n' +
           '  so specific game states can be measured deterministically.',
       );
@@ -114,9 +116,13 @@ function computePixelMetrics(png) {
 // backend and silently falls back to SwiftShader (CPU). Every frame-time and FPS
 // number measured that way is software-rendered fiction. channel:'chromium' runs
 // the full Chromium build in new headless mode against the real GPU.
-async function launchBrowser() {
+async function launchBrowser(headed = false) {
   try {
-    return await chromium.launch({ channel: 'chromium' });
+    return await chromium.launch({
+      channel: 'chromium',
+      headless: !headed,
+      args: headed ? ['--ozone-platform=wayland'] : [],
+    });
   } catch {
     console.error(
       'warning: channel:"chromium" is unavailable, falling back to the bundled headless shell.\n' +
@@ -239,7 +245,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   await mkdir(args.out, { recursive: true });
 
-  const browser = await launchBrowser();
+  const browser = await launchBrowser(args.headed);
   const context = await browser.newContext(args.mobile
     ? { ...devices['iPhone 13'], userAgent: undefined }
     : { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });

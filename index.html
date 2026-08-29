@@ -219,10 +219,11 @@
           <div class="deploy-rail" aria-hidden="true">
             <span>RIFT // A-07</span>
             <i></i>
-            <span id="overlay-network">NETWORK READY</span>
           </div>
-          <p id="overlay-kicker" class="modal-kicker">Arena FPS // Live combat</p>
-          <h1 id="game-title"><img src="/assets/ui/rift-logo.png" alt="Rift" /></h1>
+          <h1 id="game-title" class="ascii-logo-lockup">
+            <canvas id="rift-ascii-logo" aria-hidden="true"></canvas>
+            <span class="visually-hidden">Rift</span>
+          </h1>
           <p id="overlay-tagline" class="arena-callout">WCA1 // Rift Sector <strong>· First to 20</strong></p>
           <nav class="menu-tabs" aria-label="Start menu sections">
             <button id="play-tab" class="menu-tab active" type="button" aria-selected="true">Play</button>
@@ -240,10 +241,40 @@
             <span><small>Frame</small>Light Assault</span>
           </div>
           <div class="map-picker" aria-label="Choose arena map">
-            <span class="map-picker-label">Arena map</span>
+            <span class="map-picker-label">Select arena</span>
             <div class="map-picker-options">
-              <button class="map-choice" type="button" data-map-choice="monsoon">Monsoon Divide</button>
-              <button class="map-choice" type="button" data-map-choice="quicksense">QuickSense</button>
+              <button class="map-choice" type="button" data-map-choice="monsoon">
+                <img
+                  class="map-choice-image"
+                  src="/assets/maps/monsoon-panorama-v3/east.jpg"
+                  alt=""
+                  decoding="async"
+                  draggable="false"
+                />
+                <span class="map-choice-shade" aria-hidden="true"></span>
+                <span class="map-choice-index" aria-hidden="true">01 // WCA1</span>
+                <span class="map-choice-copy">
+                  <strong>Monsoon Divide</strong>
+                  <small>Rift sector · Dynamic weather</small>
+                </span>
+                <span class="map-choice-state" aria-hidden="true">Selected</span>
+              </button>
+              <button class="map-choice" type="button" data-map-choice="quicksense">
+                <img
+                  class="map-choice-image"
+                  src="/assets/maps/quicksense-panorama-v1/quicksense-hero-v1.png"
+                  alt=""
+                  decoding="async"
+                  draggable="false"
+                />
+                <span class="map-choice-shade" aria-hidden="true"></span>
+                <span class="map-choice-index" aria-hidden="true">02 // QS</span>
+                <span class="map-choice-copy">
+                  <strong>QuickSense</strong>
+                  <small>Flow range · High-speed lines</small>
+                </span>
+                <span class="map-choice-state" aria-hidden="true">Selected</span>
+              </button>
             </div>
           </div>
           <div class="briefing-grid" aria-label="Controls">
@@ -266,7 +297,7 @@
             <span>Enter the rift</span>
             <i aria-hidden="true">›</i>
           </button>
-          <p id="overlay-footnote" class="modal-footnote">Six minute arena match · mouse captures on deploy</p>
+          <p id="overlay-footnote" class="modal-footnote" aria-live="polite">Six minute arena match · mouse captures on deploy</p>
           </div>
           <div id="intel-menu" class="menu-view dossier-view" aria-hidden="true">
             <section id="dossier-shell" class="dossier-shell" aria-labelledby="dossier-title" data-role="hunter">

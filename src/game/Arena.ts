@@ -91,6 +91,8 @@ export interface ArenaRuntime {
     height: number,
   ): CapsuleContact;
   floorHeightAt(x: number, z: number, fromY?: number): number | null;
+  /** Optional world-space support normal for props that must sit flush on ramps. */
+  surfaceNormalAt?(x: number, z: number, fromY?: number): THREE.Vector3 | null;
   segmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null;
   /** Player CCD query. Maps may exclude rideable tops and hitscan-only proxies. */
   movementSegmentHitDetails(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null;
@@ -396,21 +398,7 @@ export class Arena implements ArenaRuntime {
 
   static async load(): Promise<ArenaRuntime> {
     if (new URLSearchParams(window.location.search).get('map') === 'quicksense') {
-      let skyTexture: THREE.Texture | undefined;
-      try {
-        skyTexture = await new THREE.TextureLoader().loadAsync(
-          assetUrl('assets/maps/quicksense-panorama-v1/quicksense-equirect-v3.png'),
-        );
-        skyTexture.name = 'QuickSenseEquirectangularSkyV3';
-        skyTexture.colorSpace = THREE.SRGBColorSpace;
-        skyTexture.mapping = THREE.EquirectangularReflectionMapping;
-        skyTexture.minFilter = THREE.LinearFilter;
-        skyTexture.magFilter = THREE.LinearFilter;
-        skyTexture.generateMipmaps = false;
-      } catch (error) {
-        console.warn('QuickSense sky panorama unavailable; using procedural fallback.', error);
-      }
-      return new QuickSenseArena(mapSeedFromLocation(), skyTexture);
+      return QuickSenseArena.load(mapSeedFromLocation());
     }
     let skyTexture: THREE.Texture | undefined;
     try {
@@ -633,84 +621,99 @@ export class Arena implements ArenaRuntime {
     let grounded = false;
     let wallContact = false;
 
-    const floorSurface = this.floorSurfaceAt(
-      position.x,
-      position.z,
-      position.y + MOVEMENT.groundSnapDistance + 0.08,
+    // The ordinary snap range is intentionally short, but it must not become
+    // a one-way trap. A steep ramp transition or a lateral solid correction
+    // can put the feet farther below a valid floor than that snap range in one
+    // substep. Probe the part of the vertical span already occupied by the
+    // capsule so such penetration is recovered without selecting roofs above
+    // the player's head or surfaces on another level.
+    const floorRecoveryReach = Math.max(
+      MOVEMENT.groundSnapDistance + 0.08,
+      Math.min(
+        Math.max(0, height - MOVEMENT.collisionSkin),
+        MOVEMENT.groundSnapDistance + MOVEMENT.stepHeight + MOVEMENT.maxSubstepDistance + 0.08,
+      ),
     );
-    if (floorSurface !== null) {
-      this.contactNormal.copy(floorSurface.normal);
-      const gap = position.y - floorSurface.height;
-      const snap = velocity.y <= 0.5 && gap <= MOVEMENT.groundSnapDistance + 0.025;
-      if (gap <= 0.015 || snap) {
-        const correctionY = floorSurface.height - position.y;
-        position.y = floorSurface.height;
-        this.correction.y += correctionY;
-        const intoSurface = velocity.dot(this.contactNormal);
-        if (intoSurface < 0) velocity.addScaledVector(this.contactNormal, -intoSurface);
-        // Grounding depends on separation from the contact plane, not world-Y
-        // velocity. A skier climbing a ramp can have strong upward velocity
-        // while still being exactly tangent to its riding surface.
-        grounded = this.contactNormal.y >= MOVEMENT.maxSlopeCosine && intoSurface <= 1.2;
+    let floorFlags = this.resolveFloorContact(position, velocity, floorRecoveryReach);
+    if ((floorFlags & 1) !== 0) contacts += 1;
+    grounded = (floorFlags & 2) !== 0;
+
+    // A single endpoint recovery can be pushed from one overlapping proxy
+    // directly into its neighbour at structure corners. A second pass runs
+    // only after an actual solid correction and closes that corner escape
+    // without multiplying the normal open-terrain cost.
+    let solidCorrected = false;
+    for (let pass = 0; pass < 2; pass += 1) {
+      let passCorrected = false;
+      const capsuleMinimumY = position.y;
+      const capsuleMaximumY = position.y + height;
+      for (const collider of this.colliders) {
+        const box = collider.box;
+        if (capsuleMaximumY <= box.min.y || capsuleMinimumY >= box.max.y) continue;
+        const minimumX = box.min.x - radius;
+        const maximumX = box.max.x + radius;
+        const minimumZ = box.min.z - radius;
+        const maximumZ = box.max.z + radius;
+        if (position.x <= minimumX || position.x >= maximumX || position.z <= minimumZ || position.z >= maximumZ) continue;
+        let depth = position.x - minimumX;
+        let normalX = -1;
+        let normalZ = 0;
+        const positiveXDepth = maximumX - position.x;
+        if (positiveXDepth < depth) {
+          depth = positiveXDepth;
+          normalX = 1;
+        }
+        const negativeZDepth = position.z - minimumZ;
+        if (negativeZDepth < depth) {
+          depth = negativeZDepth;
+          normalX = 0;
+          normalZ = -1;
+        }
+        const positiveZDepth = maximumZ - position.z;
+        if (positiveZDepth < depth) {
+          depth = positiveZDepth;
+          normalX = 0;
+          normalZ = 1;
+        }
+        const correction = depth + 0.001;
+        position.x += normalX * correction;
+        position.z += normalZ * correction;
+        this.correction.x += normalX * correction;
+        this.correction.z += normalZ * correction;
+        const intoSurface = velocity.x * normalX + velocity.z * normalZ;
+        if (intoSurface < 0) {
+          velocity.x -= normalX * intoSurface;
+          velocity.z -= normalZ * intoSurface;
+        }
+        this.bestWallNormal.set(normalX, 0, normalZ);
+        wallContact = true;
+        passCorrected = true;
         contacts += 1;
       }
+
+      for (const ramp of this.rampSurfaces) {
+        const rampHit = this.rampSolidContact(ramp, position, radius, height);
+        if (!rampHit) continue;
+        position.addScaledVector(rampHit.normal, rampHit.depth + 0.001);
+        this.correction.addScaledVector(rampHit.normal, rampHit.depth + 0.001);
+        const intoSurface = velocity.dot(rampHit.normal);
+        if (intoSurface < 0) velocity.addScaledVector(rampHit.normal, -intoSurface);
+        this.bestWallNormal.copy(rampHit.normal);
+        wallContact = true;
+        passCorrected = true;
+        contacts += 1;
+      }
+      if (!passCorrected) break;
+      solidCorrected = true;
     }
 
-    const capsuleMinimumY = position.y;
-    const capsuleMaximumY = position.y + height;
-    for (const collider of this.colliders) {
-      const box = collider.box;
-      if (capsuleMaximumY <= box.min.y || capsuleMinimumY >= box.max.y) continue;
-      const minimumX = box.min.x - radius;
-      const maximumX = box.max.x + radius;
-      const minimumZ = box.min.z - radius;
-      const maximumZ = box.max.z + radius;
-      if (position.x <= minimumX || position.x >= maximumX || position.z <= minimumZ || position.z >= maximumZ) continue;
-      let depth = position.x - minimumX;
-      let normalX = -1;
-      let normalZ = 0;
-      const positiveXDepth = maximumX - position.x;
-      if (positiveXDepth < depth) {
-        depth = positiveXDepth;
-        normalX = 1;
-      }
-      const negativeZDepth = position.z - minimumZ;
-      if (negativeZDepth < depth) {
-        depth = negativeZDepth;
-        normalX = 0;
-        normalZ = -1;
-      }
-      const positiveZDepth = maximumZ - position.z;
-      if (positiveZDepth < depth) {
-        depth = positiveZDepth;
-        normalX = 0;
-        normalZ = 1;
-      }
-      const correction = depth + 0.001;
-      position.x += normalX * correction;
-      position.z += normalZ * correction;
-      this.correction.x += normalX * correction;
-      this.correction.z += normalZ * correction;
-      const intoSurface = velocity.x * normalX + velocity.z * normalZ;
-      if (intoSurface < 0) {
-        velocity.x -= normalX * intoSurface;
-        velocity.z -= normalZ * intoSurface;
-      }
-      this.bestWallNormal.set(normalX, 0, normalZ);
-      wallContact = true;
-      contacts += 1;
-    }
-
-    for (const ramp of this.rampSurfaces) {
-      const rampHit = this.rampSolidContact(ramp, position, radius, height);
-      if (!rampHit) continue;
-      position.addScaledVector(rampHit.normal, rampHit.depth + 0.001);
-      this.correction.addScaledVector(rampHit.normal, rampHit.depth + 0.001);
-      const intoSurface = velocity.dot(rampHit.normal);
-      if (intoSurface < 0) velocity.addScaledVector(rampHit.normal, -intoSurface);
-      this.bestWallNormal.copy(rampHit.normal);
-      wallContact = true;
-      contacts += 1;
+    // Lateral recovery changes which terrain/ramp/platform is under the feet.
+    // Re-seat against that final support instead of carrying the old height
+    // into the next frame (where it may already be outside the snap window).
+    if (solidCorrected) {
+      floorFlags = this.resolveFloorContact(position, velocity, floorRecoveryReach);
+      grounded = (floorFlags & 2) !== 0;
+      if ((floorFlags & 1) !== 0) contacts += 1;
     }
 
     const result = this.capsuleContacts[this.capsuleContactCursor];
@@ -722,6 +725,34 @@ export class Arena implements ArenaRuntime {
     result.correction.copy(this.correction);
     result.contacts = contacts;
     return result;
+  }
+
+  /** Bit 0 = floor contact, bit 1 = walkable grounded contact. */
+  private resolveFloorContact(
+    position: THREE.Vector3,
+    velocity: THREE.Vector3,
+    recoveryReach: number,
+  ): number {
+    const floorSurface = this.floorSurfaceAt(
+      position.x,
+      position.z,
+      position.y + recoveryReach,
+    );
+    if (floorSurface === null) return 0;
+    this.contactNormal.copy(floorSurface.normal);
+    const gap = position.y - floorSurface.height;
+    const snap = velocity.y <= 0.5 && gap <= MOVEMENT.groundSnapDistance + 0.025;
+    if (gap > 0.015 && !snap) return 0;
+    const correctionY = floorSurface.height - position.y;
+    position.y = floorSurface.height;
+    this.correction.y += correctionY;
+    const intoSurface = velocity.dot(this.contactNormal);
+    if (intoSurface < 0) velocity.addScaledVector(this.contactNormal, -intoSurface);
+    // Grounding depends on separation from the contact plane, not world-Y
+    // velocity. A skier climbing a ramp can have strong upward velocity while
+    // remaining exactly tangent to the riding surface.
+    const grounded = this.contactNormal.y >= MOVEMENT.maxSlopeCosine && intoSurface <= 1.2;
+    return grounded ? 3 : 1;
   }
 
   private rampSolidContact(
@@ -747,7 +778,7 @@ export class Arena implements ArenaRuntime {
     const u = THREE.MathUtils.clamp(longitudinal / ramp.spec.length, 0, 1);
     const surfaceY = ramp.spec.origin.y
       + ramp.spec.rise * Math.pow(u, ramp.spec.curveExponent ?? 1.8);
-    const bottomY = ramp.spec.origin.y - (ramp.spec.skirtDepth ?? 0.8);
+    const bottomY = ramp.spec.origin.y - (ramp.spec.collisionSkirtDepth ?? ramp.spec.skirtDepth ?? 0.8);
     const capsuleTop = position.y + height;
     if (capsuleTop <= bottomY + 0.01 || position.y >= surfaceY - 0.015) return null;
 

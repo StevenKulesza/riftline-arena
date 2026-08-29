@@ -18,10 +18,13 @@
     "map:materials": "node scripts/import-wca1-materials.mjs",
     "verify:visual": "playwright test tests/visual.spec.ts",
     "inspect:canvas": "node scripts/inspect-threejs-canvas.mjs",
+    "capture:structures": "node scripts/capture-ground-structures.mjs",
+    "capture:outpost": "node scripts/capture-outpost-tower.mjs",
     "profile:perf": "npm run build && node scripts/profile-performance.mjs"
   },
   "dependencies": {
     "lil-gui": "^0.21.0",
+    "meshoptimizer": "^1.2.0",
     "three": "^0.184.0",
     "three-mesh-bvh": "^0.9.8"
   },

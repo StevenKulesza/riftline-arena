@@ -43,6 +43,33 @@ async function openPhysicsMap(page: Page): Promise<{ consoleErrors: string[]; pa
   return { consoleErrors, pageErrors };
 }
 
+async function openNamedPhysicsMap(
+  page: Page,
+  map: 'monsoon' | 'quicksense',
+): Promise<{ consoleErrors: string[]; pageErrors: string[] }> {
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const mapQuery = map === 'quicksense' ? '&map=quicksense' : '';
+  await page.goto(`/?qa=physics&mapSeed=${MAP_SEED}${mapQuery}`);
+  await page.waitForFunction(() => (
+    Boolean(window.__THREE_GAME_TEST_HOOKS__)
+    && Boolean(window.__THREE_GAME_DIAGNOSTICS__?.map.ready)
+    && (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 5
+  ));
+  await page.evaluate((seed) => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    hooks.seed(seed);
+    hooks.setReducedMotion(true);
+    hooks.hideDebugUi(true);
+    hooks.setPausedForScreenshot(true);
+  }, MAP_SEED);
+  return { consoleErrors, pageErrors };
+}
+
 async function floorHeight(page: Page, x: number, z: number, fromY = Number.POSITIVE_INFINITY): Promise<number> {
   const floor = await page.evaluate(({ x: px, z: pz, fromY: rayY }) => (
     window.__THREE_GAME_TEST_HOOKS__?.sampleFloorHeight(px, pz, rayY) ?? null
@@ -168,4 +195,89 @@ test('swept capsule contains dash-speed motion at structure walls, ceilings, ram
   });
   expect(errors.consoleErrors).toEqual([]);
   expect(errors.pageErrors).toEqual([]);
+});
+
+test('capsule feet recover above supporting floors and remain seated while skiing', async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  test.setTimeout(240_000);
+  const report: Record<string, unknown> = {};
+
+  for (const scenario of [
+    { map: 'monsoon' as const, x: -100, z: -60 },
+    { map: 'quicksense' as const, x: -122, z: 102 },
+  ]) {
+    const errors = await openNamedPhysicsMap(page, scenario.map);
+    const recovery = await page.evaluate(({ x, z }) => {
+      const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+      const floor = hooks.sampleFloorHeight(x, z, 240);
+      if (floor === null) throw new Error(`Missing recovery floor at (${x}, ${z}).`);
+      // Model the failure state produced when a steep ramp transition or a
+      // lateral wall correction moves the capsule beyond the ordinary ground
+      // snap window. Recovery must be immediate; gravity may never continue
+      // pulling the player's feet through a known supporting surface.
+      hooks.setPlayerKinematics(
+        { x, y: floor - 0.65, z },
+        { x: 0, y: -5, z: 0 },
+      );
+      hooks.stepSimulation(0.05);
+      const player = window.__THREE_GAME_DIAGNOSTICS__!.player;
+      const supportingFloor = hooks.sampleFloorHeight(
+        player.position.x,
+        player.position.z,
+        player.position.y + 1.2,
+      );
+      return { floor, supportingFloor, player };
+    }, scenario);
+
+    report[`${scenario.map}Recovery`] = recovery;
+    expect(recovery.supportingFloor, `${scenario.map} recovery must retain a valid supporting floor`).not.toBeNull();
+    expect(
+      recovery.player.position.y,
+      `${scenario.map} player feet must never remain below the recovered floor`,
+    ).toBeGreaterThanOrEqual((recovery.supportingFloor ?? 0) - 0.003);
+    expect(recovery.player.grounded, `${scenario.map} recovery must restore grounded state`).toBe(true);
+    expect(errors.consoleErrors).toEqual([]);
+    expect(errors.pageErrors).toEqual([]);
+  }
+
+  await page.goto(`/?qa=physics&map=quicksense&mapSeed=${MAP_SEED}`);
+  await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
+  const routeFloor = await floorHeight(page, -122, 102, 240);
+  await page.evaluate(({ floor }) => {
+    window.__THREE_GAME_TEST_HOOKS__!.setPlayerKinematics(
+      { x: -122, y: floor, z: 102 },
+      { x: -6.64, y: 0, z: -12.34 },
+    );
+  }, { floor: routeFloor });
+  await page.keyboard.down('ShiftLeft');
+  const skiTelemetry = await page.evaluate(({ fixedStep, playerHeight }) => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    let minimumFootClearance = Number.POSITIVE_INFINITY;
+    let groundedSamples = 0;
+    for (let index = 0; index < 180; index += 1) {
+      hooks.stepSimulation(fixedStep);
+      const player = window.__THREE_GAME_DIAGNOSTICS__!.player;
+      const floor = hooks.sampleFloorHeight(
+        player.position.x,
+        player.position.z,
+        player.position.y + playerHeight,
+      );
+      if (floor !== null) minimumFootClearance = Math.min(minimumFootClearance, player.position.y - floor);
+      if (player.grounded) groundedSamples += 1;
+    }
+    return {
+      minimumFootClearance,
+      groundedSamples,
+      player: window.__THREE_GAME_DIAGNOSTICS__!.player,
+    };
+  }, { fixedStep: MOVEMENT.fixedStep, playerHeight: MOVEMENT.playerHeight });
+  await page.keyboard.up('ShiftLeft');
+  report.quicksenseSki = skiTelemetry;
+  expect(skiTelemetry.minimumFootClearance, 'skiing feet must stay on or above every sampled floor').toBeGreaterThanOrEqual(-0.003);
+  expect(skiTelemetry.groundedSamples, 'the downhill route must retain meaningful ground contact').toBeGreaterThan(90);
+
+  await testInfo.attach('floor-invariant-telemetry', {
+    body: JSON.stringify(report, null, 2),
+    contentType: 'application/json',
+  });
 });

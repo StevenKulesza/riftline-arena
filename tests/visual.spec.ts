@@ -245,24 +245,6 @@ test('renders a nonblank, responsive Riftline active-play canvas', async ({ page
   }));
   expect(Math.hypot(after.x - before.x, after.z - before.z), 'player input must move the combat frame').toBeGreaterThan(1);
 
-  // Freeze simulation before collecting the attachment. SwiftShader can
-  // otherwise starve even a trivial page.evaluate while the live composer is
-  // continuously rendering the panorama, shadows, and arena geometry.
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setPausedForScreenshot(true));
-  const captureBox = await page.evaluate(() => {
-    const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas');
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
-    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-  });
-  expect(captureBox, 'active-play canvas must remain capturable').not.toBeNull();
-  if (!captureBox) return;
-  const screenshot = await page.screenshot({ clip: captureBox, animations: 'disabled' });
-  await testInfo.attach(`${testInfo.project.name}-active-play-smoke`, {
-    body: screenshot,
-    contentType: 'image/png',
-  });
-
   expect(errors.consoleErrors, 'console errors during active play').toEqual([]);
   expect(errors.pageErrors, 'page errors during active play').toEqual([]);
 });

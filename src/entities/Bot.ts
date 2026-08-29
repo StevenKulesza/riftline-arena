@@ -1,7 +1,6 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { assetUrl } from '../assets/assetUrl';
+import { loadCharacterAsset } from '../assets/CharacterAsset';
 import { JetpackRig } from '../assets/JetpackRig';
 import type { ArenaRuntime } from '../game/Arena';
 import { GRAPPLE, MOVEMENT, POWERUP, type WeaponId } from '../game/config';
@@ -17,9 +16,6 @@ import {
   type BotVisualIdentity,
 } from './BotArchetypes';
 
-type BotAsset = { scene: THREE.Group; animations: THREE.AnimationClip[] };
-
-const BOT_MODEL_URL = assetUrl('assets/models/quaternius-swat.glb');
 // The authored SWAT mesh measures roughly 1.84 x 0.88 world units. It needs a
 // dedicated capsule; the smaller qfusion player hull lets shoulders and the
 // head visibly enter walls and ceilings even when physics resolves correctly.
@@ -52,15 +48,6 @@ const MID_WEAPONS = ['disc', 'rocket', 'laser', 'plasma', 'machine'] as const;
 const FAR_WEAPONS = ['sniper', 'rail', 'machine'] as const;
 const EXTREME_WEAPONS = ['rail', 'sniper', 'machine'] as const;
 const BLIND_WEAPONS = ['rocket', 'machine'] as const;
-const botAssetPromise: Promise<BotAsset> = new Promise((resolve, reject) => {
-  new GLTFLoader().load(
-    BOT_MODEL_URL,
-    (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations }),
-    undefined,
-    reject,
-  );
-});
-
 export class Bot {
   readonly group = new THREE.Group();
   readonly velocity = new THREE.Vector3();
@@ -69,6 +56,7 @@ export class Bot {
   readonly displayName: string;
   readonly visualIdentity: BotVisualIdentity;
   readonly archetypeTuning: BotArchetypeTuning;
+  readonly ready: Promise<void>;
   health = 100;
   armor = 50;
   alive = true;
@@ -206,7 +194,7 @@ export class Bot {
     this.createModel(color);
     this.jetpackRig = new JetpackRig({ color });
     this.group.add(this.jetpackRig.root);
-    void this.installAuthoredModel(color);
+    this.ready = this.installAuthoredModel(color);
     this.respawn(spawn);
   }
 
@@ -751,7 +739,7 @@ export class Bot {
 
   private async installAuthoredModel(color: number): Promise<void> {
     try {
-      const asset = await botAssetPromise;
+      const asset = await loadCharacterAsset();
       if (this.disposed) return;
 
       // The procedural silhouette is created synchronously so the bot has a

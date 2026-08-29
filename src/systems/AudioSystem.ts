@@ -57,7 +57,7 @@ const GROUP_VOLUMES: Record<AudioGroup, number> = {
   pickups: 0.7,
   movement: 0.48,
   voice: 0.76,
-  music: 0.09,
+  music: 0.22,
   ambience: 0.5,
 };
 
@@ -132,10 +132,17 @@ export class AudioSystem {
     const context = this.context;
     if (!context) return;
     await Promise.all(
-      Object.values(COUNTDOWN_AUDIO_POOLS).flatMap((pool) => pool.urls).map(
+      [
+        ...Object.values(COUNTDOWN_AUDIO_POOLS).flatMap((pool) => pool.urls),
+        ...AMBIENCE_AUDIO_POOLS.flatMap((pool) => pool.urls),
+      ].map(
         (url) => this.loadAsset(context, url),
       ),
     );
+    // The menu track hands off as soon as the countdown starts. Prioritize the
+    // arena bed so the player never enters a silent match while the combat bank
+    // is still decoding in the background.
+    if (this.unlocked) this.startAmbience();
     // The match countdown is the safe loading window. Starting the full bank
     // directly from the first fire key made combat and decoding contend for
     // the same browser task queue in direct-entry/test states.

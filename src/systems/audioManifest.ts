@@ -147,7 +147,7 @@ export const JETPACK_READY_AUDIO_POOL: AudioPool = {
 };
 
 export const AMBIENCE_AUDIO_POOL: AudioPool = {
-  ...pool('music.arena-bed', [assetUrl('assets/audio/music/riftline-monsoon-bed-clean-v1.mp3')], 'music', 0.25, 0, 1, 0),
+  ...pool('music.arena-bed', [assetUrl('assets/audio/music/riftline-monsoon-bed-clean-v1.mp3')], 'music', 0.42, 0, 1, 0),
   loop: true,
 };
 

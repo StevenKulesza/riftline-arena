@@ -1,22 +1,10 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { assetUrl } from './assetUrl';
+import { loadCharacterAsset } from './CharacterAsset';
 import { JetpackRig } from './JetpackRig';
 
-type PlayerAsset = { scene: THREE.Group; animations: THREE.AnimationClip[] };
-
-const PLAYER_MODEL_URL = assetUrl('assets/models/quaternius-swat.glb');
 const PLAYER_MODEL_HEIGHT = 1.78;
 const SOURCE_MODEL_HEIGHT = 1.85245;
-const playerAssetPromise: Promise<PlayerAsset> = new Promise((resolve, reject) => {
-  new GLTFLoader().load(
-    PLAYER_MODEL_URL,
-    (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations }),
-    undefined,
-    reject,
-  );
-});
 
 /**
  * Third-person presentation for the local player. Gameplay owns position and
@@ -26,6 +14,7 @@ const playerAssetPromise: Promise<PlayerAsset> = new Promise((resolve, reject) =
 export class PlayerAvatar {
   readonly root = new THREE.Group();
   readonly jetpack = new JetpackRig({ color: 0x43e8ff, thirdPersonPlayer: true });
+  readonly ready: Promise<void>;
   modelReady = false;
   modelMeshCount = 0;
   modelHeight = 0;
@@ -43,7 +32,7 @@ export class PlayerAvatar {
     this.root.name = 'rift-player-avatar';
     this.root.visible = false;
     this.root.add(this.jetpack.root);
-    void this.installAuthoredModel();
+    this.ready = this.installAuthoredModel();
   }
 
   setVisible(visible: boolean): void {
@@ -95,7 +84,7 @@ export class PlayerAvatar {
 
   private async installAuthoredModel(): Promise<void> {
     try {
-      const asset = await playerAssetPromise;
+      const asset = await loadCharacterAsset();
       if (this.disposed) return;
 
       const model = cloneSkeleton(asset.scene) as THREE.Group;

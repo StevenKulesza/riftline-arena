@@ -15,6 +15,12 @@ export interface FlowMeshOptions {
   /** Distance from the lowest riding surface to the underside of a solid. */
   skirtDepth?: number;
   /**
+   * Optional shallower blocking depth for movement collision. This lets an
+   * exposed deck carry a dramatic visual fascia without turning the entire
+   * fascia into a hidden wall below the rideable surface.
+   */
+  collisionSkirtDepth?: number;
+  /**
    * Make the underside follow the riding surface at a constant thickness.
    * This is useful for exposed bridge/ramp decks; the default keeps the
    * legacy level-bottom skirt used by terrain-backed solids.
@@ -300,6 +306,7 @@ function validateOriented(spec: OrientedFlowSpec): void {
   finite('origin.z', spec.origin.z);
   finite('heading', spec.heading);
   if ((spec.skirtDepth ?? 0.8) < 0) throw new Error('skirtDepth cannot be negative.');
+  if ((spec.collisionSkirtDepth ?? spec.skirtDepth ?? 0.8) < 0) throw new Error('collisionSkirtDepth cannot be negative.');
   if ((spec.edgeChamfer ?? 0) < 0) throw new Error('edgeChamfer cannot be negative.');
 }
 
@@ -654,6 +661,7 @@ function validateBankedTurn(spec: BankedTurnSpec): void {
     throw new Error('bankBlendExponent must be from 1 to 6.');
   }
   if ((spec.skirtDepth ?? 0.8) < 0) throw new Error('skirtDepth cannot be negative.');
+  if ((spec.collisionSkirtDepth ?? spec.skirtDepth ?? 0.8) < 0) throw new Error('collisionSkirtDepth cannot be negative.');
   segmentCounts(spec);
 }
 

@@ -154,6 +154,7 @@ export async function runProfile(argv = process.argv) {
     channel: 'chromium',
     headless: false,
     args: [
+      '--ozone-platform=wayland',
       '--disable-blink-features=AutomationControlled',
       '--ignore-gpu-blocklist',
       '--enable-gpu-rasterization',
@@ -169,6 +170,7 @@ export async function runProfile(argv = process.argv) {
     isMobile: args.mobile,
     hasTouch: args.mobile,
   });
+  await page.bringToFront();
   const consoleErrors = [];
   const pageErrors = [];
   page.on('console', (message) => {
@@ -190,28 +192,30 @@ export async function runProfile(argv = process.argv) {
       { timeout: 90_000 },
     );
   }
-  await page.evaluate(({ speedKmh, fireWeapon, combat }) => {
+  await page.evaluate(({ state, speedKmh, fireWeapon, combat }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__;
     hooks.seed(450_600);
-    hooks.setState('active-play');
+    hooks.setState(state);
     hooks.setWeapon(fireWeapon ?? 'machine');
     if (!combat) hooks.parkBotsForScreenshot();
     hooks.setReducedMotion(false);
     if (speedKmh > 0) hooks.setSpeedCapture(speedKmh);
     hooks.setPausedForScreenshot(false);
     if (document.pointerLockElement) document.exitPointerLock();
-  }, { speedKmh: args.speedKmh, fireWeapon: args.fireWeapon, combat: args.combat });
+  }, {
+    state: args.state,
+    speedKmh: args.speedKmh,
+    fireWeapon: args.fireWeapon,
+    combat: args.combat,
+  });
   await page.waitForTimeout(args.warmup);
-  await page.evaluate(({ state, freeze, speedKmh, fireWeapon, combat }) => {
+  await page.evaluate(({ freeze, speedKmh, combat }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__;
-    hooks.seed(450_600);
-    hooks.setState(state);
-    hooks.setWeapon(fireWeapon ?? 'machine');
     if (!combat) hooks.parkBotsForScreenshot();
     if (speedKmh > 0) hooks.setSpeedCapture(speedKmh);
     hooks.setPausedForScreenshot(freeze);
     if (document.pointerLockElement) document.exitPointerLock();
-  }, { state: args.state, freeze: args.freeze, speedKmh: args.speedKmh, fireWeapon: args.fireWeapon, combat: args.combat });
+  }, { freeze: args.freeze, speedKmh: args.speedKmh, combat: args.combat });
 
   if (args.fly) {
     await page.keyboard.down('KeyW');
@@ -259,9 +263,13 @@ export async function runProfile(argv = process.argv) {
         const elapsed = now - started;
         if (frameTimeMs > 25) {
           const diagnostics = window.__THREE_GAME_DIAGNOSTICS__;
+          const phaseTiming = window.__THREE_FRAME_TIMING__;
           slowFrames.push({
             elapsedMs: elapsed,
             frameTimeMs,
+            updateMs: phaseTiming?.updateMs ?? null,
+            renderMs: phaseTiming?.renderMs ?? null,
+            gameFrameMs: phaseTiming?.totalMs ?? null,
             calls: diagnostics?.renderer.calls ?? null,
             geometries: diagnostics?.renderer.geometries ?? null,
             activeWeaponVfx: diagnostics?.renderer.activeWeaponVfx ?? null,
@@ -271,8 +279,12 @@ export async function runProfile(argv = process.argv) {
         }
         if (elapsed >= nextTimelineSample) {
           const diagnostics = window.__THREE_GAME_DIAGNOSTICS__;
+          const phaseTiming = window.__THREE_FRAME_TIMING__;
           timeline.push({
             elapsedMs: elapsed,
+            updateMs: phaseTiming?.updateMs ?? null,
+            renderMs: phaseTiming?.renderMs ?? null,
+            gameFrameMs: phaseTiming?.totalMs ?? null,
             calls: diagnostics?.renderer.calls ?? null,
             triangles: diagnostics?.renderer.triangles ?? null,
             geometries: diagnostics?.renderer.geometries ?? null,
@@ -303,6 +315,7 @@ export async function runProfile(argv = process.argv) {
       slowFrames,
       longAnimationFrames,
       timeline,
+      frameTiming: window.__THREE_FRAME_TIMING__,
       diagnostics: window.__THREE_GAME_DIAGNOSTICS__,
       memory: performance.memory
         ? {

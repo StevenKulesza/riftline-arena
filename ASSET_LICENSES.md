@@ -34,6 +34,16 @@ https://creativecommons.org/licenses/by-nd/4.0/legalcode.
 
 The model directory also contains its original [attribution notice](public/assets/models/ATTRIBUTION.md).
 
+## Outpost Tower (FXB)
+
+- File: `public/assets/models/outpost-tower-fxb.glb`
+- Creator: laza
+- Source: https://sketchfab.com/3d-models/outpost-tower-fxb-5f7cd68d238c4052b6802912f4a15865
+- License: CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/
+- Integration changes: geometry was simplified and quantized for browser runtime use; the source
+  file contained UVs but no image textures, so QuickSense applies project-authored panel, roughness,
+  and emissive signal materials at load time.
+
 ## Fonts
 
 - Oxanium 700/800: Oxanium project, distributed through Google Fonts under the SIL Open Font

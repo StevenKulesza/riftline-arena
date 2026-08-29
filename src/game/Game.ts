@@ -38,10 +38,74 @@ type ViewMode = 'first-person' | 'third-person';
 type Owner = 'player' | number;
 type PickupKind = 'health' | 'armor' | 'damage' | 'speed' | WeaponId;
 type CountdownCue = 'READY' | '3' | '2' | '1';
+export type GameLoadProgress = {
+  fraction: number;
+  label: string;
+};
+type GameLoadReporter = (progress: GameLoadProgress) => void;
+// Loading must make forward progress even when the tab is backgrounded. Most
+// browsers suspend requestAnimationFrame in hidden tabs, which previously left
+// QuickSense parked at 6% until the page became visible. A zero-delay timer
+// still gives the loading UI a scheduling opportunity without depending on a
+// render callback.
+const yieldDuringLoad = (): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, 0));
 type CoreAnchor = FluxCoreAnchor & { readonly position: THREE.Vector3 };
 type PlayerSweepResult = {
   wallNormal: THREE.Vector3 | null;
   ceilingNormal: THREE.Vector3 | null;
+};
+
+type QuickSenseStructureAudit = {
+  id: string;
+  name: string;
+  category: string;
+  profile: string;
+  accent: string;
+  state: string;
+  connection: 'terrain-foundation' | 'terrain-tethers';
+  position: { x: number; y: number; z: number };
+};
+
+type QuickSenseOutpostTowerAudit = {
+  center: { x: number; y: number; z: number };
+  entrance: { x: number; y: number; z: number };
+  core: { x: number; y: number; z: number };
+  flights: Array<{
+    name: string;
+    start: { x: number; y: number; z: number };
+    end: { x: number; y: number; z: number };
+  }>;
+  bounds: {
+    min: { x: number; y: number; z: number };
+    max: { x: number; y: number; z: number };
+  };
+  height: number;
+  habitableHeight: number;
+  collision: {
+    engine: 'hybrid-authored-bvh';
+    triangles: number;
+    bodyTriangles: number;
+    walkableTriangles: number;
+  };
+  grounding: {
+    foundationTop: { x: number; y: number; z: number };
+    accessStairs: Array<{
+      start: { x: number; y: number; z: number };
+      end: { x: number; y: number; z: number };
+      width: number;
+    }>;
+  };
+};
+
+type QuickSenseOutpostTowerPieceAudit = {
+  name: string;
+  role: string;
+  triangles: number;
+  uvVertices: number;
+  bounds: {
+    min: { x: number; y: number; z: number };
+    max: { x: number; y: number; z: number };
+  };
 };
 
 type Projectile = {
@@ -90,7 +154,11 @@ const MATCH_COUNTDOWN_DURATION = 4;
 const MATCH_COUNTDOWN_CUES: readonly CountdownCue[] = ['READY', '3', '2', '1'];
 // qfusion's standing view is origin + 30; origin sits 24 units above ground.
 const PLAYER_EYE = 54 / 56;
-const MAX_FIXED_STEPS_PER_FRAME = 4;
+const MAX_FIXED_STEPS_PER_FRAME = 2;
+// Player movement/projectiles retain the authored 120 Hz step. Bot decisions
+// and locomotion do not benefit perceptibly above 60 Hz and were doubling LOS,
+// navigation, and capsule work on every render frame.
+const BOT_FIXED_STEP = 1 / 60;
 const HUD_UPDATE_INTERVAL = 1 / 15;
 const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
 const BASE_GAME_FOV = 80;
@@ -131,7 +199,6 @@ export class Game {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer;
   private inkPass!: ShaderPass;
-  private readonly shadowRefreshInterval = 240;
   private readonly scene = new THREE.Scene();
   private readonly speedTrails = new SpeedTrailSystem(this.scene, 4);
   private readonly camera = new THREE.PerspectiveCamera(BASE_GAME_FOV, 1, 0.08, 1400);
@@ -176,6 +243,8 @@ export class Game {
   private readonly grappleAnchor = new THREE.Vector3();
   private readonly weaponModel = new THREE.Group();
   private weaponVisual?: WeaponViewModel;
+  private inspectionWeaponVisual?: WeaponViewModel;
+  private readonly weaponVisualCache = new Map<WeaponId, WeaponViewModel>();
   private muzzleSocket = new THREE.Object3D();
   private readonly coreGroup = new THREE.Group();
   private readonly coreLight = new THREE.PointLight(0x3ee8ff, 6, 26, 2);
@@ -204,6 +273,7 @@ export class Game {
   private rng = createSeededRandom(450600);
   private mode: GameMode = 'ready';
   private accumulator = 0;
+  private botAccumulator = 0;
   private frame = 0;
   private elapsed = 0;
   private matchTime = MATCH_DURATION;
@@ -330,7 +400,7 @@ export class Game {
   private readonly sweepHalfSide = new THREE.Vector3();
   private readonly sweepRayStart = new THREE.Vector3();
   private readonly sweepRayEnd = new THREE.Vector3();
-  private readonly sweepOffsets = Array.from({ length: 3 }, () => new THREE.Vector3());
+  private readonly sweepOffsets = Array.from({ length: 5 }, () => new THREE.Vector3());
   private readonly sweepBestNormal = new THREE.Vector3();
   private readonly sweepWallNormal = new THREE.Vector3();
   private readonly sweepCeilingNormal = new THREE.Vector3();
@@ -362,8 +432,21 @@ export class Game {
   private coreCaptures = 0;
   private maxPlayerSpeed = 0;
 
-  static async create(canvas: HTMLCanvasElement): Promise<Game> {
-    return new Game(canvas, await Arena.load());
+  static async create(canvas: HTMLCanvasElement, reportProgress: GameLoadReporter = () => undefined): Promise<Game> {
+    reportProgress({ fraction: 0.06, label: 'Loading arena geometry' });
+    await yieldDuringLoad();
+    const arena = await Arena.load();
+    reportProgress({ fraction: 0.48, label: 'Building combat systems' });
+    await yieldDuringLoad();
+    const game = new Game(canvas, arena);
+    reportProgress({ fraction: 0.68, label: 'Loading combat frames' });
+    await game.prepareVisualResources(reportProgress);
+    reportProgress({ fraction: 1, label: 'Arena ready' });
+    // Keep the completed loading state visible for one short beat after the
+    // synchronous GPU upload. Besides making progress legible, this gives the
+    // browser a free main-thread window before input and simulation begin.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 350));
+    return game;
   }
 
   private constructor(
@@ -391,16 +474,23 @@ export class Game {
     const qaMode = new URLSearchParams(window.location.search).get('qa');
     const diagnosticCapture = qaMode !== null;
     const visualCapture = qaMode === 'visual' || qaMode === 'capture';
+    // `qa=native` retains the direct-render software path used by imported PBR
+    // assets while raising the drawing buffer to screenshot resolution. The
+    // post-processing capture path is intentionally separate because SwiftShader
+    // can drop the tower's StandardMaterial draw calls when the composer is used.
+    const highResolutionCapture = visualCapture || qaMode === 'native';
     this.visualCapture = visualCapture;
     this.maxRenderDpr = this.softwareRenderer
-      ? visualCapture
+      ? highResolutionCapture
         ? 1
         : diagnosticCapture
           ? 0.75
           : 0.25
       : this.mobileQuality
         ? 1
-        : 1.25;
+        : arena.mapInfo.name === 'QuickSense'
+          ? 1
+          : 1.25;
     this.renderDprCap = this.maxRenderDpr;
     this.adaptiveQuality = new AdaptiveQualitySystem({
       minDpr: this.softwareRenderer ? this.maxRenderDpr : this.mobileQuality ? 0.7 : 0.75,
@@ -415,7 +505,7 @@ export class Game {
     if (this.softwareRenderer && !visualCapture) this.renderer.shadowMap.enabled = false;
     this.renderer.info.autoReset = false;
     this.renderer.toneMappingExposure = new URLSearchParams(window.location.search).get('map') === 'quicksense'
-      ? 0.95
+      ? 1
       : 0.86;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.startButton = this.element<HTMLButtonElement>('#start-button');
@@ -445,7 +535,7 @@ export class Game {
       this.element('#zoom-button'),
       this.viewButton,
     );
-    this.weaponVfx = new WeaponVfxSystem(this.scene, this.camera, () => this.rng());
+    this.weaponVfx = new WeaponVfxSystem(this.scene, this.camera, () => this.rng(), this.mobileQuality);
     this.createScene();
     this.scene.add(this.playerAvatar.root);
     this.composer = this.createPostProcessing();
@@ -464,8 +554,6 @@ export class Game {
     this.scene.add(this.camera);
     this.resetPlayerLoadout();
     this.buildWeaponModel();
-    this.weaponVfx.prewarm(this.renderer);
-    this.prewarmSceneResources();
     this.respawnPlayer(false);
     this.startButton.addEventListener('click', this.onStartClick);
     this.applyMenuSettings();
@@ -476,10 +564,8 @@ export class Game {
     void this.removeMenuControls;
     resizeRenderer(this.renderer, this.camera, this.maxRenderDpr);
     this.resizePostProcessing();
-    this.installTestHooks();
     this.updateCamera(0);
     this.updateViewModeUi();
-    this.publishDiagnostics();
   }
 
   start(): void {
@@ -494,15 +580,97 @@ export class Game {
     // culling before live play.
     if (this.softwareRenderer) return;
     const restoreCulling: THREE.Object3D[] = [];
+    const restoreVisibility: THREE.Object3D[] = [];
+    const inactiveWeaponRoots: THREE.Object3D[] = [];
+    const playerWasVisible = this.playerAvatar.root.visible;
+    const coreWasVisible = this.coreGroup.visible;
+    const speedTrailsWereVisible = this.speedTrails.mesh.visible;
+    const speedTrailDrawCount = this.speedTrails.mesh.geometry.drawRange.count;
+    this.playerAvatar.root.visible = true;
+    // The Flux Core begins hidden and is revealed by the match director. Its
+    // two toon-shaded meshes were therefore missing the scene prewarm and
+    // could block a live frame for several seconds on their first GPU upload.
+    this.coreGroup.visible = true;
+    // Weapon switches must only exchange already-resident scene nodes. Attach
+    // every cached first-person frame for this hidden upload, then detach all
+    // but the selected model before the ready state is exposed.
+    for (const visual of this.weaponVisualCache.values()) {
+      if (visual === this.weaponVisual) continue;
+      inactiveWeaponRoots.push(visual.root);
+      this.weaponModel.add(visual.root);
+    }
+    // The batched speed ribbon normally has an empty draw range until an actor
+    // first exceeds 70 km/h. A six-vertex preload prevents that exciting
+    // gameplay moment from also being its first buffer and shader upload.
+    this.speedTrails.mesh.visible = true;
+    this.speedTrails.mesh.geometry.setDrawRange(0, 6);
+    // Jet flames, sparks, pooled muzzle groups, bot fallback parts, and other
+    // event-driven nodes start hidden. Three.js skips invisible ancestors
+    // during compile/render, so reveal them only for this loading-frame upload.
+    this.scene.traverse((object) => {
+      if (object.visible) return;
+      restoreVisibility.push(object);
+      object.visible = true;
+    });
     this.scene.traverse((object) => {
       if (!object.frustumCulled || !(object as THREE.Mesh).isMesh) return;
       restoreCulling.push(object);
       object.frustumCulled = false;
     });
     this.renderer.compile(this.scene, this.camera);
-    this.renderer.render(this.scene, this.camera);
+    // Exercise the real render path as well as the scene shaders. This
+    // allocates and compiles the composer passes before the first live frame.
+    this.composer.render();
     for (const object of restoreCulling) object.frustumCulled = true;
+    for (const object of restoreVisibility) object.visible = false;
+    for (const root of inactiveWeaponRoots) this.weaponModel.remove(root);
+    this.playerAvatar.root.visible = playerWasVisible;
+    this.coreGroup.visible = coreWasVisible;
+    this.speedTrails.mesh.visible = speedTrailsWereVisible;
+    this.speedTrails.mesh.geometry.setDrawRange(0, speedTrailDrawCount);
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = false;
     this.renderer.info.reset();
+  }
+
+  private async prepareVisualResources(reportProgress: GameLoadReporter): Promise<void> {
+    // Finish shared GLB decode, skeleton cloning, and material setup before the
+    // live loop can observe them. Installing all four characters from promise
+    // callbacks during play previously turned one frame into several seconds
+    // of main-thread work and left their first shader uploads to later frames.
+    await Promise.all([
+      this.playerAvatar.ready,
+      ...this.bots.map((bot) => bot.ready),
+    ]);
+    // Build every weapon exactly once behind the deployment screen. Their
+    // authored geometry and battle-wear textures stay cached for the match,
+    // eliminating the multi-frame model construction/upload hitch on switch.
+    if (!this.softwareRenderer) {
+      for (let index = 0; index < WEAPONS.length; index += 1) {
+        const definition = WEAPONS[index];
+        reportProgress({
+          fraction: 0.7 + ((index + 1) / WEAPONS.length) * 0.09,
+          label: `Loading ${definition.shortName} combat frame`,
+        });
+        await yieldDuringLoad();
+        if (!this.weaponVisualCache.has(definition.id)) {
+          this.weaponVisualCache.set(definition.id, createWeaponViewModel(definition, true, true));
+        }
+      }
+    }
+    reportProgress({ fraction: 0.8, label: 'Warming combat effects' });
+    await yieldDuringLoad();
+    this.weaponVfx.prewarm(this.renderer);
+    reportProgress({ fraction: 0.9, label: 'Uploading arena shaders' });
+    // Let the loading status paint before the intentionally synchronous GPU
+    // warmup. The ready state is not exposed until every live shader path has
+    // completed once.
+    await yieldDuringLoad();
+    this.prewarmSceneResources();
+    reportProgress({ fraction: 0.98, label: 'Finalizing deployment' });
+    await yieldDuringLoad();
+    this.installTestHooks();
+    this.publishDiagnostics();
   }
 
   dispose(): void {
@@ -521,7 +689,17 @@ export class Game {
     for (const grenade of this.grenades) this.disposeObject(grenade.root);
     for (const pickup of this.pickups) this.disposeObject(pickup.group);
     this.disposeObject(this.coreGroup);
+    // The active cached frame is already traversed through weaponModel. Dispose
+    // detached cached frames separately and exactly once.
     this.disposeObject(this.weaponModel);
+    for (const visual of this.weaponVisualCache.values()) {
+      if (visual.root.parent !== this.weaponModel) this.disposeObject(visual.root);
+    }
+    if (this.inspectionWeaponVisual && this.inspectionWeaponVisual.root.parent !== this.weaponModel) {
+      this.disposeObject(this.inspectionWeaponVisual.root);
+    }
+    this.weaponVisualCache.clear();
+    this.weaponModel.clear();
     this.environmentTexture?.dispose();
     this.composer.dispose();
     this.renderer.dispose();
@@ -660,7 +838,15 @@ export class Game {
     this.frame += 1;
     this.elapsed = elapsed;
     this.fps += ((1 / Math.max(delta, 0.001)) - this.fps) * Math.min(1, delta * 3);
-    const qualityChange = this.softwareRenderer ? null : this.adaptiveQuality.sampleFrame(delta * 1_000);
+    // Base dynamic resolution on the work the game actually submitted, not on
+    // the requestAnimationFrame interval. Browser/OS scheduling gaps can make
+    // `delta` hundreds of milliseconds even when update + render cost 10 ms;
+    // treating those gaps as GPU overload caused a live render-target resize,
+    // which amplified a harmless delayed callback into the visible hitch.
+    const measuredFrameMs = window.__THREE_FRAME_TIMING__?.totalMs ?? 0;
+    const qualityChange = this.softwareRenderer || measuredFrameMs <= 0
+      ? null
+      : this.adaptiveQuality.sampleFrame(measuredFrameMs);
     if (qualityChange) this.renderDprCap = qualityChange.dprCap;
     if (resizeRenderer(this.renderer, this.camera, this.renderDprCap)) this.resizePostProcessing();
 
@@ -786,6 +972,7 @@ export class Game {
     }
 
     if (this.mode !== 'running') {
+      this.botAccumulator = 0;
       this.jetpackActive = false;
       this.jetpackEnergy.update(0, false, this.grounded);
       this.weaponVfx.stopContinuousLaser();
@@ -850,7 +1037,13 @@ export class Game {
     this.updatePlayerMovement(delta);
     this.maxPlayerSpeed = Math.max(this.maxPlayerSpeed, Math.hypot(this.playerVelocity.x, this.playerVelocity.z));
     this.updateGrapple(delta);
-    if (!this.physicsQaMode) this.updateBots(delta);
+    if (!this.physicsQaMode) {
+      this.botAccumulator += delta;
+      while (this.botAccumulator >= BOT_FIXED_STEP) {
+        this.updateBots(BOT_FIXED_STEP);
+        this.botAccumulator -= BOT_FIXED_STEP;
+      }
+    }
     this.updateProjectiles(delta);
     this.updateGrenades(delta);
     this.updatePickups(delta);
@@ -1123,11 +1316,22 @@ export class Game {
         const side = this.sweepSide.set(-forward.z, 0, forward.x);
         const front = this.sweepFront.copy(forward).multiplyScalar(MOVEMENT.playerRadius);
         const halfSide = this.sweepHalfSide.copy(side).multiplyScalar(MOVEMENT.playerRadius * 0.68);
-        const height = MOVEMENT.playerHeight * 0.5;
-        this.sweepOffsets[0].copy(front).setY(height);
-        this.sweepOffsets[1].copy(front).add(halfSide).setY(height);
-        this.sweepOffsets[2].copy(front).sub(halfSide).setY(height);
-        wallOffsetCount = 3;
+        const middleHeight = MOVEMENT.playerHeight * 0.5;
+        const lowerHeight = Math.max(
+          MOVEMENT.playerRadius,
+          MOVEMENT.stepHeight + MOVEMENT.collisionSkin,
+        );
+        const upperHeight = MOVEMENT.playerHeight - MOVEMENT.playerRadius * 0.7;
+        this.sweepOffsets[0].copy(front).setY(middleHeight);
+        this.sweepOffsets[1].copy(front).add(halfSide).setY(middleHeight);
+        this.sweepOffsets[2].copy(front).sub(halfSide).setY(middleHeight);
+        // Mid-height rays can pass entirely above a low ramp skirt or below a
+        // lintel even though the capsule overlaps it. Center probes near the
+        // feet and head close those vertical tunnelling gaps without adding a
+        // full grid of expensive BVH rays.
+        this.sweepOffsets[3].copy(front).setY(lowerHeight);
+        this.sweepOffsets[4].copy(front).setY(upperHeight);
+        wallOffsetCount = 5;
       }
 
       this.sweepBestFraction = Number.POSITIVE_INFINITY;
@@ -2487,7 +2691,10 @@ export class Game {
         }
         continue;
       }
-      if (pickup.group.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.8, 0))) <= 1.75) {
+      const pickupDx = pickup.group.position.x - this.playerPosition.x;
+      const pickupDy = pickup.group.position.y - (this.playerPosition.y + 0.8);
+      const pickupDz = pickup.group.position.z - this.playerPosition.z;
+      if (pickupDx * pickupDx + pickupDy * pickupDy + pickupDz * pickupDz <= 1.75 * 1.75) {
         this.collectPickup(pickup);
         continue;
       }
@@ -2566,8 +2773,10 @@ export class Game {
       const telegraphing = directorState.phase === 'telegraph';
       this.coreGroup.visible = telegraphing;
       this.coreGroup.scale.setScalar(telegraphing ? 0.68 : 1);
-      this.coreLight.visible = telegraphing;
-      this.coreLight.intensity = telegraphing ? 2.2 : 6;
+      // Keep the light in Three's light set and fade it with intensity. Toggling
+      // visibility changes NUM_POINT_LIGHTS and recompiles every lit material
+      // in the arena on the live frame where the objective appears.
+      this.coreLight.intensity = telegraphing ? 2.2 : 0;
       return;
     }
 
@@ -2614,7 +2823,7 @@ export class Game {
     const cooldownState = this.coreDirector.snapshot();
     this.coreActive = cooldownState.active;
     this.coreGroup.visible = false;
-    this.coreLight.visible = false;
+    this.coreLight.intensity = 0;
     this.coreCooldown = cooldownState.secondsRemaining;
     this.coreProgress = 0;
     this.coreOwner = null;
@@ -2698,7 +2907,7 @@ export class Game {
     // Reassert this every frame because weapon rebuilds and deterministic QA
     // state changes may occur after the view toggle. The first-person model
     // must never cover the local avatar in third-person flight.
-    this.weaponModel.visible = !this.isThirdPerson();
+    this.weaponModel.visible = !this.isThirdPerson() && !this.screenshotLookTargetActive;
     this.playerAvatar.root.position.copy(this.playerPosition);
     this.playerAvatar.setPose(this.yaw, this.moveInput.x);
     const eye = this.cameraEyeScratch.copy(this.playerPosition);
@@ -3172,7 +3381,7 @@ export class Game {
     this.coreContested = false;
     this.coreGroup.visible = false;
     this.coreGroup.scale.setScalar(1);
-    this.coreLight.visible = false;
+    this.coreLight.intensity = 0;
     this.styleSystem.reset();
     this.recentPlayerKills.length = 0;
     this.weatherSnapshot = this.weatherSystem.reset();
@@ -3228,8 +3437,6 @@ export class Game {
 
   private createScene(): void {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
-    // QuickSense uses the authored equirectangular panorama as its live value
-    // backdrop. Keep the procedural sky only for offline/failed asset loads.
     this.scene.background = quickSense
       ? this.arena.skyTexture ?? new THREE.Color(0x75b6df)
       : this.arena.skyTexture ?? new THREE.Color(0x8fcddd);
@@ -3239,22 +3446,21 @@ export class Game {
     this.scene.backgroundBlurriness = this.arena.skyTexture ? 0.02 : 0.035;
     this.scene.fog = new THREE.FogExp2(quickSense ? 0x6f899a : 0x7293a0, quickSense ? QUICKSENSE_FOG_DENSITY : 0.00146);
     const environmentGenerator = new THREE.PMREMGenerator(this.renderer);
-    // Keep the 4K panorama as the authored background. A compact PMREM studio
-    // provides predictable PBR fill without prefiltering that large image on
-    // startup (which is especially costly on integrated and software GPUs).
+    // A compact PMREM studio gives the procedural architecture predictable
+    // PBR fill without coupling the live map to a baked concept panorama.
     this.environmentTexture = environmentGenerator.fromScene(new RoomEnvironment(), 0.03).texture;
     this.scene.environment = this.environmentTexture;
-    this.scene.environmentIntensity = quickSense ? 0.56 : 0.72;
+    this.scene.environmentIntensity = quickSense ? 0.68 : 0.72;
     environmentGenerator.dispose();
     if (!this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
-    this.scene.add(new THREE.AmbientLight(0x607786, quickSense ? 0.032 : 0.11));
+    this.scene.add(new THREE.AmbientLight(0x718996, quickSense ? 0.065 : 0.11));
     const hemisphere = new THREE.HemisphereLight(
       quickSense ? 0x9fc5dc : 0xb4d7e3,
       quickSense ? 0x242d28 : 0x263825,
-      quickSense ? 0.58 : 0.76,
+      quickSense ? 0.72 : 0.76,
     );
     this.scene.add(hemisphere);
-    const sun = new THREE.DirectionalLight(0xfff1df, quickSense ? 2.12 : 1.86);
+    const sun = new THREE.DirectionalLight(0xfff1df, quickSense ? 1.92 : 1.86);
     sun.position.set(quickSense ? -205 : 135, quickSense ? 255 : 190, quickSense ? -145 : 105);
     sun.castShadow = true;
     const shadowMapSize = quickSense && this.mobileQuality ? 1024 : 2048;
@@ -3270,11 +3476,18 @@ export class Game {
     sun.shadow.normalBias = quickSense ? 0.018 : 0.035;
     this.scene.add(sun);
     this.coreLight.position.copy(this.arena.corePosition).add(new THREE.Vector3(0, 6, 0));
-    this.coreLight.visible = false;
+    this.coreLight.visible = true;
+    this.coreLight.intensity = 0;
     this.scene.add(this.coreLight);
-    const rim = new THREE.DirectionalLight(0x6aa7d4, quickSense ? 0.3 : 0.56);
+    const rim = new THREE.DirectionalLight(0x6aa7d4, quickSense ? 0.42 : 0.56);
     rim.position.set(quickSense ? 165 : -90, quickSense ? 115 : 70, quickSense ? 185 : -120);
     this.scene.add(rim);
+    if (quickSense) {
+      const basinFill = new THREE.DirectionalLight(0x8fb9cf, 0.28);
+      basinFill.name = 'QuickSense playable-side architectural fill';
+      basinFill.position.set(0, 110, -240);
+      this.scene.add(basinFill);
+    }
     this.scene.add(this.arena.group);
   }
 
@@ -3282,12 +3495,17 @@ export class Game {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    composer.addPass(new UnrealBloomPass(
-      new THREE.Vector2(1, 1),
-      quickSense ? (this.mobileQuality ? 0.075 : 0.14) : (this.mobileQuality ? 0.12 : 0.28),
-      quickSense ? 0.24 : 0.34,
-      quickSense ? 1.08 : 1.08,
-    ));
+    // QuickSense's mobile bloom value was intentionally subtle, yet the pass
+    // still paid for its full downsample/blur/composite pyramid. Preserve the
+    // more important ink/grade pass and spend that GPU time on stable frames.
+    if (!(quickSense && this.mobileQuality)) {
+      composer.addPass(new UnrealBloomPass(
+        new THREE.Vector2(1, 1),
+        quickSense ? 0.14 : (this.mobileQuality ? 0.12 : 0.28),
+        quickSense ? 0.24 : 0.34,
+        1.08,
+      ));
+    }
     this.inkPass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
@@ -3296,9 +3514,9 @@ export class Game {
         vignette: { value: quickSense ? 0.07 : 0.16 },
         gradeStrength: { value: quickSense ? 1 : 0 },
         gradeContrast: { value: quickSense ? 1.055 : 1 },
-        neutralDarken: { value: quickSense ? 0.085 : 0 },
+        neutralDarken: { value: quickSense ? 0.05 : 0 },
         shadowCool: { value: quickSense ? 0.18 : 0 },
-        shadowLift: { value: quickSense ? 0.009 : 0 },
+        shadowLift: { value: quickSense ? 0.018 : 0 },
         routeHueSeparation: { value: quickSense ? 1 : 0 },
         saturation: { value: quickSense ? 1.09 : 1.065 },
         speedBlur: { value: 0 },
@@ -3351,14 +3569,13 @@ export class Game {
           vec3 graded = color;
           float signalPeak = max(graded.r, max(graded.g, graded.b));
           float redOverGreen = graded.r / max(graded.g, 0.001);
-          float greenOverBlue = graded.g / max(graded.b, 0.001);
-          float blueShare = graded.b / max(graded.r, 0.001);
-          float warmRoseMask = smoothstep(1.18, 1.62, redOverGreen)
-            * smoothstep(1.08, 1.72, greenOverBlue)
-            * smoothstep(0.11, 0.24, blueShare)
-            * (1.0 - smoothstep(0.46, 0.68, blueShare));
-          vec3 terracottaRoute = vec3(signalPeak, signalPeak * 0.42, signalPeak * 0.18);
-          graded = mix(graded, terracottaRoute, routeHueSeparation * warmRoseMask * 0.92);
+          float blueOverGreen = graded.b / max(graded.g, 0.001);
+          float redBlueBalance = min(graded.r, graded.b) / max(max(graded.r, graded.b), 0.001);
+          float magentaMask = smoothstep(1.28, 2.1, redOverGreen)
+            * smoothstep(1.18, 1.95, blueOverGreen)
+            * smoothstep(0.48, 0.82, redBlueBalance);
+          vec3 magentaRoute = vec3(signalPeak, signalPeak * 0.13, signalPeak * 0.7);
+          graded = mix(graded, magentaRoute, routeHueSeparation * magentaMask * 0.82);
           float gradeLuma = luma(graded);
           float maxChannel = max(graded.r, max(graded.g, graded.b));
           float minChannel = min(graded.r, min(graded.g, graded.b));
@@ -3470,9 +3687,17 @@ export class Game {
       const group = this.createPickupModel(kind);
       const authored = this.arena.itemPoints[point].clone();
       if (offset) authored.add(new THREE.Vector3(offset[0], 0, offset[1]));
-      const floor = this.arena.floorHeightAt(authored.x, authored.z, authored.y + 4) ?? authored.y - 0.9;
+      // The authored point is only an XY hint; the support surface may be a
+      // raised ramp, landing roof, or banked route above that hint. Resolve
+      // the highest real support at the point so the pickup cannot be buried
+      // in a lower floor or clipped through a ramp deck.
+      const floor = this.arena.floorHeightAt(authored.x, authored.z, Number.POSITIVE_INFINITY) ?? authored.y - 0.9;
       group.position.set(authored.x, floor + 0.012, authored.z);
       group.userData.baseY = floor + 0.012;
+      const supportNormal = this.arena.surfaceNormalAt?.(authored.x, authored.z, Number.POSITIVE_INFINITY);
+      if (supportNormal) {
+        group.quaternion.setFromUnitVectors(THREE.Object3D.DEFAULT_UP, supportNormal);
+      }
       group.userData.phase = index * 0.73;
       this.scene.add(group);
       this.pickups.push({ kind, group, active: true, cooldown: 0, respawn });
@@ -3721,10 +3946,22 @@ export class Game {
   private buildWeaponModel(): void {
     this.weaponVfx.stopContinuousLaser();
     this.audio.setLaserBeamActive(false);
-    this.disposeObject(this.weaponModel);
+    if (this.inspectionWeaponVisual) {
+      this.disposeObject(this.inspectionWeaponVisual.root);
+      this.inspectionWeaponVisual = undefined;
+    }
     this.weaponModel.clear();
     const definition = WEAPONS[this.selectedWeapon];
-    this.weaponVisual = createWeaponViewModel(definition, !this.weaponInspectionMode, !this.weaponInspectionMode);
+    if (this.weaponInspectionMode) {
+      this.weaponVisual = createWeaponViewModel(definition, false, false);
+      this.inspectionWeaponVisual = this.weaponVisual;
+    } else {
+      this.weaponVisual = this.weaponVisualCache.get(definition.id);
+      if (!this.weaponVisual) {
+        this.weaponVisual = createWeaponViewModel(definition, true, true);
+        this.weaponVisualCache.set(definition.id, this.weaponVisual);
+      }
+    }
     if (this.weaponInspectionMode) {
       const bounds = new THREE.Box3().setFromObject(this.weaponVisual.root);
       const center = bounds.getCenter(new THREE.Vector3());
@@ -3827,6 +4064,207 @@ export class Game {
   private noise(time: number, seed: number): number {
     const value = Math.sin(time * 12.9898 + seed * 78.233) * 43758.5453;
     return (value - Math.floor(value)) * 2 - 1;
+  }
+
+  private quickSenseStructureAudit(): QuickSenseStructureAudit[] {
+    if (this.arena.mapInfo.name !== 'QuickSense') return [];
+    const manifest = this.arena.group.userData.buildings as Array<{
+      name: string;
+      category: string;
+      profile: string;
+      accent: string;
+      position: { x: number; y: number; z: number };
+    }> | undefined;
+    if (!Array.isArray(manifest)) return [];
+
+    this.arena.group.updateMatrixWorld(true);
+    return manifest.map((entry) => {
+      const id = entry.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+      const marker = this.arena.group.getObjectByName(`QuickSense building: ${entry.name}`);
+      const worldPosition = marker
+        ? marker.getWorldPosition(new THREE.Vector3())
+        : new THREE.Vector3(entry.position.x, entry.position.y, entry.position.z)
+          .applyMatrix4(this.arena.group.matrixWorld);
+      return {
+        id,
+        name: entry.name,
+        category: entry.category,
+        profile: entry.profile,
+        accent: entry.accent,
+        state: `quicksense-structure-${id}`,
+        connection: entry.category === 'floating-station' ? 'terrain-tethers' : 'terrain-foundation',
+        position: { x: worldPosition.x, y: worldPosition.y, z: worldPosition.z },
+      };
+    });
+  }
+
+  private setQuickSenseStructureCapture(id: string): boolean {
+    const structure = this.quickSenseStructureAudit().find((candidate) => candidate.id === id);
+    if (!structure) return false;
+
+    const center = new THREE.Vector3(structure.position.x, structure.position.y, structure.position.z);
+    const authoredViews: Record<string, { camera: THREE.Vector3; target: THREE.Vector3; fov: number }> = {
+      'north-gate-west-house': { camera: new THREE.Vector3(-52, 42, 70), target: new THREE.Vector3(-21, 21, 122), fov: 52 },
+      'north-gate-east-house': { camera: new THREE.Vector3(52, 42, 70), target: new THREE.Vector3(21, 21, 122), fov: 52 },
+      'south-launch-west-house': { camera: new THREE.Vector3(-52, 34, -70), target: new THREE.Vector3(-21, 8, -122), fov: 52 },
+      'south-launch-east-house': { camera: new THREE.Vector3(52, 34, -70), target: new THREE.Vector3(21, 8, -122), fov: 52 },
+      'flux-core-citadel': { camera: new THREE.Vector3(-52, 58, -72), target: new THREE.Vector3(0, 31, 0), fov: 54 },
+      'cyan-grapple-tower': { camera: new THREE.Vector3(-86, 52, -44), target: new THREE.Vector3(-46, 32, 14), fov: 52 },
+      'magenta-grapple-tower': { camera: new THREE.Vector3(86, 52, -44), target: new THREE.Vector3(46, 32, 14), fov: 52 },
+      'north-grapple-gate': { camera: new THREE.Vector3(48, 62, 34), target: new THREE.Vector3(0, 35, 94), fov: 54 },
+      'southwest-forge': { camera: new THREE.Vector3(-82, 44, -112), target: new THREE.Vector3(-134, 45, -172), fov: 52 },
+      'southeast-smelter': { camera: new THREE.Vector3(82, 48, -112), target: new THREE.Vector3(134, 50, -172), fov: 52 },
+      'northwest-lens': { camera: new THREE.Vector3(-74, 52, 112), target: new THREE.Vector3(-110, 58, 172), fov: 52 },
+      'northeast-array': { camera: new THREE.Vector3(74, 56, 112), target: new THREE.Vector3(110, 62, 172), fov: 52 },
+      'west-scar-relay': { camera: new THREE.Vector3(-130, 55, -78), target: new THREE.Vector3(-198, 58, -78), fov: 52 },
+      'west-crown-habitat': { camera: new THREE.Vector3(-130, 65, 80), target: new THREE.Vector3(-198, 70, 80), fov: 52 },
+      'east-crown-habitat': { camera: new THREE.Vector3(130, 65, -80), target: new THREE.Vector3(198, 72, -80), fov: 52 },
+      'east-scar-relay': { camera: new THREE.Vector3(130, 57, 78), target: new THREE.Vector3(198, 62, 78), fov: 52 },
+      'cyan-skydock': { camera: new THREE.Vector3(-68, 94, -24), target: new THREE.Vector3(-116, 52, 46), fov: 56 },
+      'magenta-needle-dock': { camera: new THREE.Vector3(68, 100, -24), target: new THREE.Vector3(116, 55, 46), fov: 56 },
+      'amber-command-ark': { camera: new THREE.Vector3(70, 114, 36), target: new THREE.Vector3(0, 64, 116), fov: 58 },
+      'cyan-skyline-pylon': { camera: new THREE.Vector3(-108, 64, -92), target: new THREE.Vector3(-169, 38, -32), fov: 54 },
+      'magenta-skyline-pylon': { camera: new THREE.Vector3(108, 64, -28), target: new THREE.Vector3(169, 38, 32), fov: 54 },
+      'outpost-tower': { camera: new THREE.Vector3(-112, 98, -126), target: new THREE.Vector3(0, 68, 0), fov: 58 },
+    };
+    let view = authoredViews[id];
+    if (!view) {
+      const radial = new THREE.Vector3(center.x, 0, center.z);
+      if (radial.lengthSq() < 64) radial.set(0, 0, 1);
+      else radial.normalize();
+      view = {
+        camera: center.clone().addScaledVector(radial, -72).setY(Math.max(32, center.y + 18)),
+        target: center.clone(),
+        fov: 54,
+      };
+    }
+
+    this.mode = 'running';
+    this.audio.setPaused(true);
+    this.screenshotCameraFov = view.fov;
+    this.playerPosition.copy(view.camera);
+    this.playerVelocity.set(0, 0, 0);
+    this.screenshotLookTarget.copy(view.target);
+    this.screenshotLookTargetActive = true;
+    const viewDirection = this.screenshotLookTarget.clone().sub(
+      this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)),
+    ).normalize();
+    this.yaw = Math.atan2(-viewDirection.x, -viewDirection.z);
+    this.pitch = Math.asin(viewDirection.y);
+    this.grounded = false;
+    this.weaponModel.visible = false;
+    return true;
+  }
+
+  private setQuickSenseTowerSectionCapture(id: string): boolean {
+    const audit = this.arena.group.userData.outpostTowerAudit as QuickSenseOutpostTowerAudit | undefined;
+    if (!audit) return false;
+    const boundsCenter = new THREE.Vector3(
+      (audit.bounds.min.x + audit.bounds.max.x) * 0.5,
+      (audit.bounds.min.y + audit.bounds.max.y) * 0.5,
+      (audit.bounds.min.z + audit.bounds.max.z) * 0.5,
+    );
+    const exteriorDistance = Math.max(
+      120,
+      (audit.bounds.max.x - audit.bounds.min.x) * 1.35,
+      (audit.bounds.max.z - audit.bounds.min.z) * 1.35,
+    );
+    const exteriorCameraY = audit.bounds.min.y + 114;
+    const routeView = (index: number, fov = 72): { camera: THREE.Vector3; target: THREE.Vector3; fov: number } => {
+      const stair = audit.grounding.accessStairs[index];
+      const start = new THREE.Vector3(stair.start.x, stair.start.y, stair.start.z);
+      const end = new THREE.Vector3(stair.end.x, stair.end.y, stair.end.z);
+      const approach = end.clone().sub(start).setY(0);
+      if (approach.lengthSq() > 0.001) start.addScaledVector(approach.normalize(), -0.7);
+      return {
+        // Capture positions are player feet; updateCamera adds PLAYER_EYE.
+        camera: start,
+        target: end.add(new THREE.Vector3(0, PLAYER_EYE * 0.8, 0)),
+        fov,
+      };
+    };
+    const lowerFloorY = audit.grounding.accessStairs[1].start.y;
+    const views: Record<string, { camera: THREE.Vector3; target: THREE.Vector3; fov: number }> = {
+      'exterior-south': {
+        camera: new THREE.Vector3(boundsCenter.x, exteriorCameraY, boundsCenter.z - exteriorDistance),
+        target: boundsCenter,
+        fov: 76,
+      },
+      'exterior-east': {
+        camera: new THREE.Vector3(boundsCenter.x + exteriorDistance, exteriorCameraY, boundsCenter.z),
+        target: boundsCenter,
+        fov: 76,
+      },
+      'exterior-north': {
+        camera: new THREE.Vector3(boundsCenter.x, exteriorCameraY, boundsCenter.z + exteriorDistance),
+        target: boundsCenter,
+        fov: 76,
+      },
+      'exterior-west': {
+        camera: new THREE.Vector3(boundsCenter.x - exteriorDistance, exteriorCameraY, boundsCenter.z),
+        target: boundsCenter,
+        fov: 76,
+      },
+      'terrain-entry-east': routeView(0, 70),
+      'lower-hall-east': {
+        camera: new THREE.Vector3(18, lowerFloorY, 0),
+        target: new THREE.Vector3(-8, lowerFloorY + PLAYER_EYE, 0),
+        fov: 72,
+      },
+      'lower-hall-west': {
+        camera: new THREE.Vector3(-18, lowerFloorY, 0),
+        target: new THREE.Vector3(8, lowerFloorY + PLAYER_EYE, 0),
+        fov: 72,
+      },
+      'stair-landing-player': routeView(1, 74),
+      'mid-stair-player': routeView(4, 72),
+      'interior-stair-player': routeView(7, 72),
+      'flight-deck-south': {
+        camera: new THREE.Vector3(0, 27, -42),
+        target: new THREE.Vector3(0, 30, -5),
+        fov: 68,
+      },
+      'flight-deck-north': {
+        camera: new THREE.Vector3(0, 27, 32),
+        target: new THREE.Vector3(0, 30, 2),
+        fov: 68,
+      },
+      'upper-shaft': {
+        camera: new THREE.Vector3(0, 40, -14),
+        target: new THREE.Vector3(0, 58, -3),
+        fov: 70,
+      },
+      'upper-landing': {
+        camera: new THREE.Vector3(0, 64, -12),
+        target: new THREE.Vector3(0, 82, -3),
+        fov: 70,
+      },
+      'top-platform': {
+        camera: new THREE.Vector3(0, 86, -14),
+        target: new THREE.Vector3(0, audit.bounds.max.y - 2, -2),
+        fov: 68,
+      },
+    };
+    const view = views[id];
+    if (!view) return false;
+    this.mode = 'running';
+    this.audio.setPaused(true);
+    this.screenshotCameraFov = view.fov;
+    this.playerPosition.copy(view.camera);
+    this.playerVelocity.set(0, 0, 0);
+    this.screenshotLookTarget.copy(view.target);
+    this.screenshotLookTargetActive = true;
+    const viewDirection = this.screenshotLookTarget.clone().sub(
+      this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)),
+    ).normalize();
+    this.yaw = Math.atan2(-viewDirection.x, -viewDirection.z);
+    this.pitch = Math.asin(viewDirection.y);
+    this.grounded = false;
+    this.weaponModel.visible = false;
+    return true;
   }
 
   private installTestHooks(): void {
@@ -3940,6 +4378,82 @@ export class Game {
           const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = contact.grounded;
           this.terrainNormal.copy(contact.contactNormal);
+        } else if (name === 'tower-combat-review') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          this.screenshotCameraFov = 82;
+          for (const selector of ['#hud', '#crosshair', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.remove('hidden');
+          }
+          document.querySelector<HTMLElement>('#touch-controls')?.classList.add('hidden');
+
+          const audit = this.arena.group.userData.outpostTowerAudit as QuickSenseOutpostTowerAudit | undefined;
+          const entry = audit?.grounding.accessStairs[0];
+          if (!entry) throw new Error('QuickSense tower entry route is unavailable');
+          const entryStart = new THREE.Vector3(entry.start.x, entry.start.y, entry.start.z);
+          const entryEnd = new THREE.Vector3(entry.end.x, entry.end.y, entry.end.z);
+          const outward = entryStart.clone().sub(entryEnd).setY(0).normalize();
+          const playerSpawn = entryStart.clone().addScaledVector(outward, 3.5);
+          const playerFloor = this.arena.floorHeightAt(playerSpawn.x, playerSpawn.z, entryStart.y + 1.5);
+          if (playerFloor !== null) playerSpawn.y = playerFloor;
+          this.playerPosition.copy(playerSpawn);
+          this.playerVelocity.set(0, 0, 0);
+
+          const botPosition = entryEnd.clone().addScaledVector(outward, -1.2);
+          // Restrict both support probes to the entry flight. An unbounded ray
+          // correctly finds the flight deck 15 m overhead, but that is the wrong
+          // walkable layer for this ground-level review state.
+          const botFloor = this.arena.floorHeightAt(botPosition.x, botPosition.z, entryEnd.y + 1.5);
+          if (botFloor !== null) botPosition.y = botFloor;
+          const bot = this.bots[0];
+          bot.respawn(botPosition, false);
+          bot.health = 60;
+          bot.armor = 20;
+          bot.movementLocked = true;
+          bot.velocity.set(0, 0, 0);
+          const aimPoint = botPosition.clone().add(new THREE.Vector3(0, 1.35, 0));
+          const view = aimPoint.sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          bot.aimDirection.copy(view).negate();
+          bot.group.rotation.y = Math.atan2(bot.aimDirection.x, bot.aimDirection.z);
+          for (let index = 1; index < this.bots.length; index += 1) {
+            this.bots[index].respawn(this.arena.spawnPoints[(index + 8) % this.arena.spawnPoints.length], false);
+            this.bots[index].movementLocked = true;
+            this.bots[index].velocity.set(0, 0, 0);
+          }
+
+          this.selectedWeapon = WEAPONS.findIndex((weapon) => weapon.id === 'machine');
+          this.weaponCooldown = 0;
+          this.ammo.set('machine', this.weapon('machine').ammo);
+          this.buildWeaponModel();
+          const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          this.grounded = contact.grounded;
+          this.terrainNormal.copy(contact.contactNormal);
+          this.weaponVfx.clearTransientEffects();
+          this.updateCamera(0);
+          this.tryFirePlayerWeapon();
+          // Preserve one real tower strike alongside the enemy hit so the
+          // authored metal impact, tracer, and surface response can be reviewed
+          // in the same native gameplay frame.
+          const reviewYaw = this.yaw;
+          const reviewPitch = this.pitch;
+          const impactTarget = new THREE.Vector3(entry.end.x, entry.end.y + 3.6, entry.end.z + 5.4);
+          const impactView = impactTarget.sub(
+            this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)),
+          ).normalize();
+          this.yaw = Math.atan2(-impactView.x, -impactView.z);
+          this.pitch = Math.asin(impactView.y);
+          this.updateCamera(0);
+          this.weaponCooldown = 0;
+          this.tryFirePlayerWeapon();
+          this.yaw = reviewYaw;
+          this.pitch = reviewPitch;
+          this.updateCamera(0);
+          this.renderer.shadowMap.autoUpdate = false;
+          this.renderer.shadowMap.needsUpdate = false;
         } else if (name === 'combat') {
           this.mode = 'running';
           this.audio.setPaused(false);
@@ -4049,10 +4563,19 @@ export class Game {
         } else if (name === 'quicksense-overlook') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotCameraFov = 55;
-          this.playerPosition.set(0, 520, -20);
+          this.hud.hideStart();
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
+          this.screenshotCameraFov = 68;
+          // Anchor the map review to a validated live spawn. Fixed aerial
+          // coordinates became stale as QuickSense's vertical topology grew
+          // and could produce a plausible-looking but empty sky capture.
+          const spawn = this.arena.spawnPoints[0];
+          const supportY = this.arena.floorHeightAt(spawn.x, spawn.z, Number.POSITIVE_INFINITY) ?? spawn.y;
+          this.playerPosition.set(spawn.x, supportY, spawn.z);
           this.playerVelocity.set(0, 0, 0);
-          this.screenshotLookTarget.set(0, 8, 0);
+          this.screenshotLookTarget.copy(this.arena.corePosition);
           this.screenshotLookTargetActive = true;
           const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
@@ -4072,13 +4595,32 @@ export class Game {
           this.pitch = Math.asin(view.y);
           this.grounded = false;
           this.weaponModel.visible = false;
+        } else if (name === 'quicksense-crossings') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 56;
+          this.playerPosition.set(80, 48, -110);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(-78, 27, -42);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
         } else if (name === 'quicksense-ramp') {
           this.mode = 'running';
           this.audio.setPaused(true);
+          this.hud.hideStart();
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
           this.screenshotCameraFov = 58;
-          this.playerPosition.set(-46, 42, -150);
+          const spawn = this.arena.spawnPoints[Math.min(3, this.arena.spawnPoints.length - 1)];
+          const supportY = this.arena.floorHeightAt(spawn.x, spawn.z, Number.POSITIVE_INFINITY) ?? spawn.y;
+          this.playerPosition.set(spawn.x, supportY, spawn.z);
           this.playerVelocity.set(0, 0, 0);
-          this.screenshotLookTarget.set(0, 26, -74);
+          this.screenshotLookTarget.copy(this.arena.corePosition);
           this.screenshotLookTargetActive = true;
           const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
@@ -4088,10 +4630,129 @@ export class Game {
         } else if (name === 'quicksense-cliff') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotCameraFov = 56;
-          this.playerPosition.set(-110, 68, 62);
+          this.screenshotCameraFov = 60;
+          this.playerPosition.set(-110, 62, 65);
           this.playerVelocity.set(0, 0, 0);
-          this.screenshotLookTarget.set(-110, 36, 164);
+          this.screenshotLookTarget.set(-110, 32, 160);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name.startsWith('quicksense-tower-')) {
+          const id = name.slice('quicksense-tower-'.length);
+          if (!this.setQuickSenseTowerSectionCapture(id)) {
+            throw new Error(`Unknown QuickSense tower capture state: ${name}`);
+          }
+        } else if (name.startsWith('quicksense-structure-')) {
+          const id = name.slice('quicksense-structure-'.length);
+          if (!this.setQuickSenseStructureCapture(id)) {
+            throw new Error(`Unknown QuickSense structure capture state: ${name}`);
+          }
+        } else if (name.startsWith('quicksense-building-')) {
+          const buildingViews: Record<string, { camera: THREE.Vector3; target: THREE.Vector3; fov: number }> = {
+            'quicksense-building-northwest': {
+              camera: new THREE.Vector3(-74, 52, 112),
+              target: new THREE.Vector3(-110, 58, 172),
+              fov: 52,
+            },
+            'quicksense-building-northeast': {
+              camera: new THREE.Vector3(74, 56, 112),
+              target: new THREE.Vector3(110, 62, 172),
+              fov: 52,
+            },
+            'quicksense-building-southwest': {
+              camera: new THREE.Vector3(-82, 44, -112),
+              target: new THREE.Vector3(-134, 45, -172),
+              fov: 52,
+            },
+            'quicksense-building-southeast': {
+              camera: new THREE.Vector3(82, 48, -112),
+              target: new THREE.Vector3(134, 50, -172),
+              fov: 52,
+            },
+            'quicksense-building-west-scar': {
+              camera: new THREE.Vector3(-130, 55, -78),
+              target: new THREE.Vector3(-198, 58, -78),
+              fov: 52,
+            },
+            'quicksense-building-west-crown': {
+              camera: new THREE.Vector3(-130, 65, 80),
+              target: new THREE.Vector3(-198, 70, 80),
+              fov: 52,
+            },
+            'quicksense-building-east-crown': {
+              camera: new THREE.Vector3(130, 65, -80),
+              target: new THREE.Vector3(198, 72, -80),
+              fov: 52,
+            },
+            'quicksense-building-east-scar': {
+              camera: new THREE.Vector3(130, 57, 78),
+              target: new THREE.Vector3(198, 62, 78),
+              fov: 52,
+            },
+          };
+          const buildingView = buildingViews[name];
+          if (!buildingView) throw new Error(`Unknown QuickSense building capture state: ${name}`);
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = buildingView.fov;
+          this.playerPosition.copy(buildingView.camera);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.copy(buildingView.target);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-buildings-north') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 58;
+          this.playerPosition.set(0, 80, 92);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(0, 50, 158);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-buildings-south') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 58;
+          this.playerPosition.set(0, 76, -92);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(0, 46, -158);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-buildings-west') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 58;
+          this.playerPosition.set(-112, 78, 0);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(-182, 50, 0);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.weaponModel.visible = false;
+        } else if (name === 'quicksense-buildings-east') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.screenshotCameraFov = 58;
+          this.playerPosition.set(112, 80, 0);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(182, 52, 0);
           this.screenshotLookTargetActive = true;
           const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
@@ -4139,10 +4800,14 @@ export class Game {
           this.audio.setPaused(true);
           this.hud.hideStart();
           this.pausedForScreenshot = true;
-          this.playerPosition.set(0, 5.833, -30);
+          this.playerPosition.set(-58, 30, -28);
           this.playerVelocity.set(0, 0, 0);
-          this.yaw = -3;
-          this.pitch = 0.3;
+          // Aim at the west habitat wall. The former bridge-space target became
+          // open sky after the center-tower/road clearance pass.
+          const target = new THREE.Vector3(-80, 30, -5);
+          const view = target.sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
           this.grounded = false;
           this.toggleGrapple();
         } else if (name === 'quicksense-bounce') {
@@ -4192,12 +4857,19 @@ export class Game {
             );
           }
         }
-        if (name.startsWith('monsoon-') || ['quicksense-overlook', 'quicksense-depth', 'quicksense-ramp', 'quicksense-cliff'].includes(name)) {
+        if (
+          name.startsWith('monsoon-')
+          || name.startsWith('quicksense-tower-')
+          || name.startsWith('quicksense-structure-')
+          || name.startsWith('quicksense-building-')
+          || name.startsWith('quicksense-buildings-')
+          || ['quicksense-depth', 'quicksense-crossings', 'quicksense-cliff'].includes(name)
+        ) {
           this.pausedForScreenshot = true;
           this.renderer.shadowMap.autoUpdate = false;
           this.renderer.shadowMap.needsUpdate = false;
           this.hud.hideStart();
-          for (const selector of ['#hud', '#crosshair', '#touch-controls']) {
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
             document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
           }
         }
@@ -4228,6 +4900,29 @@ export class Game {
         this.toggleViewMode();
       },
       sampleFloorHeight: (x: number, z: number, fromY = 8) => this.arena.floorHeightAt(x, z, fromY),
+      sampleCapsulePlacement: (position) => {
+        const resolvedPosition = new THREE.Vector3(position.x, position.y, position.z);
+        const resolvedVelocity = new THREE.Vector3();
+        const contact = this.arena.resolvePlayerCapsule(resolvedPosition, resolvedVelocity);
+        return {
+          position: { x: resolvedPosition.x, y: resolvedPosition.y, z: resolvedPosition.z },
+          grounded: contact.grounded,
+          wallContact: contact.wallContact,
+          contacts: contact.contacts,
+          correction: { x: contact.correction.x, y: contact.correction.y, z: contact.correction.z },
+        };
+      },
+      sampleMovementHit: (start, end) => {
+        const hit = this.arena.movementSegmentHitDetails(
+          new THREE.Vector3(start.x, start.y, start.z),
+          new THREE.Vector3(end.x, end.y, end.z),
+        );
+        return hit ? {
+          point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+          normal: { x: hit.normal.x, y: hit.normal.y, z: hit.normal.z },
+          distance: hit.distance,
+        } : null;
+      },
       getSpawnPoints: () => this.arena.spawnPoints.map((point) => ({ x: point.x, y: point.y, z: point.z })),
       sampleLineOfSight: (start, end) => this.arena.hasLineOfSight(
         new THREE.Vector3(start.x, start.y, start.z),
@@ -4374,6 +5069,60 @@ export class Game {
         this.updateSpeedEffects(0, this.elapsed, true);
         this.publishDiagnostics();
       },
+      pickSceneObjects: (ndcX: number, ndcY: number) => {
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+        return raycaster.intersectObjects(this.scene.children, true)
+          .filter((intersection) => intersection.object.visible)
+          .slice(0, 24)
+          .map((intersection) => ({
+            name: intersection.object.name || intersection.object.parent?.name || '(unnamed)',
+            distance: intersection.distance,
+          }));
+      },
+      getStructureAudit: () => this.quickSenseStructureAudit(),
+      getOutpostTowerAudit: () => (
+        this.arena.group.userData.outpostTowerAudit as QuickSenseOutpostTowerAudit | undefined
+      ) ?? null,
+      getOutpostTowerReviewStates: () => [
+        'quicksense-tower-exterior-south',
+        'quicksense-tower-exterior-east',
+        'quicksense-tower-exterior-north',
+        'quicksense-tower-exterior-west',
+        'quicksense-tower-terrain-entry-east',
+        'quicksense-tower-lower-hall-east',
+        'quicksense-tower-lower-hall-west',
+        'quicksense-tower-stair-landing-player',
+        'quicksense-tower-mid-stair-player',
+        'quicksense-tower-interior-stair-player',
+        'quicksense-tower-flight-deck-south',
+        'quicksense-tower-flight-deck-north',
+      ],
+      getOutpostTowerVisibilityAudit: () => {
+        const tower = this.arena.group.getObjectByName('QuickSense imported outpost tower');
+        if (!tower) return null;
+        const hierarchy: Array<{ name: string; visible: boolean }> = [];
+        let current: THREE.Object3D | null = tower;
+        while (current) {
+          hierarchy.push({ name: current.name || current.type, visible: current.visible });
+          current = current.parent;
+        }
+        let meshCount = 0;
+        let visibleMeshCount = 0;
+        let visibleMaterialCount = 0;
+        tower.traverse((object) => {
+          const mesh = object as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          meshCount += 1;
+          if (mesh.visible) visibleMeshCount += 1;
+          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          visibleMaterialCount += materials.filter((material) => material.visible && material.opacity > 0).length;
+        });
+        return { hierarchy, meshCount, visibleMeshCount, visibleMaterialCount };
+      },
+      getOutpostTowerPieceAudit: () => (
+        this.arena.group.userData.outpostTowerPieces as QuickSenseOutpostTowerPieceAudit[] | undefined
+      ) ?? [],
       hideDebugUi: () => undefined,
     };
   }
@@ -4460,6 +5209,12 @@ export class Game {
         active: pickup.active,
         modelName: pickup.group.name,
         groundOffset: pickup.group.position.y - Number(pickup.group.userData.baseY ?? pickup.group.position.y),
+        position: {
+          x: pickup.group.position.x,
+          y: pickup.group.position.y,
+          z: pickup.group.position.z,
+        },
+        supportY: Number(pickup.group.userData.baseY ?? pickup.group.position.y) - 0.012,
         hasAuthoredWeapon: Boolean(pickup.group.getObjectByName(`${pickup.kind}-pickup-weapon-model`)),
       })),
       coreProgress: this.coreProgress,
@@ -4653,16 +5408,11 @@ export class Game {
       return;
     }
 
-    // The arena is static, but bots and pickups still need fresh directional
-    // shadows. Keep the authored 2048² shadow map and refresh it at a cadence
-    // that avoids rebuilding the entire shadow pass on every render.
-    const combatFrame = this.input.isFireHeld()
-      || this.weaponVfx.activeEffects > 0
-      || this.projectiles.length > 0
-      || this.grenades.length > 0;
-    if (!combatFrame && this.frame > 1 && this.fps >= 45 && this.frame % this.shadowRefreshInterval === 0) {
-      this.renderer.shadowMap.needsUpdate = true;
-    }
+    // QuickSense's environment is static, so its authored directional shadow
+    // atlas is valid after the first complete render. Rebuilding that 2048²
+    // atlas resubmits hundreds of arena meshes in one frame and presents as a
+    // recurring hitch rather than ordinary low FPS. Dynamic actors use their
+    // own local grounding and do not justify stalling the entire map.
     this.composer.render();
     this.renderer.shadowMap.autoUpdate = false;
   }

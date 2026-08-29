@@ -73,6 +73,8 @@ interface ThreeGameDiagnostics {
     active: boolean;
     modelName: string;
     groundOffset: number;
+    position: { x: number; y: number; z: number };
+    supportY: number;
     hasAuthoredWeapon: boolean;
   }>;
   coreProgress: number;
@@ -294,6 +296,23 @@ interface ThreeGameTestHooks {
   toggleViewMode(): void;
   /** Sample procedural terrain floor height for deterministic controller QA. */
   sampleFloorHeight(x: number, z: number, fromY?: number): number | null;
+  /** Resolve a stationary player capsule for deterministic clearance/support QA. */
+  sampleCapsulePlacement(position: { x: number; y: number; z: number }): {
+    position: { x: number; y: number; z: number };
+    grounded: boolean;
+    wallContact: boolean;
+    contacts: number;
+    correction: { x: number; y: number; z: number };
+  };
+  /** Return the first movement-only surface intersected by a segment. */
+  sampleMovementHit(
+    start: { x: number; y: number; z: number },
+    end: { x: number; y: number; z: number },
+  ): {
+    point: { x: number; y: number; z: number };
+    normal: { x: number; y: number; z: number };
+    distance: number;
+  } | null;
   /** Return the grounded procedural arena spawn points. */
   getSpawnPoints(): Array<{ x: number; y: number; z: number }>;
   /** Test world-space static terrain visibility between two points. */
@@ -331,6 +350,70 @@ interface ThreeGameTestHooks {
   setSpeedCapture(speedKmh: number): void;
   /** Hide debug UI (lil-gui) before capturing. */
   hideDebugUi(hidden: boolean): void;
+  /** Return visible scene objects beneath an NDC point for deterministic visual QA. */
+  pickSceneObjects(ndcX: number, ndcY: number): Array<{ name: string; distance: number }>;
+  /** Enumerate every authored QuickSense structure and its deterministic review state. */
+  getStructureAudit(): Array<{
+    id: string;
+    name: string;
+    category: string;
+    profile: string;
+    accent: string;
+    state: string;
+    connection: 'terrain-foundation' | 'terrain-tethers';
+    position: { x: number; y: number; z: number };
+  }>;
+  /** Return the imported center tower bounds and authored walkable stair route. */
+  getOutpostTowerAudit(): {
+    center: { x: number; y: number; z: number };
+    entrance: { x: number; y: number; z: number };
+    core: { x: number; y: number; z: number };
+    flights: Array<{
+      name: string;
+      start: { x: number; y: number; z: number };
+      end: { x: number; y: number; z: number };
+    }>;
+    bounds: {
+      min: { x: number; y: number; z: number };
+      max: { x: number; y: number; z: number };
+    };
+    height: number;
+    habitableHeight: number;
+    collision: {
+      engine: 'hybrid-authored-bvh';
+      triangles: number;
+      bodyTriangles: number;
+      walkableTriangles: number;
+    };
+    grounding: {
+      foundationTop: { x: number; y: number; z: number };
+      accessStairs: Array<{
+        start: { x: number; y: number; z: number };
+        end: { x: number; y: number; z: number };
+        width: number;
+      }>;
+    };
+  } | null;
+  /** Deterministic player-eye screenshots covering every major tower section. */
+  getOutpostTowerReviewStates(): string[];
+  /** Visibility diagnostics for the imported tower hierarchy and mesh materials. */
+  getOutpostTowerVisibilityAudit(): {
+    hierarchy: Array<{ name: string; visible: boolean }>;
+    meshCount: number;
+    visibleMeshCount: number;
+    visibleMaterialCount: number;
+  } | null;
+  /** Mesh-by-mesh role, geometry, UV, and world-bounds evidence for the tower. */
+  getOutpostTowerPieceAudit(): Array<{
+    name: string;
+    role: string;
+    triangles: number;
+    uvVertices: number;
+    bounds: {
+      min: { x: number; y: number; z: number };
+      max: { x: number; y: number; z: number };
+    };
+  }>;
 }
 
 interface Window {
@@ -343,4 +426,24 @@ interface Window {
   };
   __THREE_GAME_DIAGNOSTICS__?: ThreeGameDiagnostics;
   __THREE_GAME_TEST_HOOKS__?: ThreeGameTestHooks;
+  __THREE_FRAME_TIMING__?: {
+    frame: number;
+    refreshHz: number;
+    workStride: number;
+    updateMs: number;
+    renderMs: number;
+    totalMs: number;
+    worstFrame: {
+      frame: number;
+      updateMs: number;
+      renderMs: number;
+      totalMs: number;
+    } | null;
+    slowFrames: Array<{
+      frame: number;
+      updateMs: number;
+      renderMs: number;
+      totalMs: number;
+    }>;
+  };
 }

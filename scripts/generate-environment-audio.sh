@@ -73,8 +73,8 @@ generate_set music riftline-monsoon-bed-clean 1 16 0.56 \
   "seamless loopable dark synth soundtrack for a futuristic arena FPS, 92 BPM, C minor, warm analog bass pulse, restrained four-on-the-floor electronic groove, wide soft synth chords, sparse repeating arpeggio, tense but clean and musical, no field recording, no wind, no rain, no static, no birds, no nature sounds, no random noise, no vocals, no sound effects, seamless loop" \
   --loop
 
-generate_set music rift-menu-loop-clean 1 20 0.56 \
-  "seamless loopable title-screen music for a premium futuristic arena FPS, 84 BPM, D minor, warm analog synthesizer chords, clean soft bass pulse, sparse four-note arpeggio, restrained drum machine tick, confident and mysterious, clearly musical and polished, no field recording, no wind, no rain, no static, no birds, no nature sounds, no random noise, no vocals, no sound effects, seamless loop" \
+generate_set music rift-menu-lofi-depth 1 30 0.5 \
+  "original lo-fi sci-fi menu song for Riftline: dusty boom-bap drums at 70 BPM, deep sub-bass and tape-warm bass guitar, detuned Rhodes chords, bowed low strings and distant choir pads for cinematic depth, muted brass motif, vinyl crackle, cassette wobble, roomy reverb, dark midnight atmosphere, head-nod groove, no vocals, no speech, no SFX, no bright EDM, no copyrighted melody, seamless loop" \
   --loop
 
 generate_set movement footstep-grass 2 0.55 0.78 \
