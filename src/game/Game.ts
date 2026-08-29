@@ -28,7 +28,7 @@ import {
 import { WeatherGameplaySystem, type WeatherGameplaySnapshot } from '../systems/WeatherGameplaySystem';
 import { WeaponVfxSystem } from '../systems/WeaponVfxSystem';
 import { createSeededRandom } from '../utils/random';
-import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact } from './Arena';
+import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact, type SurfaceHit } from './Arena';
 import { GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
 import { JetpackEnergy } from './JetpackEnergy';
 import { skiMomentumCurve, type SkiMomentumCurve } from './SkiMomentum';
@@ -168,6 +168,11 @@ const QUICKSENSE_FOG_DENSITY = 0.00074;
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
 const WEAPON_VIEW_CLEARANCE = 0.1;
 const WEAPON_OBSTRUCTION_PROBE_LENGTH = 3.35;
+// View-model collision is intentionally stricter than player slope handling.
+// Traversable terrain, stairs, and ramps must never masquerade as a wall just
+// because their broad hitscan proxy crosses the low/right weapon envelope.
+const WEAPON_WALL_MAX_NORMAL_Y = MOVEMENT.maxSlopeCosine - 0.08;
+const WEAPON_WALL_MIN_FACING = 0.18;
 // Camera-to-muzzle reach includes each weapon's authored presentation scale,
 // side angle, and a small allowance for its visible muzzle cage. Keeping this
 // per weapon prevents the Longshot from forcing compact guns to tuck early.
@@ -366,8 +371,8 @@ export class Game {
   private readonly cameraEyeScratch = new THREE.Vector3();
   private readonly cameraProbeScratch = new THREE.Vector3();
   private readonly weaponProbeScratch = new THREE.Vector3();
+  private readonly weaponWallDirectionScratch = new THREE.Vector3();
   private readonly cameraRightScratch = new THREE.Vector3();
-  private readonly cameraDownScratch = new THREE.Vector3();
   private readonly cameraAimScratch = new THREE.Vector3();
   private readonly thirdPersonAnchorScratch = new THREE.Vector3();
   private readonly thirdPersonDesiredScratch = new THREE.Vector3();
@@ -2902,6 +2907,16 @@ export class Game {
     this.weaponModel.rotation.z = strafeRoll - this.weaponTurnSway.x * 0.18;
   }
 
+  private weaponWallHitDistance(hit: SurfaceHit | null, wallDirection: THREE.Vector3): number {
+    if (!hit || Math.abs(hit.normal.y) > WEAPON_WALL_MAX_NORMAL_Y) {
+      return WEAPON_OBSTRUCTION_PROBE_LENGTH;
+    }
+    const facing = -(hit.normal.x * wallDirection.x + hit.normal.z * wallDirection.z);
+    return facing >= WEAPON_WALL_MIN_FACING
+      ? hit.distance
+      : WEAPON_OBSTRUCTION_PROBE_LENGTH;
+  }
+
   private updateCamera(delta: number): void {
     const direction = this.viewDirection(this.cameraDirectionScratch);
     // Reassert this every frame because weapon rebuilds and deterministic QA
@@ -3081,19 +3096,23 @@ export class Game {
     this.camera.updateMatrixWorld(true);
     const probeOrigin = this.camera.position;
     const probeLength = WEAPON_OBSTRUCTION_PROBE_LENGTH;
-    const wallProbeEnd = this.cameraProbeScratch.copy(probeOrigin).addScaledVector(direction, probeLength);
-    const centerObstruction = this.arena.segmentHitDetails(probeOrigin, wallProbeEnd);
-    // The FPS weapon sits low/right, so a center ray alone misses wall edges
-    // and sloped terrain already intersecting the visible barrel envelope.
-    this.cameraRightScratch.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
-    this.cameraDownScratch.set(0, -1, 0).applyQuaternion(this.camera.quaternion);
+    const wallDirection = this.weaponWallDirectionScratch.set(direction.x, 0, direction.z).normalize();
+    const wallProbeEnd = this.cameraProbeScratch.copy(probeOrigin)
+      .addScaledVector(wallDirection, probeLength);
+    // Weapon clearance follows movement-grade collision, not broad hitscan
+    // proxies. The latter deliberately wrap whole curved route segments and
+    // caused false wall hits whenever the player crossed their AABB seams.
+    const centerObstruction = this.arena.movementSegmentHitDetails(probeOrigin, wallProbeEnd);
+    // The FPS weapon sits low/right, so retain a lateral envelope probe. Keep
+    // it horizontal: a downward offset repeatedly entered stair treads and
+    // ramp tops as the player's eye rose and fell over the surface.
+    this.cameraRightScratch.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     const weaponProbeEnd = this.weaponProbeScratch.copy(wallProbeEnd)
-      .addScaledVector(this.cameraRightScratch, 0.38)
-      .addScaledVector(this.cameraDownScratch, 0.3);
-    const weaponObstruction = this.arena.segmentHitDetails(probeOrigin, weaponProbeEnd);
+      .addScaledVector(this.cameraRightScratch, 0.38);
+    const weaponObstruction = this.arena.movementSegmentHitDetails(probeOrigin, weaponProbeEnd);
     this.weaponObstructionDistance = Math.min(
-      centerObstruction?.distance ?? probeLength,
-      weaponObstruction?.distance ?? probeLength,
+      this.weaponWallHitDistance(centerObstruction, wallDirection),
+      this.weaponWallHitDistance(weaponObstruction, wallDirection),
     );
     const downwardAim = THREE.MathUtils.smoothstep(-direction.y, 0.34, 0.94);
     const safeReach = WEAPON_VIEW_SAFE_REACH[WEAPONS[this.selectedWeapon].id];

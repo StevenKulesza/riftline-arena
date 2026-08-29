@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 const WEAPONS = ['disc', 'machine', 'shotgun', 'rocket', 'plasma', 'laser', 'sniper', 'rail'] as const;
 
-test('every first-person weapon retracts clear of walls and downward terrain', async ({ page }, testInfo) => {
+test('first-person weapons retract at walls without reacting to terrain traversal', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-chrome', 'View-model obstruction QA runs once in desktop Chromium.');
   test.setTimeout(180_000);
   const consoleErrors: string[] = [];
@@ -35,9 +35,41 @@ test('every first-person weapon retracts clear of walls and downward terrain', a
       hooks.setAim(yaw, -1.25);
       return window.__THREE_GAME_DIAGNOSTICS__!.renderer;
     }, weapon);
-    expect(ground.weaponTuck, `${weapon} should retract when the player looks into terrain`).toBeGreaterThan(0.15);
-    expect(ground.weaponMuzzleOccluded, `${weapon} muzzle must remain in front of terrain`).toBe(false);
+    expect(ground.weaponObstructionDistance, `${weapon} terrain must not register as a wall`).toBeGreaterThan(3.2);
+    expect(ground.weaponTuck, `${weapon} must not retract when looking down at terrain`).toBeLessThan(0.04);
   }
+
+  const sampleTraversalTuck = async (state: 'movement-slope' | 'view-0', key: 'ShiftLeft' | 'KeyW') => {
+    await page.evaluate((stateName) => {
+      const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+      hooks.setState(stateName);
+      hooks.setWeapon('sniper');
+      hooks.resetWeaponCaptureState();
+      hooks.setReducedMotion(true);
+      hooks.setPausedForScreenshot(false);
+    }, state);
+    await page.keyboard.down(key);
+    const samples = await page.evaluate(() => {
+      const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+      const values: number[] = [];
+      for (let index = 0; index < 120; index += 1) {
+        hooks.stepSimulation(1 / 120);
+        values.push(window.__THREE_GAME_DIAGNOSTICS__!.renderer.weaponTuck);
+      }
+      return values;
+    });
+    await page.keyboard.up(key);
+    return {
+      minimum: Math.min(...samples),
+      maximum: Math.max(...samples),
+    };
+  };
+
+  const slopeTuck = await sampleTraversalTuck('movement-slope', 'ShiftLeft');
+  expect(slopeTuck.maximum, 'skiing a mountain/ramp must not trigger wall tuck').toBeLessThan(0.05);
+
+  const stairTuck = await sampleTraversalTuck('view-0', 'KeyW');
+  expect(stairTuck.maximum, 'walking stairs must not trigger wall tuck').toBeLessThan(0.05);
 
   const bunkerFloor = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
