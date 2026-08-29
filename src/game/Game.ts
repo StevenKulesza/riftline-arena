@@ -168,6 +168,12 @@ const QUICKSENSE_FOG_DENSITY = 0.00074;
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
 const WEAPON_VIEW_CLEARANCE = 0.1;
 const WEAPON_OBSTRUCTION_PROBE_LENGTH = 3.35;
+// The view-model converges on the camera's reticle at a stable presentation
+// distance. Gameplay hitscan still uses the real surface hit below, but a
+// nearby ramp or stair must never pull the barrel behind its own muzzle and
+// flip the model by half a turn in one frame.
+const WEAPON_VIEW_CONVERGENCE_DISTANCE = 48;
+const WEAPON_VIEW_WALL_CONVERGENCE_DISTANCE = 0.9;
 // View-model collision is intentionally stricter than player slope handling.
 // Traversable terrain, stairs, and ramps must never masquerade as a wall just
 // because their broad hitscan proxy crosses the low/right weapon envelope.
@@ -365,6 +371,9 @@ export class Game {
     dragAcceleration: 0,
   };
   private weaponBobPhase = 0;
+  private weaponWalkWeight = 0;
+  private weaponVerticalLag = 0;
+  private weaponAirborneTime = 0;
   private readonly weaponTurnSway = new THREE.Vector2();
   private readonly cameraDirectionScratch = new THREE.Vector3();
   private readonly audioDirectionScratch = new THREE.Vector3();
@@ -494,7 +503,11 @@ export class Game {
       : this.mobileQuality
         ? 1
         : arena.mapInfo.name === 'QuickSense'
-          ? 1
+          // QuickSense already settled at 0.75 after its first adaptive
+          // window. Starting at the proven steady-state resolution prevents
+          // a live WebGL/composer target reallocation during the opening run
+          // and removes that avoidable hitch source from active play.
+          ? 0.75
           : 1.25;
     this.renderDprCap = this.maxRenderDpr;
     this.adaptiveQuality = new AdaptiveQualitySystem({
@@ -2883,7 +2896,6 @@ export class Game {
     jumpLag: number,
     strafeRoll: number,
     downwardAim: number,
-    bob: number,
   ): void {
     // At full obstruction the parent crosses behind the camera while the
     // visible nose folds out of the lower viewport. This range is large enough
@@ -2891,7 +2903,7 @@ export class Game {
     this.weaponModel.position.set(
       0.3 + this.weaponTurnSway.x + walkSwayX,
       -0.54 - this.recoil * 0.08 - this.weaponTuck * 0.52 - this.scopeBlend * 1.25
-        + this.weaponTurnSway.y + walkSwayY + jumpLag + bob,
+        + this.weaponTurnSway.y + walkSwayY + jumpLag,
       -0.5 + this.recoil * 0.1 + this.weaponTuck * WEAPON_VIEW_RETRACT_DISTANCE,
     );
     const boreDirection = this.weaponBoreScratch.copy(aimPointLocal).sub(this.weaponModel.position).normalize();
@@ -3083,15 +3095,38 @@ export class Game {
     this.camera.updateProjectionMatrix();
     this.recoil *= Math.exp(-delta * 11);
     const motionDelta = Math.max(delta, MOVEMENT.fixedStep);
-    const walkWeight = this.grounded && !this.skiHeld ? THREE.MathUtils.smoothstep(speed, 1.5, 11) : 0;
-    this.weaponBobPhase += motionDelta * (4.8 + Math.min(18, speed) * 0.62) * walkWeight;
+    const walkWeightTarget = this.grounded && !this.skiHeld
+      ? THREE.MathUtils.smoothstep(speed, 1.5, 11)
+      : 0;
+    // Ground contact legitimately flickers for a frame while stepping across
+    // authored stair seams. Ease the presentation weight so that collision
+    // bookkeeping never switches the view-model animation on and off.
+    this.weaponWalkWeight = THREE.MathUtils.lerp(
+      this.weaponWalkWeight,
+      walkWeightTarget,
+      1 - Math.exp(-motionDelta * 12),
+    );
+    this.weaponBobPhase += motionDelta * (4.8 + Math.min(18, speed) * 0.62) * this.weaponWalkWeight;
     const turnTargetX = THREE.MathUtils.clamp(-this.lookInput.x * 0.00072, -0.072, 0.072);
     const turnTargetY = THREE.MathUtils.clamp(this.lookInput.y * 0.00062, -0.055, 0.055);
     this.weaponTurnSway.x = THREE.MathUtils.lerp(this.weaponTurnSway.x, turnTargetX, 1 - Math.exp(-motionDelta * 15));
     this.weaponTurnSway.y = THREE.MathUtils.lerp(this.weaponTurnSway.y, turnTargetY, 1 - Math.exp(-motionDelta * 15));
-    const walkSwayX = Math.sin(this.weaponBobPhase) * 0.022 * walkWeight;
-    const walkSwayY = -Math.abs(Math.cos(this.weaponBobPhase)) * 0.014 * walkWeight;
-    const jumpLag = THREE.MathUtils.clamp(-this.playerVelocity.y * 0.0065, -0.072, 0.072);
+    const walkSwayX = Math.sin(this.weaponBobPhase) * 0.022 * this.weaponWalkWeight;
+    const walkSwayY = -Math.abs(Math.cos(this.weaponBobPhase)) * 0.014 * this.weaponWalkWeight;
+    this.weaponAirborneTime = this.grounded || this.skiHeld
+      ? 0
+      : this.weaponAirborneTime + motionDelta;
+    // Delay and low-pass airborne lag so real jumps retain weight while a
+    // single unresolved stair/ramp contact cannot kick the gun toward the
+    // camera. Grounded slope velocity is intentionally excluded.
+    const verticalLagTarget = this.weaponAirborneTime > 0.075
+      ? THREE.MathUtils.clamp(-this.playerVelocity.y * 0.0035, -0.04, 0.04)
+      : 0;
+    this.weaponVerticalLag = THREE.MathUtils.lerp(
+      this.weaponVerticalLag,
+      verticalLagTarget,
+      1 - Math.exp(-motionDelta * 9),
+    );
     const strafeRoll = THREE.MathUtils.clamp(-this.moveInput.x * speed * 0.00125, -0.028, 0.028);
     this.camera.updateMatrixWorld(true);
     const probeOrigin = this.camera.position;
@@ -3131,11 +3166,25 @@ export class Game {
     this.scopeRange = eye.distanceTo(aimPointWorld);
     this.hud.setSniperScope(this.scopeBlend, this.scopeRange, BASE_GAME_FOV / Math.max(24, this.camera.fov));
     this.camera.updateMatrixWorld(true);
-    const aimPointLocal = this.camera.worldToLocal(this.cameraLocalAimScratch.copy(aimPointWorld));
-    const bob = this.reducedMotion
-      ? 0
-      : Math.sin(this.elapsed * Math.min(18, 5 + speed)) * Math.min(0.025, speed * 0.0008);
-    this.applyWeaponViewPose(aimPointLocal, walkSwayX, walkSwayY, jumpLag, strafeRoll, downwardAim, bob);
+    // Keep presentation convergence independent from collision range. The old
+    // surface-local target could land behind the low/right weapon origin when
+    // the reticle crossed nearby terrain, producing the reported rapid
+    // forward/back flip even though wall tuck never activated.
+    const wallConvergence = THREE.MathUtils.smoothstep(this.weaponTuck, 0.42, 0.72);
+    const convergenceDistance = THREE.MathUtils.lerp(
+      WEAPON_VIEW_CONVERGENCE_DISTANCE,
+      WEAPON_VIEW_WALL_CONVERGENCE_DISTANCE,
+      wallConvergence,
+    );
+    const aimPointLocal = this.cameraLocalAimScratch.set(0, 0, -convergenceDistance);
+    this.applyWeaponViewPose(
+      aimPointLocal,
+      walkSwayX,
+      walkSwayY,
+      this.weaponVerticalLag,
+      strafeRoll,
+      downwardAim,
+    );
 
     // Verify the authored muzzle against real map geometry. This is diagnostic
     // only: feeding it back into weaponTuck caused the old full-tuck latch,
@@ -5018,6 +5067,9 @@ export class Game {
         this.recoil = 0;
         this.laserHeat = 0;
         this.weaponTuck = 0;
+        this.weaponWalkWeight = 0;
+        this.weaponVerticalLag = 0;
+        this.weaponAirborneTime = 0;
         this.trauma = 0;
         this.weaponCooldown = 0;
         this.discBounceCount = 0;
@@ -5358,6 +5410,16 @@ export class Game {
         weaponModelTriangles: this.weaponVisual?.triangleCount ?? 0,
         weaponTuck: this.weaponTuck,
         weaponObstructionDistance: this.weaponObstructionDistance,
+        weaponViewPosition: {
+          x: this.weaponModel.position.x,
+          y: this.weaponModel.position.y,
+          z: this.weaponModel.position.z,
+        },
+        weaponViewRotation: {
+          x: this.weaponModel.rotation.x,
+          y: this.weaponModel.rotation.y,
+          z: this.weaponModel.rotation.z,
+        },
         weaponMuzzleDistance: this.weaponMuzzleDistance,
         weaponMuzzleForwardDistance: this.weaponMuzzleForwardDistance,
         weaponMuzzleOccluded: this.weaponMuzzleOccluded,

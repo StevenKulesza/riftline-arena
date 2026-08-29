@@ -87,6 +87,7 @@ test('first-person weapons retract at walls without reacting to terrain traversa
     hooks.setAim(Math.PI * 0.5, 0);
   }, bunkerFloor);
 
+  const wallSamples: Array<{ weapon: typeof WEAPONS[number]; renderer: ThreeGameDiagnostics['renderer'] }> = [];
   for (const weapon of WEAPONS) {
     const wall = await page.evaluate((id) => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
@@ -97,8 +98,12 @@ test('first-person weapons retract at walls without reacting to terrain traversa
     }, weapon);
     expect(wall.weaponObstructionDistance, `${weapon} test lane must see the bunker wall`).toBeLessThan(2.25);
     expect(wall.weaponTuck, `${weapon} should retract immediately at the wall`).toBeGreaterThan(0.2);
-    expect(wall.weaponMuzzleOccluded, `${weapon} muzzle must remain behind the wall`).toBe(false);
+    wallSamples.push({ weapon, renderer: wall });
   }
+  expect(
+    wallSamples.filter(({ renderer }) => renderer.weaponMuzzleOccluded),
+    `every muzzle must remain behind the wall: ${JSON.stringify(wallSamples)}`,
+  ).toEqual([]);
 
   // Exercise the player's real keyboard path at speed, not only deterministic
   // transform hooks. The weapon must enter tuck on the same frame the capsule

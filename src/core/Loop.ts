@@ -1,3 +1,11 @@
+const CADENCE_SAMPLE_SIZE = 60;
+
+export const workStrideForRefreshRate = (refreshHz: number): number => (
+  Number.isFinite(refreshHz) && refreshHz >= 96
+    ? Math.max(2, Math.round(refreshHz / 60))
+    : 1
+);
+
 export class Loop {
   private frameId = 0;
   private frame = 0;
@@ -55,22 +63,20 @@ export class Loop {
     this.animationFrame += 1;
     // A 120/144/165/240 Hz panel should not multiply the arena animation,
     // physics orchestration, post stack, and GPU submissions by its native
-    // refresh rate. Measure only the first stable callbacks, then select an
-    // integer cadence near 60 Hz. Ninety-Hz and ordinary 60-Hz displays keep
-    // every callback to avoid uneven 45-Hz presentation.
-    if (this.cadenceSampleCount < 12 && animationInterval >= 2 && animationInterval <= 12) {
+    // refresh rate. Sample a full rolling window: the first handful of browser
+    // callbacks can arrive at a temporary double cadence while the tab is
+    // being presented, and permanently treating a 60 Hz display as 120 Hz
+    // cuts live play to 30 FPS.
+    if (animationInterval >= 2 && animationInterval <= 20) {
       this.cadenceIntervalTotal += animationInterval;
       this.cadenceSampleCount += 1;
-      if (this.cadenceSampleCount === 12) {
+      if (this.cadenceSampleCount === CADENCE_SAMPLE_SIZE) {
         const refreshHz = 1_000 / (this.cadenceIntervalTotal / this.cadenceSampleCount);
         this.timing.refreshHz = refreshHz;
-        // A 120 Hz panel can measure near 100 Hz while the compositor is busy
-        // during startup. The old 105 Hz cutoff then misclassified the same
-        // display from run to run and occasionally submitted the full arena on
-        // every callback. Keep genuine 90 Hz panels on stride 1, but absorb
-        // realistic startup jitter around the high-refresh boundary.
-        if (refreshHz >= 96) this.workStride = Math.max(2, Math.round(refreshHz / 60));
+        this.workStride = workStrideForRefreshRate(refreshHz);
         this.timing.workStride = this.workStride;
+        this.cadenceSampleCount = 0;
+        this.cadenceIntervalTotal = 0;
       }
     }
     if (this.workStride > 1 && this.animationFrame % this.workStride !== 0) {

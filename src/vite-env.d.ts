@@ -223,6 +223,8 @@ interface ThreeGameDiagnostics {
     weaponModelTriangles: number;
     weaponTuck: number;
     weaponObstructionDistance: number;
+    weaponViewPosition: { x: number; y: number; z: number };
+    weaponViewRotation: { x: number; y: number; z: number };
     weaponMuzzleDistance: number;
     weaponMuzzleForwardDistance: number;
     weaponMuzzleOccluded: boolean;
