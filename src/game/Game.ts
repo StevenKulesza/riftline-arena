@@ -914,7 +914,7 @@ export class Game {
     );
     this.jetpackActive = jetpackEnergy.active;
     if (!previousJetpackEnergy.locked && jetpackEnergy.locked) {
-      this.hud.message('JETPACK DEPLETED · LAND TO RECHARGE');
+      this.hud.message('JETPACK DEPLETED · COAST TO RECHARGE');
       this.hud.pulseJetpack('depleted');
       this.audio.jetpackDepleted();
     } else if (previousJetpackEnergy.locked && !jetpackEnergy.locked) {

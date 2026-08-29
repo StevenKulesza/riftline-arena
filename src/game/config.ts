@@ -82,7 +82,8 @@ export const MOVEMENT = {
   jetpackMaxRiseSpeed: 18,
   jetpackBurnSeconds: 2.25,
   jetpackRechargeDelaySeconds: 0.85,
-  jetpackRechargeSeconds: 2.75,
+  // Refill at half the burn rate: 2.25 s of thrust costs 4.5 s of recovery.
+  jetpackRechargeSeconds: 4.5,
   jetpackRestartCharge: 0.2,
   gravity: 25,
   coyoteTime: 0.1,
