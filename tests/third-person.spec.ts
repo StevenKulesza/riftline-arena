@@ -46,8 +46,8 @@ test('switches to a readable third-person player presentation', async ({ browser
   expect(thirdPerson?.player.avatarVisible).toBe(true);
   expect(thirdPerson?.player.firstPersonWeaponVisible).toBe(false);
   expect(thirdPerson?.player.jetpacking).toBe(false);
-  expect(thirdPerson?.camera.distance).toBeGreaterThan(2.5);
-  expect(thirdPerson?.camera.distance).toBeLessThan(4.5);
+  expect(thirdPerson?.camera.distance).toBeGreaterThan(1.75);
+  expect(thirdPerson?.camera.distance).toBeLessThan(2.8);
   expect(thirdPerson?.player.modelHeight).toBeGreaterThan(1.5);
   if (!thirdPerson) throw new Error('Missing third-person diagnostics');
   const cameraOffset = {
@@ -59,12 +59,12 @@ test('switches to a readable third-person player presentation', async ({ browser
     + cameraOffset.z * Math.cos(thirdPerson.player.yaw);
   const shoulderDistance = cameraOffset.x * Math.cos(thirdPerson.player.yaw)
     - cameraOffset.z * Math.sin(thirdPerson.player.yaw);
-  expect(rearDistance).toBeGreaterThan(1.75);
-  expect(rearDistance).toBeLessThan(3.2);
-  expect(shoulderDistance).toBeGreaterThan(0.25);
-  expect(shoulderDistance).toBeLessThan(1.15);
-  expect(cameraOffset.y).toBeGreaterThan(1.05);
-  expect(cameraOffset.y).toBeLessThan(3.3);
+  expect(rearDistance).toBeGreaterThan(1.15);
+  expect(rearDistance).toBeLessThan(1.75);
+  expect(shoulderDistance).toBeGreaterThan(0.42);
+  expect(shoulderDistance).toBeLessThan(1);
+  expect(cameraOffset.y).toBeGreaterThan(1.2);
+  expect(cameraOffset.y).toBeLessThan(2.5);
   expect(await page.evaluate(() => document.querySelector('#view-mode-value')?.textContent)).toBe('Third person');
   const canvasBox = await page.evaluate(() => {
     const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas');
