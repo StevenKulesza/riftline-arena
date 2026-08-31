@@ -4,6 +4,7 @@ import {
   AUDIO_ASSET_URLS,
   CONFIRM_AUDIO_POOLS,
   COUNTDOWN_AUDIO_POOLS,
+  DRONE_BEAM_AUDIO_POOL,
   EMPTY_TRIGGER_POOL,
   EQUIP_AUDIO_POOLS,
   IMPACT_AUDIO_POOLS,
@@ -37,6 +38,8 @@ export type AudioDiagnostics = {
   activeVoicesByPool: Record<string, number>;
   jetpackActive: boolean;
   laserBeamActive: boolean;
+  droneBeamVoices: number;
+  droneBeamAssetReady: boolean;
   lastEvent: string;
   playCounts: Record<string, number>;
   resets: number;
@@ -48,6 +51,14 @@ type ActiveVoice = {
   source: AudioScheduledSourceNode;
   nodes: AudioNode[];
   poolId: string;
+};
+
+type DroneBeamVoice = {
+  voice: ActiveVoice;
+  gain: GainNode;
+  panner: PannerNode;
+  requested: boolean;
+  stopTimer: number;
 };
 
 const GROUP_VOLUMES: Record<AudioGroup, number> = {
@@ -69,6 +80,8 @@ const BACKGROUND_AUDIO_DECODE_CONCURRENCY = 12;
 const LASER_BEAM_ATTACK_SECONDS = 0.14;
 const LASER_BEAM_RELEASE_SECONDS = 0.2;
 const LASER_BEAM_VOLUME = 0.24;
+const DRONE_BEAM_ATTACK_SECONDS = 0.09;
+const DRONE_BEAM_RELEASE_SECONDS = 0.16;
 
 export class AudioSystem {
   private context: AudioContext | null = null;
@@ -102,6 +115,7 @@ export class AudioSystem {
   private laserBeamGain: GainNode | null = null;
   private laserBeamRequested = false;
   private laserBeamStopTimer = 0;
+  private readonly droneBeamVoices = new Map<string, DroneBeamVoice>();
 
   constructor() {
     window.addEventListener('pointerdown', this.onUserGesture);
@@ -135,6 +149,7 @@ export class AudioSystem {
       [
         ...Object.values(COUNTDOWN_AUDIO_POOLS).flatMap((pool) => pool.urls),
         ...AMBIENCE_AUDIO_POOLS.flatMap((pool) => pool.urls),
+        ...DRONE_BEAM_AUDIO_POOL.urls,
       ].map(
         (url) => this.loadAsset(context, url),
       ),
@@ -209,6 +224,34 @@ export class AudioSystem {
       return;
     }
     this.startLaserBeam();
+  }
+
+  /** Keeps each hostile drone's generated beam loop spatially attached to its eye. */
+  setDroneBeamActive(emitterId: string, active: boolean, position: AudioVector): void {
+    const existing = this.droneBeamVoices.get(emitterId);
+    if (!active) {
+      if (existing?.requested) this.fadeDroneBeamOut(emitterId, existing);
+      return;
+    }
+    if (existing) {
+      existing.requested = true;
+      window.clearTimeout(existing.stopTimer);
+      existing.stopTimer = 0;
+      const context = this.context;
+      if (!context) return;
+      const now = context.currentTime;
+      existing.panner.positionX.linearRampToValueAtTime(position.x, now + 0.05);
+      existing.panner.positionY.linearRampToValueAtTime(position.y, now + 0.05);
+      existing.panner.positionZ.linearRampToValueAtTime(position.z, now + 0.05);
+      existing.gain.gain.cancelScheduledValues(now);
+      existing.gain.gain.setValueAtTime(Math.max(0.0001, existing.gain.gain.value), now);
+      existing.gain.gain.exponentialRampToValueAtTime(
+        DRONE_BEAM_AUDIO_POOL.volume,
+        now + DRONE_BEAM_ATTACK_SECONDS * 0.65,
+      );
+      return;
+    }
+    this.startDroneBeam(emitterId, position);
   }
 
   dryFire(id: WeaponId): void {
@@ -402,6 +445,8 @@ export class AudioSystem {
       ),
       jetpackActive: this.jetpackActive,
       laserBeamActive: Boolean(this.laserBeamVoice && this.laserBeamRequested),
+      droneBeamVoices: [...this.droneBeamVoices.values()].filter((voice) => voice.requested).length,
+      droneBeamAssetReady: DRONE_BEAM_AUDIO_POOL.urls.some((url) => this.buffers.has(url)),
       lastEvent: this.lastEvent,
       playCounts: Object.fromEntries(this.playCounts),
       resets: this.resetCount,
@@ -431,6 +476,7 @@ export class AudioSystem {
     this.laserBeamVoice = null;
     this.laserBeamGain = null;
     this.laserBeamRequested = false;
+    this.droneBeamVoices.clear();
   }
 
   private readonly onUserGesture = (): void => {
@@ -602,6 +648,71 @@ export class AudioSystem {
     this.laserBeamGain = gain;
     this.laserBeamVoice = this.trackVoice(source, nodes, 'weapon.laser', 1);
     source.start();
+  }
+
+  private startDroneBeam(emitterId: string, position: AudioVector): void {
+    if (!this.canPlay()) return;
+    const context = this.context;
+    const group = this.groups.get(DRONE_BEAM_AUDIO_POOL.group);
+    const url = DRONE_BEAM_AUDIO_POOL.urls.find((candidate) => this.buffers.has(candidate));
+    const buffer = url ? this.buffers.get(url) : undefined;
+    if (!context || !group || !buffer) return;
+
+    const source = context.createBufferSource();
+    const gain = context.createGain();
+    source.buffer = buffer;
+    source.loop = true;
+    source.loopStart = 0;
+    source.loopEnd = buffer.duration;
+    const numericId = Number(emitterId.match(/\d+$/)?.[0] ?? 1);
+    source.playbackRate.value = 0.989 + numericId * 0.006;
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(
+      DRONE_BEAM_AUDIO_POOL.volume,
+      context.currentTime + DRONE_BEAM_ATTACK_SECONDS,
+    );
+    const nodes = this.connectVoice(
+      source,
+      gain,
+      group,
+      { position },
+      DRONE_BEAM_AUDIO_POOL.tone,
+    );
+    const panner = nodes[nodes.length - 1] as PannerNode;
+    this.recordEvent(DRONE_BEAM_AUDIO_POOL.id);
+    const voice = this.trackVoice(
+      source,
+      nodes,
+      DRONE_BEAM_AUDIO_POOL.id,
+      DRONE_BEAM_AUDIO_POOL.maxVoices,
+    );
+    this.droneBeamVoices.set(emitterId, {
+      voice,
+      gain,
+      panner,
+      requested: true,
+      stopTimer: 0,
+    });
+    source.start();
+  }
+
+  private fadeDroneBeamOut(emitterId: string, beam: DroneBeamVoice): void {
+    const context = this.context;
+    beam.requested = false;
+    window.clearTimeout(beam.stopTimer);
+    if (!context) {
+      this.stopVoice(beam.voice);
+      return;
+    }
+    const now = context.currentTime;
+    beam.gain.gain.cancelScheduledValues(now);
+    beam.gain.gain.setValueAtTime(Math.max(0.0001, beam.gain.gain.value), now);
+    beam.gain.gain.exponentialRampToValueAtTime(0.0001, now + DRONE_BEAM_RELEASE_SECONDS);
+    beam.stopTimer = window.setTimeout(() => {
+      const current = this.droneBeamVoices.get(emitterId);
+      if (current !== beam || current.requested) return;
+      this.stopVoice(current.voice);
+    }, (DRONE_BEAM_RELEASE_SECONDS + 0.04) * 1_000);
   }
 
   private fadeLaserBeamOut(): void {
@@ -812,6 +923,12 @@ export class AudioSystem {
       this.laserBeamStopTimer = 0;
       this.laserBeamVoice = null;
       this.laserBeamGain = null;
+    }
+    for (const [emitterId, beam] of this.droneBeamVoices) {
+      if (beam.voice !== voice) continue;
+      window.clearTimeout(beam.stopTimer);
+      this.droneBeamVoices.delete(emitterId);
+      break;
     }
     voice.source.disconnect();
     for (const node of voice.nodes) node.disconnect();

@@ -19,24 +19,50 @@ test('player shots originate at authored muzzle sockets and laser remains contin
     hooks.setPausedForScreenshot(true);
   });
 
+  const reticleSignatures = new Set<string>();
   for (const weapon of ['machine', 'shotgun', 'rocket', 'plasma', 'laser', 'sniper', 'rail', 'disc'] as const) {
-    const wear = await page.evaluate((id) => {
-      window.__THREE_GAME_TEST_HOOKS__!.setWeapon(id);
+    await page.evaluate((id) => window.__THREE_GAME_TEST_HOOKS__!.setWeapon(id), weapon);
+    await page.waitForFunction((id) => document.querySelector<HTMLElement>('#crosshair')?.dataset.weapon === id, weapon);
+    const state = await page.evaluate(() => {
       const renderer = window.__THREE_GAME_DIAGNOSTICS__!.renderer;
+      const crosshair = document.querySelector<HTMLElement>('#crosshair')!;
+      const topArm = crosshair.querySelector<HTMLElement>('.reticle-arm--top')!;
       return {
-        materials: renderer.weaponWearMaterials,
-        textures: renderer.weaponWearTextures,
-        source: renderer.weaponAssetSource,
-        meshes: renderer.weaponModelMeshes,
-        triangles: renderer.weaponModelTriangles,
+        wear: {
+          materials: renderer.weaponWearMaterials,
+          textures: renderer.weaponWearTextures,
+          source: renderer.weaponAssetSource,
+          meshes: renderer.weaponModelMeshes,
+          triangles: renderer.weaponModelTriangles,
+        },
+        reticle: {
+          weapon: crosshair.dataset.weapon,
+          arms: crosshair.querySelectorAll('.reticle-arm').length,
+          centerElements: crosshair.querySelectorAll('i').length,
+          centerBefore: getComputedStyle(crosshair, '::before').content,
+          signature: [
+            getComputedStyle(crosshair).width,
+            getComputedStyle(crosshair).getPropertyValue('--reticle-gap'),
+            getComputedStyle(crosshair).getPropertyValue('--reticle-length'),
+            getComputedStyle(crosshair).getPropertyValue('--reticle-color'),
+            getComputedStyle(topArm).display,
+            getComputedStyle(topArm).transform,
+          ].join('|'),
+        },
       };
-    }, weapon);
-    expect(wear.source).toBe('procedural');
-    expect(wear.materials, `${weapon} must use the shared battle-wear material kit`).toBe(5);
-    expect(wear.textures, `${weapon} must carry albedo, roughness, normal, and metalness maps`).toBe(4);
-    expect(wear.meshes, `${weapon} needs an authored hard-surface part hierarchy`).toBeGreaterThan(20);
-    expect(wear.triangles, `${weapon} needs enough geometry to hold its silhouette`).toBeGreaterThan(500);
+    });
+    expect(state.wear.source).toBe('procedural');
+    expect(state.wear.materials, `${weapon} must use the shared battle-wear material kit`).toBe(5);
+    expect(state.wear.textures, `${weapon} must carry albedo, roughness, normal, and metalness maps`).toBe(4);
+    expect(state.wear.meshes, `${weapon} needs an authored hard-surface part hierarchy`).toBeGreaterThan(20);
+    expect(state.wear.triangles, `${weapon} needs enough geometry to hold its silhouette`).toBeGreaterThan(500);
+    expect(state.reticle.weapon).toBe(weapon);
+    expect(state.reticle.arms).toBe(4);
+    expect(state.reticle.centerElements, `${weapon} must not render a center dot`).toBe(0);
+    expect(state.reticle.centerBefore, `${weapon} must not render the old center ring`).toBe('none');
+    reticleSignatures.add(state.reticle.signature);
   }
+  expect(reticleSignatures.size, 'each weapon must own a distinct reticle profile').toBe(8);
 
   const combatFeedback = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
@@ -55,6 +81,21 @@ test('player shots originate at authored muzzle sockets and laser remains contin
   expect(combatFeedback.hitTicks).toBe(4);
   expect(combatFeedback.pitchAfter - combatFeedback.pitchBefore, 'machine gun gets a restrained upward kick').toBeGreaterThan(0.0005);
   expect(combatFeedback.pitchAfter - combatFeedback.pitchBefore).toBeLessThan(0.002);
+
+  const killFeedback = await page.evaluate(() => {
+    window.__THREE_GAME_TEST_HOOKS__!.triggerHitMarker(true);
+    const crosshair = document.querySelector<HTMLElement>('#crosshair')!;
+    return {
+      className: crosshair.className,
+      ticks: crosshair.querySelectorAll('.hit-tick').length,
+      centerElements: crosshair.querySelectorAll('i').length,
+      centerBefore: getComputedStyle(crosshair, '::before').content,
+    };
+  });
+  expect(killFeedback.className).toContain('kill');
+  expect(killFeedback.ticks).toBe(4);
+  expect(killFeedback.centerElements).toBe(0);
+  expect(killFeedback.centerBefore).toBe('none');
 
   await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;

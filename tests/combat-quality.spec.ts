@@ -53,7 +53,7 @@ test('long-range sniper, human aim variance, soft smoke, and continuous damage b
     hooks.setWeapon('sniper');
     hooks.setAmmo('sniper', 8);
     hooks.toggleViewMode();
-    const eye = { x: lane.player.x, y: lane.player.y + 1.52, z: lane.player.z };
+    const eye = { x: lane.player.x, y: lane.player.y + 54 / 56, z: lane.player.z };
     const target = { x: lane.bot.x, y: lane.bot.y + 0.92, z: lane.bot.z };
     const dx = target.x - eye.x;
     const dy = target.y - eye.y;

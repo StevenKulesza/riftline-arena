@@ -9,6 +9,8 @@ import * as THREE from 'three';
  */
 
 export const FIGHTER_FIXED_STEP = 1 / 120;
+/** QuickSense's hard flight ceiling, doubled from the original 150 m limit. */
+export const QUICKSENSE_FIGHTER_CEILING_Y = 300;
 
 export type FighterControlIntent = Readonly<{
   /** Forward throttle in [-1, 1]. Negative values request reverse thrust. */
@@ -223,7 +225,7 @@ export const FIGHTER_FLIGHT_TUNING = {
     minX: -176,
     maxX: 176,
     minY: -20,
-    maxY: 150,
+    maxY: QUICKSENSE_FIGHTER_CEILING_Y,
     minZ: -156,
     maxZ: 156,
   },

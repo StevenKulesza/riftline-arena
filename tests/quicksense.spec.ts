@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
 
 const diagnostics = async (page: import('@playwright/test').Page) => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!);
 
@@ -42,6 +43,91 @@ test('QuickSense loads as a second authored arena with layered flow geometry', a
   expect(result.layeredSpine.every((height) => height !== null)).toBe(true);
   const spine = result.layeredSpine as number[];
   expect(Math.max(...spine) - Math.min(...spine)).toBeGreaterThan(20);
+});
+
+test('QuickSense projectile collision follows visible roads and mountain faces', async ({ page }) => {
+  // Use a tiny same-origin document so this geometry-level test does not load
+  // and render a second full arena behind the directly constructed fixture.
+  await page.goto('/assets/ui/rift-logo.png');
+
+  const result = await page.evaluate(async () => {
+    const moduleUrl = '/src/game/maps/QuickSenseArena.ts';
+    const { QuickSenseArena } = await import(moduleUrl);
+    const arena = new QuickSenseArena(450600);
+    const point = (x: number, y: number, z: number) => arena.group.position.clone().set(x, y, z);
+    const roadClearance = arena.segmentHitDetails(
+      point(-28.59596010937328, 6.8, -147.84),
+      point(-44.59596010937328, 6.8, -147.84),
+    );
+    const mountainRays = [
+      [point(0, 64, 0), point(260, 64, 0)],
+      [point(0, 64, 0), point(225.1666, 64, 130)],
+    ].map(([start, end]) => arena.segmentHitDetails(start, end));
+    const audit = arena.group.userData.staticWorldShotAudit as {
+      engine: string;
+      triangles: number;
+      sourceMeshes: number;
+      broadProxyFallbacks: number;
+    };
+    const response = {
+      roadClearance: roadClearance ? { distance: roadClearance.distance, point: { ...roadClearance.point } } : null,
+      mountainRays: mountainRays.map((hit) => hit ? { distance: hit.distance, point: { ...hit.point } } : null),
+      audit,
+    };
+    arena.dispose();
+    return response;
+  });
+
+  expect(result.audit.engine).toBe('visible-static-projectile-bvh');
+  expect(result.audit.triangles).toBeGreaterThan(40_000);
+  expect(result.audit.sourceMeshes).toBeGreaterThan(250);
+  expect(result.audit.broadProxyFallbacks).toBe(0);
+  expect(result.roadClearance, 'a shot above/outside the visible road must stay in open air').toBeNull();
+  expect(result.mountainRays.every((hit) => hit !== null), 'every sampled visible mountain face must block shots').toBe(true);
+  expect(result.mountainRays.every((hit) => hit!.distance > 160 && hit!.distance < 230)).toBe(true);
+});
+
+test('loaded QuickSense keeps open-air road shots clear and mountain sightlines blocked', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chrome', 'Collision integration capture runs once in desktop Chromium.');
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/?map=quicksense&qa=physics&mapSeed=450600');
+  await page.waitForFunction(() => (
+    Boolean(window.__THREE_GAME_TEST_HOOKS__)
+    && window.__THREE_GAME_DIAGNOSTICS__?.map.name === 'QuickSense'
+    && Boolean(window.__THREE_GAME_DIAGNOSTICS__?.map.ready)
+  ));
+  const collision = await page.evaluate(() => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    const roadOpen = hooks.sampleLineOfSight(
+      { x: -28.59596010937328, y: 6.8, z: -147.84 },
+      { x: -44.59596010937328, y: 6.8, z: -147.84 },
+    );
+    const mountainBlocked = [
+      hooks.sampleLineOfSight({ x: 0, y: 64, z: 0 }, { x: 260, y: 64, z: 0 }),
+      hooks.sampleLineOfSight({ x: 0, y: 64, z: 0 }, { x: 225.1666, y: 64, z: 130 }),
+    ].map((clear) => !clear);
+    hooks.setState('quicksense-ramp');
+    hooks.setPausedForScreenshot(true);
+    return { roadOpen, mountainBlocked };
+  });
+  await page.waitForTimeout(150);
+  const captureDirectory = 'artifacts/quicksense-projectile-collision';
+  mkdirSync(captureDirectory, { recursive: true });
+  await page.screenshot({
+    path: `${captureDirectory}/road-mountain-verification.png`,
+    animations: 'disabled',
+  });
+
+  expect(collision.roadOpen, 'the reported road-edge shot must remain in open air').toBe(true);
+  expect(collision.mountainBlocked, 'both visible mountain faces must occlude projectiles').toEqual([true, true]);
+  expect(consoleErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
 });
 
 test('QuickSense seats every route and ramp support below the deck underside', async ({ page }) => {

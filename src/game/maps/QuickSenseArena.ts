@@ -494,6 +494,8 @@ export class QuickSenseArena implements ArenaRuntime {
   private staticWorldFloorBoundsTree: MeshBVH | null = null;
   private readonly staticWorldFloorBounds = new THREE.Box3();
   private staticWorldFloorTriangleCount = 0;
+  private staticWorldShotBoundsTree: MeshBVH | null = null;
+  private staticWorldShotTriangleCount = 0;
   private readonly outpostTowerFloorRay = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
   private readonly outpostTowerCapsuleSegment = new THREE.Line3();
   private readonly outpostTowerCapsuleBounds = new THREE.Box3();
@@ -621,7 +623,6 @@ export class QuickSenseArena implements ArenaRuntime {
     this.textures.push(...surfaceTextures.all);
     const groundMaterial = this.material('QuickSense sandstone basin floor', 0xffffff, 0.01, 0.94);
     const groundFoundationMaterial = this.material('QuickSense umber terrain foundation', 0x46382e, 0.01, 0.99);
-    const terrainRouteMaterial = this.material('QuickSense carved umber ski channels', 0x4c3c32, 0.05, 0.86);
     const deckMaterial = this.material('QuickSense graphite panels', 0x858e92, 0.14, 0.72, panelTexture);
     const sideMaterial = this.material('QuickSense chamfered deck structure', 0x354147, 0.18, 0.78);
     const structureMaterial = this.material('QuickSense panelled architectural shells', 0x69757a, 0.2, 0.7, panelTexture);
@@ -640,10 +641,6 @@ export class QuickSenseArena implements ArenaRuntime {
     groundMaterial.normalMap = surfaceTextures.terrainNormal;
     groundMaterial.normalScale.set(0.34, 0.34);
     groundMaterial.roughnessMap = surfaceTextures.terrainRoughness;
-    terrainRouteMaterial.map = surfaceTextures.terrainAlbedo;
-    terrainRouteMaterial.normalMap = surfaceTextures.terrainNormal;
-    terrainRouteMaterial.normalScale.set(0.24, 0.24);
-    terrainRouteMaterial.roughnessMap = surfaceTextures.terrainRoughness;
     groundFoundationMaterial.normalMap = surfaceTextures.rockNormal;
     groundFoundationMaterial.normalScale.set(0.2, 0.2);
     groundFoundationMaterial.roughnessMap = surfaceTextures.rockRoughness;
@@ -677,7 +674,6 @@ export class QuickSenseArena implements ArenaRuntime {
     mossCapMaterial.normalScale.set(0.2, 0.2);
 
     applyGroundedCelDepth(groundMaterial, 0.1, 8);
-    applyGroundedCelDepth(terrainRouteMaterial, 0.11, 8);
     applyGroundedCelDepth(deckMaterial, 0.14, 7);
     applyGroundedCelDepth(sideMaterial, 0.1, 8);
     applyGroundedCelDepth(structureMaterial, 0.13, 7);
@@ -869,7 +865,6 @@ export class QuickSenseArena implements ArenaRuntime {
     this.createRamps(deckMaterial, sideMaterial, cyanMaterial, magentaMaterial, amberMaterial, !hasOutpostTower);
     this.createRouteJunctionDecks(deckMaterial);
     this.createGround(groundMaterial, groundFoundationMaterial, rockMaterial, rockHighlightMaterial, mossCapMaterial);
-    this.createTerrainFlowInlays(terrainRouteMaterial, cyanMaterial, magentaMaterial);
     this.createBoundaryArchitecture(sideMaterial, amberMaterial);
 
     if (!hasOutpostTower) {
@@ -910,6 +905,7 @@ export class QuickSenseArena implements ArenaRuntime {
       penetrations: this.supportPenetrations,
     };
     if (outpostTower) this.createOutpostTower(outpostTower, panelTexture, panelNormal, panelRoughness);
+    this.createStaticWorldShotCollision();
     this.createStaticWorldFloorCollision();
 
     const cyanPad = this.createJumpPad(this.localPointOnFloor(-42, -54, 0.18), new THREE.Vector3(0.22, 0.76, 0.6), cyanMaterial, sideMaterial);
@@ -976,6 +972,7 @@ export class QuickSenseArena implements ArenaRuntime {
       + this.rampSurfaces.length * 72
       + this.pathSurfaces.length * 48
       + this.outpostTowerCollisionTriangleCount
+      + this.staticWorldShotTriangleCount
       + this.staticWorldFloorTriangleCount,
     );
     this.mapInfo = {
@@ -985,7 +982,9 @@ export class QuickSenseArena implements ArenaRuntime {
       ready: true,
       topologyHash: `quicksense-${seed.toString(16)}-habitat-flow-v12`,
       bounds: { width: QUICKSENSE.width, depth: QUICKSENSE.depth },
-      altitudeRange: { min: 0, max: 180 },
+      // Keep the authored sky volume 20% above the fighter's hard 300 m
+      // ceiling, matching the former 150/180 safety and visual headroom.
+      altitudeRange: { min: 0, max: 360 },
       renderTriangles: Math.round(renderTriangles),
       collisionTriangles: this.collisionTriangles,
       spawnCount: this.spawnPoints.length,
@@ -1362,7 +1361,24 @@ export class QuickSenseArena implements ArenaRuntime {
         if (collider.blocksMovement) considerBox(collider.box);
       }
     } else {
-      for (const box of this.shotBoxes) considerBox(box);
+      const staticHit = this.staticWorldShotBoundsTree?.raycastFirst(
+        ray,
+        THREE.DoubleSide,
+        0,
+        distance,
+      );
+      if (staticHit) {
+        closestDistance = staticHit.distance;
+        this.segmentClosestPoint.copy(staticHit.point);
+        if (staticHit.face?.normal) this.segmentClosestNormal.copy(staticHit.face.normal);
+        else this.segmentClosestNormal.copy(direction).negate();
+        if (this.segmentClosestNormal.dot(direction) > 0) this.segmentClosestNormal.negate();
+      } else if (!this.staticWorldShotBoundsTree) {
+        // Construction should always provide the exact visible-mesh BVH. Keep
+        // the legacy proxies only as a defensive fallback for malformed maps;
+        // they are never consulted during a normal QuickSense match.
+        for (const box of this.shotBoxes) considerBox(box);
+      }
     }
     const towerHit = this.outpostTowerSurfaceBoundsTree?.raycastFirst(
       ray,
@@ -1666,6 +1682,104 @@ export class QuickSenseArena implements ArenaRuntime {
       if (index >= 0) this.geometries.splice(index, 1);
     }
     this.group.userData.staticRenderBatches = batchIndex;
+  }
+
+  /**
+   * Build projectile, hitscan, grapple, and LOS collision from the same opaque
+   * triangles the player can see. The previous per-segment AABBs filled the
+   * empty volume above curved roads, while mountains were omitted entirely.
+   * Keeping this mesh separate from movement collision preserves the smooth
+   * analytic ski solver without sacrificing exact combat occlusion.
+   */
+  private createStaticWorldShotCollision(): void {
+    this.group.updateMatrixWorld(true);
+    const groupInverse = this.group.matrixWorld.clone().invert();
+    const positions: number[] = [];
+    const animated = new Set(this.animatedProps.map((prop) => prop.object));
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+    const meshToLocal = new THREE.Matrix4();
+    const instanceMatrix = new THREE.Matrix4();
+    let sourceMeshes = 0;
+    let ignoredMeshes = 0;
+
+    const hasAncestor = (object: THREE.Object3D, predicate: (ancestor: THREE.Object3D) => boolean): boolean => {
+      let ancestor: THREE.Object3D | null = object;
+      while (ancestor && ancestor !== this.group) {
+        if (predicate(ancestor)) return true;
+        ancestor = ancestor.parent;
+      }
+      return false;
+    };
+    const appendGeometry = (mesh: THREE.Mesh, transform: THREE.Matrix4): void => {
+      const attribute = mesh.geometry.getAttribute('position');
+      if (!attribute) return;
+      const index = mesh.geometry.getIndex();
+      const count = index?.count ?? attribute.count;
+      let appended = false;
+      for (let offset = 0; offset + 2 < count; offset += 3) {
+        const ia = index ? index.getX(offset) : offset;
+        const ib = index ? index.getX(offset + 1) : offset + 1;
+        const ic = index ? index.getX(offset + 2) : offset + 2;
+        a.fromBufferAttribute(attribute, ia).applyMatrix4(transform);
+        b.fromBufferAttribute(attribute, ib).applyMatrix4(transform);
+        c.fromBufferAttribute(attribute, ic).applyMatrix4(transform);
+        ab.subVectors(b, a);
+        ac.subVectors(c, a);
+        if (ab.cross(ac).lengthSq() < 1e-10) continue;
+        positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+        appended = true;
+      }
+      if (appended) sourceMeshes += 1;
+    };
+
+    this.group.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.visible) return;
+      const importedTower = hasAncestor(mesh, (ancestor) => ancestor.name === 'QuickSense imported outpost tower');
+      const animatedMesh = hasAncestor(mesh, (ancestor) => animated.has(ancestor));
+      const label = mesh.name.toLowerCase();
+      const materials = (Array.isArray(mesh.material) ? mesh.material : [mesh.material]);
+      const hasOpaqueSurface = materials.some((material) => (
+        material.visible && !material.transparent && material.opacity >= 0.92
+      ));
+      if (importedTower || animatedMesh || !hasOpaqueSurface || /particle|weather/.test(label)) {
+        ignoredMeshes += 1;
+        return;
+      }
+
+      meshToLocal.multiplyMatrices(groupInverse, mesh.matrixWorld);
+      const instanced = mesh as THREE.InstancedMesh;
+      if (instanced.isInstancedMesh) {
+        const baseMatrix = meshToLocal.clone();
+        for (let instance = 0; instance < instanced.count; instance += 1) {
+          instanced.getMatrixAt(instance, instanceMatrix);
+          meshToLocal.multiplyMatrices(baseMatrix, instanceMatrix);
+          appendGeometry(mesh, meshToLocal);
+        }
+      } else {
+        appendGeometry(mesh, meshToLocal);
+      }
+    });
+
+    if (positions.length === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    this.trackGeometry(geometry);
+    this.staticWorldShotBoundsTree = new MeshBVH(geometry, { maxLeafSize: 20 });
+    this.staticWorldShotTriangleCount = positions.length / 9;
+    this.group.userData.staticWorldShotAudit = {
+      engine: 'visible-static-projectile-bvh',
+      triangles: this.staticWorldShotTriangleCount,
+      sourceMeshes,
+      ignoredMeshes,
+      broadProxyFallbacks: 0,
+    };
   }
 
   /**
@@ -3452,97 +3566,6 @@ export class QuickSenseArena implements ArenaRuntime {
     const back = this.terrainHeightAt(x, z - epsilon);
     const front = this.terrainHeightAt(x, z + epsilon);
     return target.set(left - right, epsilon * 2, back - front).normalize();
-  }
-
-  private createTerrainFlowInlays(
-    surfaceMaterial: THREE.MeshStandardMaterial,
-    cyanMaterial: THREE.MeshStandardMaterial,
-    magentaMaterial: THREE.MeshStandardMaterial,
-  ): void {
-    const lanes = [
-      {
-        name: 'Cyan carved ski swale',
-        material: cyanMaterial,
-        points: splinePoints([
-          { x: -22, y: 0, z: -60 }, { x: -25, y: 0, z: -40 }, { x: -28, y: 0, z: -20 },
-          { x: -31, y: 0, z: 0 }, { x: -34, y: 0, z: 20 }, { x: -37, y: 0, z: 40 },
-          { x: -40, y: 0, z: 60 },
-        ], 44),
-      },
-      {
-        name: 'Magenta carved ski swale',
-        material: magentaMaterial,
-        points: splinePoints([
-          { x: 22, y: 0, z: -60 }, { x: 25, y: 0, z: -40 }, { x: 28, y: 0, z: -20 },
-          { x: 31, y: 0, z: 0 }, { x: 34, y: 0, z: 20 }, { x: 37, y: 0, z: 40 },
-          { x: 40, y: 0, z: 60 },
-        ], 44),
-      },
-    ];
-    for (const lane of lanes) {
-      const swale = this.addMesh(
-        this.createTerrainInlayGeometry(lane.points, 10.6, 0.035),
-        surfaceMaterial,
-        lane.name,
-      );
-      swale.castShadow = false;
-      const signal = this.addMesh(
-        this.createTerrainInlayGeometry(lane.points, 0.34, 0.095),
-        lane.material,
-        `${lane.name} route signal`,
-      );
-      signal.castShadow = false;
-      signal.receiveShadow = false;
-    }
-  }
-
-  private createTerrainInlayGeometry(
-    points: PathPoint[],
-    width: number,
-    lift: number,
-  ): THREE.BufferGeometry {
-    const lateralSegments = width > 1 ? 4 : 1;
-    const positions: number[] = [];
-    const uvs: number[] = [];
-    const indices: number[] = [];
-    let distance = 0;
-    for (let index = 0; index < points.length; index += 1) {
-      const previous = points[Math.max(0, index - 1)];
-      const current = points[index];
-      const next = points[Math.min(points.length - 1, index + 1)];
-      if (index > 0) distance += Math.hypot(current.x - previous.x, current.z - previous.z);
-      const tangentX = next.x - previous.x;
-      const tangentZ = next.z - previous.z;
-      const tangentLength = Math.hypot(tangentX, tangentZ) || 1;
-      const crossX = tangentZ / tangentLength;
-      const crossZ = -tangentX / tangentLength;
-      for (let lateralIndex = 0; lateralIndex <= lateralSegments; lateralIndex += 1) {
-        const v = lateralIndex / lateralSegments;
-        const lateral = (v - 0.5) * width;
-        const x = current.x + crossX * lateral;
-        const z = current.z + crossZ * lateral;
-        positions.push(x, this.terrainHeightAt(x, z) + lift, z);
-        uvs.push(distance / 8, v);
-      }
-    }
-    const row = lateralSegments + 1;
-    for (let index = 0; index < points.length - 1; index += 1) {
-      for (let lateralIndex = 0; lateralIndex < lateralSegments; lateralIndex += 1) {
-        const a = index * row + lateralIndex;
-        const b = (index + 1) * row + lateralIndex;
-        const c = a + 1;
-        const d = b + 1;
-        indices.push(a, b, d, a, d, c);
-      }
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    geometry.setIndex(indices);
-    geometry.computeVertexNormals();
-    geometry.computeBoundingBox();
-    geometry.computeBoundingSphere();
-    return geometry;
   }
 
   private createPath(

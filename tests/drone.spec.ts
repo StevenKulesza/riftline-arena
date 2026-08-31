@@ -31,6 +31,9 @@ for (const map of [
       Math.abs(Math.max(drone.modelWidth, drone.modelHeight, drone.modelDepth) - 3.4) < 0.04
     ))).toBe(true);
     expect(initial.drones.every((drone) => drone.collisionRadius === 1.7)).toBe(true);
+    expect(initial.drones.every((drone) => (
+      drone.beamLayers === 4 && drone.beamHalos === 6 && drone.beamParticles === 24
+    ))).toBe(true);
 
     const botDamage = await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
@@ -45,6 +48,13 @@ for (const map of [
     expect(active.drones.some((drone) => drone.shotsFired > 0)).toBe(true);
     expect(active.drones.some((drone) => drone.beamActive && drone.beamVisible)).toBe(true);
     expect(active.drones.some((drone) => drone.beamUptimeSeconds > 0.5 && drone.beamDamageTicks > 0)).toBe(true);
+    const firingDrones = active.drones.filter((drone) => drone.beamUptimeSeconds > 0.5);
+    expect(firingDrones.length).toBeGreaterThan(0);
+    expect(firingDrones.every((drone) => drone.beamDamageTicks > 0)).toBe(true);
+    expect(firingDrones.every((drone) => drone.beamMissTicks > 0)).toBe(true);
+    expect(active.drones.some((drone) => drone.aimErrorDegrees > 0.05)).toBe(true);
+    expect(active.drones.reduce((total, drone) => total + drone.beamDamageTicks, 0)).toBeGreaterThan(0);
+    expect(active.drones.reduce((total, drone) => total + drone.beamMissTicks, 0)).toBeGreaterThan(0);
     expect(active.drones.some((drone) => drone.state === 'engage' || drone.state === 'evade')).toBe(true);
     expect(active.drones.some((drone) => drone.targetedByBots > 0)).toBe(true);
 
@@ -57,6 +67,7 @@ for (const map of [
     });
     expect(destroyed.drones.every((drone) => !drone.alive && drone.health === 0)).toBe(true);
     expect(destroyed.drones.every((drone) => drone.explosions === 1)).toBe(true);
+    expect(destroyed.renderer.activeWeaponVfx).toBeGreaterThan(0);
     // The live render loop continues between browser evaluations, so the
     // countdown may already have advanced slightly on software WebGL.
     expect(destroyed.drones.every((drone) => drone.respawnSeconds > 14)).toBe(true);

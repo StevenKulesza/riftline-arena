@@ -26,3 +26,15 @@ materials, and 13 textures.
 
 - Source: https://sketchfab.com/3d-models/scifi-drone-290de0f82e9e4e4b9a8ae6524311a8db
 - License: https://creativecommons.org/licenses/by/4.0/
+
+# Buster Drone asset
+
+`buster-drone.glb` is **Buster Drone** by LaVADraGoN, distributed under
+Creative Commons Attribution 4.0. Evil Cloud is credited by the author for the
+original concept/model-base iteration. The supplied GLB embeds an authored
+transform rig and the 25-second `Start_Liftoff` animation used by the in-game
+takeoff sequence.
+
+- Source: https://sketchfab.com/3d-models/buster-drone-294e79652f494130ad2ab00a13fdbafd
+- Author: https://sketchfab.com/lavadragon
+- License: https://creativecommons.org/licenses/by/4.0/

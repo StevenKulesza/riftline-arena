@@ -71,6 +71,7 @@ interface ThreeGameDiagnostics {
     pilot: 'player' | number | null;
     reservedBy: number | null;
     destroyed: boolean;
+    explosions: number;
     hull: number;
     shield: number;
     respawnSeconds: number;
@@ -85,6 +86,7 @@ interface ThreeGameDiagnostics {
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };
     physics: {
+      ceilingY: number;
       steps: number;
       collisionQueries: number;
       collisionHits: number;
@@ -103,7 +105,7 @@ interface ThreeGameDiagnostics {
     alive: boolean;
     health: number;
     maxHealth: number;
-    state: 'patrol' | 'engage' | 'evade' | 'destroyed';
+    state: 'patrol' | 'engage' | 'evade' | 'destroyed' | 'spool' | 'takeoff' | 'survey' | 'attack-run' | 'breakaway' | 'jink' | 'landing-approach' | 'landed';
     targetOwner: 'player' | number | null;
     respawnSeconds: number;
     shotsFired: number;
@@ -111,6 +113,12 @@ interface ThreeGameDiagnostics {
     beamVisible: boolean;
     beamUptimeSeconds: number;
     beamDamageTicks: number;
+    beamMissTicks: number;
+    beamOnTarget: boolean;
+    aimErrorDegrees: number;
+    beamLayers: number;
+    beamHalos: number;
+    beamParticles: number;
     explosions: number;
     respawns: number;
     collisionRadius: number;
@@ -125,6 +133,60 @@ interface ThreeGameDiagnostics {
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };
   }>;
+  busterDrones: Array<{
+    id: string;
+    kind: 'sentinel' | 'buster';
+    alive: boolean;
+    health: number;
+    maxHealth: number;
+    healthMultiplier: number;
+    state: 'patrol' | 'engage' | 'evade' | 'spool' | 'takeoff' | 'survey' | 'attack-run' | 'breakaway' | 'jink' | 'landing-approach' | 'landed' | 'destroyed';
+    flightPattern: 'figure-eight' | 'vertical-sweep' | 'pincer' | 'sentinel-orbit';
+    targetOwner: 'player' | number | null;
+    respawnSeconds: number;
+    collisionRadius: number;
+    collisionHits: number;
+    shotsFired: number;
+    shardsFired: number;
+    shardHits: number;
+    shardWorldImpacts: number;
+    activeShards: number;
+    gazeDot: number;
+    gazeThreshold: number;
+    lookingAtTarget: boolean;
+    aimErrorDegrees: number;
+    takeoffElapsed: number;
+    takeoffs: number;
+    landings: number;
+    grounded: boolean;
+    explosions: number;
+    respawns: number;
+    modelReady: boolean;
+    modelMeshCount: number;
+    modelWidth: number;
+    modelHeight: number;
+    modelDepth: number;
+    rigNodeCount: number;
+    animationClipName: string;
+    animationClipDuration: number;
+    animationTime: number;
+    animationPlaying: boolean;
+    loadError: string | null;
+    targetedByBots: number;
+    position: { x: number; y: number; z: number };
+    velocity: { x: number; y: number; z: number };
+  }>;
+  busterShardPool: {
+    active: number;
+    capacity: number;
+    speed: number;
+    damage: number;
+    lastSourceId: string;
+    lastTargetOwner: 'player' | number | null;
+    lastWorldImpact: boolean;
+    lastOrigin: { x: number; y: number; z: number };
+    lastImpact: { x: number; y: number; z: number };
+  };
   projectiles: number;
   grenades: number;
   grenadeStates: Array<{
@@ -207,6 +269,34 @@ interface ThreeGameDiagnostics {
     pickupCount: number;
     jumpPadCount: number;
     skiRoutes: number;
+  };
+  lighting: {
+    profile: string;
+    key: {
+      color: string;
+      intensity: number;
+      position: { x: number; y: number; z: number };
+      target: { x: number; y: number; z: number };
+    };
+    fillIntensity: number;
+    rimIntensity: number;
+    environmentIntensity: number;
+    exposure: number;
+    shadow: {
+      type: 'VSMShadowMap';
+      mapSize: number;
+      extent: number;
+      bias: number;
+      normalBias: number;
+      blurSamples: number;
+      casters: number;
+      receivers: number;
+    };
+    contactShadows: {
+      sources: number;
+      visible: number;
+      drawCalls: 1;
+    };
   };
   player: {
     position: { x: number; y: number; z: number };
@@ -356,6 +446,8 @@ interface ThreeGameDiagnostics {
     activeVoices: number;
     activeVoicesByPool: Record<string, number>;
     laserBeamActive: boolean;
+    droneBeamVoices: number;
+    droneBeamAssetReady: boolean;
     lastEvent: string;
     playCounts: Record<string, number>;
     resets: number;
@@ -383,6 +475,12 @@ interface ThreeGameTestHooks {
   setWeapon(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc'): void;
   /** Set deterministic camera aim for muzzle/beam tests. */
   setAim(yaw: number, pitch: number): void;
+  /** Place a frozen QA spectator camera without changing the selected default view. */
+  setSpectatorCamera(
+    position: { x: number; y: number; z: number },
+    target: { x: number; y: number; z: number },
+    fov?: number,
+  ): void;
   /** Toggle between the default first-person and over-shoulder views. */
   toggleViewMode(): void;
   /** Sample procedural terrain floor height for deterministic controller QA. */
@@ -430,8 +528,12 @@ interface ThreeGameTestHooks {
     droneId: string,
     weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc',
   ): void;
+  /** Stage one Buster on a real clear sightline for deterministic shard QA. */
+  stageBusterAttack(id: string, targetOwner: 'player' | number): boolean;
   /** Fire the equipped weapon once for deterministic combat/VFX captures. */
   fireWeapon(): void;
+  /** Trigger deterministic hit/kill reticle feedback for HUD verification. */
+  triggerHitMarker(kill?: boolean): void;
   /** Throw one three-second fuse grenade. */
   throwGrenade(): void;
   /** Anchor/release the grapple against the current view ray. */

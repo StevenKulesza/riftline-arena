@@ -1,3 +1,5 @@
+import type { WeaponId } from '../game/config';
+
 export type HudStanding = {
   callsign: string;
   score: number;
@@ -65,6 +67,7 @@ export type HudState = {
   score: number;
   botLead: number;
   timeRemaining: number;
+  weaponId: WeaponId;
   weapon: string;
   secondary: string;
   ammo: number;
@@ -176,6 +179,7 @@ export class Hud {
     const minutes = Math.floor(Math.max(0, state.timeRemaining) / 60).toString().padStart(2, '0');
     const seconds = Math.floor(Math.max(0, state.timeRemaining) % 60).toString().padStart(2, '0');
     this.timer.textContent = `${minutes}:${seconds}`;
+    if (this.crosshair.dataset.weapon !== state.weaponId) this.crosshair.dataset.weapon = state.weaponId;
     this.weapon.textContent = state.weapon;
     this.secondary.textContent = `RMB // ${state.secondary}`;
     this.ammo.textContent = state.ammo < 0 ? '∞' : String(state.ammo);

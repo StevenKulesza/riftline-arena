@@ -451,24 +451,11 @@ body[data-view-mode="third-person"] #scope-overlay {
   right: 0;
 }
 
-#crosshair i {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 3px;
-  height: 3px;
-  margin: -1.5px 0 0 -1.5px;
-  border-radius: 50%;
-  background: var(--cyan);
-}
-
-#crosshair.hit span,
-#crosshair.hit i {
+#crosshair.hit span {
   background: var(--amber);
 }
 
-#crosshair.kill span,
-#crosshair.kill i {
+#crosshair.kill span {
   background: var(--magenta);
 }
 
@@ -4575,47 +4562,151 @@ body[data-piloting-fighter="true"] #crosshair { opacity: 0; }
 }
 
 #crosshair {
-  width: 34px;
-  height: 34px;
-  margin: -17px 0 0 -17px;
+  --reticle-size: 34px;
+  --reticle-gap: 6px;
+  --reticle-length: 8px;
+  --reticle-thickness: 2px;
+  --reticle-color: rgba(224, 249, 255, 0.92);
+  width: var(--reticle-size);
+  height: var(--reticle-size);
+  margin: 0;
+  transform: translate(-50%, -50%);
 }
 
-#crosshair::before {
-  content: '';
+/* A weapon owns one four-arm reticle. There is deliberately no center dot,
+   ring, or stacked pseudo-element: the open center remains an exact aim point. */
+#crosshair::before,
+#crosshair::after {
+  content: none;
+}
+
+#crosshair .reticle-arm {
   position: absolute;
-  top: 50%;
+  border: 0;
+  border-radius: 1px;
+  background: var(--reticle-color);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--reticle-color) 72%, transparent), 0 0 0 1px rgba(0, 5, 9, 0.72);
+  transition: width 90ms ease, height 90ms ease, transform 90ms ease;
+}
+
+#crosshair span.reticle-arm--top,
+#crosshair span.reticle-arm--bottom {
   left: 50%;
-  width: 8px;
-  height: 8px;
-  margin: -5px 0 0 -5px;
-  border: 1px solid rgba(226, 250, 255, 0.96);
-  border-radius: 50%;
-  background: rgba(0, 5, 9, 0.62);
-  box-shadow:
-    0 0 0 2px rgba(0, 5, 9, 0.86),
-    0 0 7px rgba(72, 232, 255, 0.72);
+  width: var(--reticle-thickness);
+  height: var(--reticle-length);
+  margin-left: calc(var(--reticle-thickness) / -2);
 }
 
-#crosshair span {
-  background: rgba(224, 249, 255, 0.88);
-  box-shadow: 0 0 4px rgba(72, 232, 255, 0.6), 0 0 0 1px rgba(0, 5, 9, 0.5);
+#crosshair span.reticle-arm--top {
+  top: calc(50% - var(--reticle-gap) - var(--reticle-length));
 }
 
-#crosshair span:nth-child(1),
-#crosshair span:nth-child(2) {
-  height: 6px;
+#crosshair span.reticle-arm--bottom {
+  top: calc(50% + var(--reticle-gap));
+  bottom: auto;
 }
 
-#crosshair span:nth-child(3),
-#crosshair span:nth-child(4) {
-  width: 6px;
+#crosshair span.reticle-arm--left,
+#crosshair span.reticle-arm--right {
+  top: 50%;
+  width: var(--reticle-length);
+  height: var(--reticle-thickness);
+  margin-top: calc(var(--reticle-thickness) / -2);
 }
 
-#crosshair i {
-  width: 2px;
-  height: 2px;
-  margin: -1px 0 0 -1px;
-  box-shadow: 0 0 0 1px rgba(0, 5, 9, 0.9);
+#crosshair span.reticle-arm--left {
+  left: calc(50% - var(--reticle-gap) - var(--reticle-length));
+}
+
+#crosshair span.reticle-arm--right {
+  right: calc(50% - var(--reticle-gap) - var(--reticle-length));
+}
+
+#crosshair[data-weapon="disc"] {
+  --reticle-size: 38px;
+  --reticle-gap: 7px;
+  --reticle-length: 8px;
+  --reticle-color: #69ffe3;
+}
+
+#crosshair[data-weapon="disc"] .reticle-arm--top,
+#crosshair[data-weapon="disc"] .reticle-arm--bottom {
+  transform: rotate(45deg);
+}
+
+#crosshair[data-weapon="disc"] .reticle-arm--left,
+#crosshair[data-weapon="disc"] .reticle-arm--right {
+  transform: rotate(-45deg);
+}
+
+#crosshair[data-weapon="machine"] {
+  --reticle-size: 30px;
+  --reticle-gap: 4px;
+  --reticle-length: 6px;
+  --reticle-color: #c9f9ff;
+}
+
+#crosshair[data-weapon="shotgun"] {
+  --reticle-size: 48px;
+  --reticle-gap: 13px;
+  --reticle-length: 8px;
+  --reticle-thickness: 3px;
+  --reticle-color: #ffd078;
+}
+
+#crosshair[data-weapon="rocket"] {
+  --reticle-size: 42px;
+  --reticle-gap: 9px;
+  --reticle-length: 7px;
+  --reticle-color: #ff826e;
+}
+
+#crosshair[data-weapon="plasma"] {
+  --reticle-size: 38px;
+  --reticle-gap: 7px;
+  --reticle-length: 9px;
+  --reticle-color: #c99cff;
+}
+
+#crosshair[data-weapon="plasma"] .reticle-arm {
+  transform: rotate(45deg);
+}
+
+#crosshair[data-weapon="laser"] {
+  --reticle-size: 40px;
+  --reticle-gap: 3px;
+  --reticle-length: 14px;
+  --reticle-thickness: 1px;
+  --reticle-color: #70ffa8;
+}
+
+#crosshair[data-weapon="laser"] .reticle-arm--top,
+#crosshair[data-weapon="laser"] .reticle-arm--bottom {
+  display: none;
+}
+
+#crosshair[data-weapon="sniper"] {
+  --reticle-size: 46px;
+  --reticle-gap: 7px;
+  --reticle-length: 15px;
+  --reticle-thickness: 1px;
+  --reticle-color: #ff7bbb;
+}
+
+#crosshair[data-weapon="rail"] {
+  --reticle-size: 50px;
+  --reticle-gap: 5px;
+  --reticle-length: 18px;
+  --reticle-thickness: 1px;
+  --reticle-color: #f4ff77;
+}
+
+#crosshair.hit .reticle-arm {
+  background: var(--amber);
+}
+
+#crosshair.kill .reticle-arm {
+  background: var(--magenta);
 }
 
 .modal-overlay {

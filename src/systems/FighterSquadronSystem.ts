@@ -48,6 +48,7 @@ export type FighterRuntime = {
   hullHit: number;
   shieldHit: number;
   destroyed: boolean;
+  explosions: number;
   respawnSeconds: number;
   primaryCooldown: number;
   missileCooldown: number;
@@ -117,6 +118,7 @@ export function createQuickSenseFighters(scene: THREE.Scene): FighterRuntime[] {
       hullHit: 0,
       shieldHit: 0,
       destroyed: false,
+      explosions: 0,
       respawnSeconds: 0,
       primaryCooldown: 0,
       missileCooldown: 0,
@@ -144,6 +146,7 @@ export function resetFighterAtPad(fighter: FighterRuntime): void {
   fighter.flightAccumulator = 0;
   fighter.visual.root.position.copy(fighter.flight.position);
   fighter.visual.root.quaternion.copy(fighter.flight.orientation);
+  fighter.visual.root.visible = true;
 }
 
 export function nearestBoardableFighter(

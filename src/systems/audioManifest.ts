@@ -65,6 +65,26 @@ export const WEAPON_AUDIO_POOLS: Record<WeaponId, AudioPool> = {
   },
 };
 
+export const DRONE_BEAM_AUDIO_POOL: AudioPool = {
+  ...pool(
+    'weapon.drone-sentinel-beam',
+    [assetUrl('assets/audio/weapons/drone-sentinel-beam-loop.mp3')],
+    'weapons',
+    0.44,
+    0,
+    3,
+    0,
+  ),
+  loop: true,
+  tone: {
+    lowShelfFrequencyHz: 180,
+    lowShelfGainDb: -2,
+    presenceFrequencyHz: 1_850,
+    presenceGainDb: 1.8,
+    lowpassHz: 7_200,
+  },
+};
+
 export const EMPTY_TRIGGER_POOL = pool(
   'weapon.empty',
   versions('weapons/empty-trigger', 3),
@@ -177,6 +197,7 @@ export const AUDIO_POOLS: readonly AudioPool[] = [
   // before the much larger combat bank on the first user gesture.
   ...Object.values(COUNTDOWN_AUDIO_POOLS),
   ...Object.values(WEAPON_AUDIO_POOLS),
+  DRONE_BEAM_AUDIO_POOL,
   EMPTY_TRIGGER_POOL,
   ...Object.values(EQUIP_AUDIO_POOLS),
   ...Object.values(IMPACT_AUDIO_POOLS),

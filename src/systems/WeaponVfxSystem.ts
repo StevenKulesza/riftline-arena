@@ -1894,13 +1894,33 @@ export class WeaponVfxSystem {
   }
 
   rocketExplosion(position: THREE.Vector3, color: number): void {
+    this.createExplosion(position, color, 1, false);
+  }
+
+  /**
+   * Vehicle deaths must remain readable even when ordinary weapon effects have
+   * filled the transient budget. The regular eviction policy still bounds the
+   * total effect count; this event is allowed to displace a lower-priority VFX.
+   */
+  vehicleExplosion(position: THREE.Vector3, color: number, scale: number): void {
+    this.createExplosion(position, color, THREE.MathUtils.clamp(scale, 1.5, 8), true);
+  }
+
+  private createExplosion(
+    position: THREE.Vector3,
+    color: number,
+    scale: number,
+    priority: boolean,
+  ): void {
     this.impact(position, color, 'rocket');
-    if (!this.hasTransientCapacity()) return;
+    if (!priority && !this.hasTransientCapacity()) return;
     const root = new THREE.Group();
-    root.name = 'rocket-blast-wave';
+    root.name = priority ? 'vehicle-blast-wave' : 'rocket-blast-wave';
     root.userData.softSmoke = true;
+    root.userData.explosionScale = scale;
     root.position.copy(position);
     root.lookAt(this.camera.position);
+    root.scale.setScalar(scale);
     const glow = additiveMaterial(0xff5b20, 0.82);
     const hot = additiveMaterial(0xfff4c1, 0.96);
     const materials: THREE.Material[] = [glow, hot];

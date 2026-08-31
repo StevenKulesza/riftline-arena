@@ -52,7 +52,7 @@ test.describe('QuickSense Star Sparrow fighters', () => {
       'NEXUS PAD S-E',
     ]);
     expect(initial.fighters[2]).toMatchObject({ pilot: 'player', hull: 900, shield: 400, visible: false });
-    expect(initial.viewMode).toBe('third-person');
+    expect(initial.viewMode).toBe('first-person');
     expect(initial.camera.distance).toBeLessThan(12);
 
     await page.evaluate(() => {
@@ -71,12 +71,19 @@ test.describe('QuickSense Star Sparrow fighters', () => {
 
     await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.damageFighter('sparrow-south-west', 2_000));
     const destroyed = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!);
-    expect(destroyed.fighters[2]).toMatchObject({ destroyed: true, hull: 0, pilot: null });
+    expect(destroyed.fighters[2]).toMatchObject({
+      destroyed: true,
+      hull: 0,
+      pilot: null,
+      visible: false,
+      explosions: 1,
+    });
     expect(destroyed.fighters[2].respawnSeconds).toBeCloseTo(12, 1);
+    expect(destroyed.renderer.activeWeaponVfx).toBeGreaterThan(0);
 
     await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.stepSimulation(14.5));
     const rebuilt = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!);
-    expect(rebuilt.fighters[2]).toMatchObject({ destroyed: false, hull: 900 });
+    expect(rebuilt.fighters[2]).toMatchObject({ destroyed: false, hull: 900, visible: true, explosions: 1 });
     expect(rebuilt.fighters[2].shield).toBeGreaterThan(0);
     expect(rebuilt.fighters[2].position.y).toBeCloseTo(43.6478, 1);
 
@@ -102,6 +109,30 @@ test.describe('QuickSense Star Sparrow fighters', () => {
       return window.__THREE_GAME_DIAGNOSTICS__!;
     });
     expect(pairCollision.fighters[0].physics.collisionHits + pairCollision.fighters[1].physics.collisionHits).toBeGreaterThan(0);
+
+    const doubledCeiling = await page.evaluate(() => {
+      const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+      hooks.setFighterKinematics('sparrow-north-west', { x: 0, y: 225, z: 0 }, { x: 0, y: 0, z: 0 });
+      hooks.stepSimulation(0.02);
+      const aboveOldCeiling = window.__THREE_GAME_DIAGNOSTICS__!.fighters[0].position.y;
+      hooks.setFighterKinematics('sparrow-north-west', { x: 0, y: 350, z: 0 }, { x: 0, y: 20, z: 0 });
+      hooks.stepSimulation(0.02);
+      const diagnostics = window.__THREE_GAME_DIAGNOSTICS__!;
+      return {
+        aboveOldCeiling,
+        clampedY: diagnostics.fighters[0].position.y,
+        ceilingY: diagnostics.fighters[0].physics.ceilingY,
+        mapAltitudeMax: diagnostics.map.altitudeRange.max,
+      };
+    });
+    expect(doubledCeiling.aboveOldCeiling).toBeGreaterThan(220);
+    expect(doubledCeiling.ceilingY).toBe(300);
+    // The boundary contact clamps to 300, then its inward response advances a
+    // few centimeters during the remaining fixed ticks. Assert containment
+    // and proximity rather than requiring an unstable exact surface point.
+    expect(doubledCeiling.clampedY).toBeLessThanOrEqual(300);
+    expect(doubledCeiling.clampedY).toBeGreaterThan(299.8);
+    expect(doubledCeiling.mapAltitudeMax).toBe(360);
 
     const terrainCollision = await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;

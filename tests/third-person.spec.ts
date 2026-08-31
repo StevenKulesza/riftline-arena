@@ -23,6 +23,14 @@ test('switches to a readable third-person player presentation', async ({ browser
   await page.waitForFunction(() => window.__THREE_GAME_DIAGNOSTICS__?.player.modelReady === true, null, {
     timeout: 30_000,
   });
+  const initialView = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!);
+  expect(initialView.viewMode).toBe('first-person');
+  expect(initialView.player.avatarVisible).toBe(false);
+  expect(initialView.player.firstPersonWeaponVisible).toBe(true);
+  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.toggleViewMode());
+  await page.waitForFunction(() => window.__THREE_GAME_DIAGNOSTICS__?.viewMode === 'third-person', null, {
+    timeout: 30_000,
+  });
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setWeapon('machine'));
   await page.waitForFunction(() => window.__THREE_GAME_DIAGNOSTICS__?.weapon === 'machine', null, {
     timeout: 30_000,
