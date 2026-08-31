@@ -48,6 +48,13 @@ interface ThreeGameDiagnostics {
     bunnyHops: number;
     jetpackActive: boolean;
     jetpackBursts: number;
+    jetpackCharge: number;
+    jetpackLocked: boolean;
+    dashCooldown: number;
+    dashesUsed: number;
+    aimErrorDegrees: number;
+    aimTracking: number;
+    reactionRemaining: number;
     grenadesThrown: number;
     grapplesUsed: number;
     grenadesRemaining: number;
@@ -58,8 +65,74 @@ interface ThreeGameDiagnostics {
     ceilingContacts: number;
     position: { x: number; y: number; z: number };
   }>;
+  fighters: Array<{
+    id: string;
+    pad: string;
+    pilot: 'player' | number | null;
+    reservedBy: number | null;
+    destroyed: boolean;
+    hull: number;
+    shield: number;
+    respawnSeconds: number;
+    speed: number;
+    grounded: boolean;
+    landingReady: boolean;
+    afterburnerEnergy: number;
+    heat: number;
+    modelReady: boolean;
+    visible: boolean;
+    loadError: string | null;
+    position: { x: number; y: number; z: number };
+    velocity: { x: number; y: number; z: number };
+    physics: {
+      steps: number;
+      collisionQueries: number;
+      collisionHits: number;
+      impacts: number;
+      boundsContacts: number;
+      invalidCollisionHits: number;
+    };
+    ai: {
+      state: string;
+      transitionReason: string;
+      targetId: string | number | null;
+    } | null;
+  }>;
+  drones: Array<{
+    id: string;
+    alive: boolean;
+    health: number;
+    maxHealth: number;
+    state: 'patrol' | 'engage' | 'evade' | 'destroyed';
+    targetOwner: 'player' | number | null;
+    respawnSeconds: number;
+    shotsFired: number;
+    beamActive: boolean;
+    beamVisible: boolean;
+    beamUptimeSeconds: number;
+    beamDamageTicks: number;
+    explosions: number;
+    respawns: number;
+    collisionRadius: number;
+    collisionHits: number;
+    modelReady: boolean;
+    modelMeshCount: number;
+    modelWidth: number;
+    modelHeight: number;
+    modelDepth: number;
+    loadError: string | null;
+    targetedByBots: number;
+    position: { x: number; y: number; z: number };
+    velocity: { x: number; y: number; z: number };
+  }>;
   projectiles: number;
   grenades: number;
+  grenadeStates: Array<{
+    position: { x: number; y: number; z: number };
+    velocity: { x: number; y: number; z: number };
+    bounces: number;
+    modelName: string;
+  }>;
   grapple: {
     active: boolean;
     anchor: { x: number; y: number; z: number };
@@ -160,6 +233,9 @@ interface ThreeGameDiagnostics {
     modelDepth: number;
     avatarVisible: boolean;
     firstPersonWeaponVisible: boolean;
+    thirdPersonWeaponVisible: boolean;
+    thirdPersonWeapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc' | null;
+    thirdPersonWeaponMeshes: number;
   };
   camera: {
     distance: number;
@@ -215,6 +291,9 @@ interface ThreeGameDiagnostics {
     activeWeaponVfx: number;
     activeSurfaceMarks: number;
     activeTracers: number;
+    activeSoftSmoke: number;
+    smokeTextureSource: string;
+    tracerTextureSource: string;
     weaponWearMaterials: number;
     weaponWearTextures: number;
     weaponAssetSource: 'procedural';
@@ -231,6 +310,8 @@ interface ThreeGameDiagnostics {
     weaponPulseIntensity: number;
   };
   combat: {
+    lastDamageDirection: string;
+    lastDamageBearing: number;
     secondaryAbility: string;
     altFireHeld: boolean;
     continuousLaserActive: boolean;
@@ -290,6 +371,14 @@ interface ThreeGameTestHooks {
   setAmmo(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc', amount: number): void;
   /** Trigger the equipped weapon's secondary ability without synthetic pointer input. */
   fireSecondary(): void;
+  /** Board the nearest available Star Sparrow, optionally selecting its id. */
+  boardFighter(id?: string): boolean;
+  /** Fire the active fighter's plasma or missile channel. */
+  fireActiveFighterWeapon(missile?: boolean): boolean;
+  /** Apply deterministic hull/shield damage to a Star Sparrow. */
+  damageFighter(id: string, amount: number): boolean;
+  /** Apply deterministic combat damage to a hostile drone. */
+  damageDrone(id: string, amount: number): boolean;
   /** Equip a weapon and rebuild its deterministic first-person view model. */
   setWeapon(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc'): void;
   /** Set deterministic camera aim for muzzle/beam tests. */
@@ -326,6 +415,21 @@ interface ThreeGameTestHooks {
     botFacesPlayer?: boolean,
     lockBot?: boolean,
   ): void;
+  getLongSightline(): {
+    player: { x: number; y: number; z: number };
+    bot: { x: number; y: number; z: number };
+    distance: number;
+  } | null;
+  fireBotWeapon(
+    botIndex: number,
+    weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc',
+  ): void;
+  /** Fire one bot weapon through the live drone targeting/damage path. */
+  fireBotAtDrone(
+    botIndex: number,
+    droneId: string,
+    weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc',
+  ): void;
   /** Fire the equipped weapon once for deterministic combat/VFX captures. */
   fireWeapon(): void;
   /** Throw one three-second fuse grenade. */
@@ -343,11 +447,22 @@ interface ThreeGameTestHooks {
   setReducedMotion(enabled: boolean): void;
   /** Advance the fixed 120 Hz simulation without relying on browser wall time. */
   stepSimulation(seconds: number): void;
+  /** Advance only hostile drone flight/lifecycle state with combat targets disabled. */
+  stepDrones(seconds: number): void;
+  /** Advance short-lived weapon presentation independently for deterministic VFX review. */
+  stepVisualEffects(seconds: number): void;
   /** Place the player with exact velocity for deterministic capsule/CCD QA. */
   setPlayerKinematics(
     position: { x: number; y: number; z: number },
     velocity: { x: number; y: number; z: number },
   ): void;
+  /** Place an unpiloted fighter for deterministic terrain/pair collision QA. */
+  setFighterKinematics(
+    id: string,
+    position: { x: number; y: number; z: number },
+    velocity: { x: number; y: number; z: number },
+    yaw?: number,
+  ): boolean;
   /** Stage a fast player and bot for deterministic blur/trail screenshots. */
   setSpeedCapture(speedKmh: number): void;
   /** Hide debug UI (lil-gui) before capturing. */
@@ -415,6 +530,14 @@ interface ThreeGameTestHooks {
       min: { x: number; y: number; z: number };
       max: { x: number; y: number; z: number };
     };
+  }>;
+  /** Aggregate visible QuickSense render submissions by material for profiling. */
+  getArenaRenderAudit(): Array<{
+    material: string;
+    draws: number;
+    shadowDraws: number;
+    triangles: number;
+    instances: number;
   }>;
 }
 

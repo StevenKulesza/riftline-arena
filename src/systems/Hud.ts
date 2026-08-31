@@ -6,6 +6,33 @@ export type HudStanding = {
   isLeader?: boolean;
 };
 
+export type HudFighterState = {
+  active: boolean;
+  prompt: boolean;
+  promptTitle?: string;
+  promptDetail?: string;
+  hull?: number;
+  hullMax?: number;
+  shield?: number;
+  shieldMax?: number;
+  drive?: number;
+  heat?: number;
+  overheated?: boolean;
+  throttle?: number;
+  speed?: number;
+  altitude?: number;
+  verticalSpeed?: number;
+  heading?: number;
+  pitch?: number;
+  primaryCooldown?: number;
+  missileCooldown?: number;
+  flightMode?: string;
+  locked?: boolean;
+  respawnSeconds?: number;
+};
+
+const RAD_TO_DEG = 180 / Math.PI;
+
 export type HudObjectiveState = {
   location?: string;
   phase?: string;
@@ -97,6 +124,29 @@ export class Hud {
   private readonly scopeRange = this.element('#scope-range');
   private readonly scopeZoom = this.element('#scope-zoom');
   private readonly damageVignette = this.element('#damage-vignette');
+  private readonly damageDirection = this.element('#damage-direction-indicator');
+  private readonly fighterPrompt = this.element('#fighter-prompt');
+  private readonly fighterPromptTitle = this.element('#fighter-prompt-title');
+  private readonly fighterPromptDetail = this.element('#fighter-prompt-detail');
+  private readonly fighterCockpit = this.element('#fighter-cockpit');
+  private readonly fighterHull = this.element('#fighter-hull-value');
+  private readonly fighterHullFill = this.element('#fighter-hull-fill');
+  private readonly fighterShield = this.element('#fighter-shield-value');
+  private readonly fighterShieldFill = this.element('#fighter-shield-fill');
+  private readonly fighterDrive = this.element('#fighter-drive-value');
+  private readonly fighterDriveFill = this.element('#fighter-drive-fill');
+  private readonly fighterHeat = this.element('#fighter-heat-value');
+  private readonly fighterHeatFill = this.element('#fighter-heat-fill');
+  private readonly fighterHeading = this.element('#fighter-heading-value');
+  private readonly fighterSpeed = this.element('#fighter-speed-value');
+  private readonly fighterAltitude = this.element('#fighter-altitude-value');
+  private readonly fighterVerticalSpeed = this.element('#fighter-vspeed-value');
+  private readonly fighterThrottleFill = this.element('#fighter-throttle-fill');
+  private readonly fighterPitchLadder = this.element('#fighter-pitch-ladder');
+  private readonly fighterPrimaryState = this.element('#fighter-primary-state');
+  private readonly fighterMissileState = this.element('#fighter-missile-state');
+  private readonly fighterFlightMode = this.element('#fighter-flight-mode');
+  private readonly fighterLock = this.element('#fighter-lock-state');
   private readonly countdownOverlay = this.element('#countdown-overlay');
   private readonly countdownValue = this.element('#countdown-value');
   private readonly startOverlay = this.element('#start-overlay');
@@ -257,11 +307,65 @@ export class Hud {
     }, kill ? 180 : 100);
   }
 
-  damage(direction = ''): void {
+  damage(direction = '', bearingRadians = 0, strength = 0.5): void {
+    const safeBearing = Number.isFinite(bearingRadians) ? bearingRadians : 0;
+    const safeStrength = Number.isFinite(strength) ? Math.max(0.22, Math.min(1, strength)) : 0.5;
     this.damageVignette.dataset.direction = direction;
+    this.damageVignette.style.setProperty('--damage-strength', safeStrength.toFixed(3));
     this.damageVignette.classList.remove('flash');
     void this.damageVignette.offsetWidth;
     this.damageVignette.classList.add('flash');
+
+    this.damageDirection.dataset.direction = direction;
+    this.damageDirection.dataset.bearing = String(Math.round(RAD_TO_DEG * safeBearing));
+    this.damageDirection.style.setProperty('--damage-bearing', `${safeBearing}rad`);
+    this.damageDirection.style.setProperty('--damage-strength', safeStrength.toFixed(3));
+    this.damageDirection.style.setProperty('--damage-opacity', (0.62 + safeStrength * 0.38).toFixed(3));
+    this.damageDirection.style.setProperty('--damage-tail-opacity', (0.38 + safeStrength * 0.34).toFixed(3));
+    this.damageDirection.classList.remove('show');
+    void this.damageDirection.offsetWidth;
+    this.damageDirection.classList.add('show');
+  }
+
+  fighter(state: HudFighterState): void {
+    this.fighterPrompt.classList.toggle('hidden', !state.prompt || state.active);
+    this.fighterCockpit.classList.toggle('hidden', !state.active);
+    if (state.promptTitle) this.fighterPromptTitle.textContent = state.promptTitle;
+    if (state.promptDetail) this.fighterPromptDetail.textContent = state.promptDetail;
+    if (!state.active) return;
+
+    const hullMax = Math.max(1, state.hullMax ?? 1);
+    const shieldMax = Math.max(1, state.shieldMax ?? 1);
+    const hull = Math.max(0, state.hull ?? 0);
+    const shield = Math.max(0, state.shield ?? 0);
+    const drive = Math.max(0, Math.min(1, state.drive ?? 0));
+    const heat = Math.max(0, Math.min(1, state.heat ?? 0));
+    const throttle = Math.max(-1, Math.min(1, state.throttle ?? 0));
+    const heading = ((state.heading ?? 0) % 360 + 360) % 360;
+    this.fighterHull.textContent = String(Math.ceil(hull));
+    this.fighterShield.textContent = String(Math.ceil(shield));
+    this.fighterDrive.textContent = `${Math.round(drive * 100)}%`;
+    this.fighterHeat.textContent = `${Math.round(heat * 100)}%`;
+    this.fighterHeading.textContent = String(Math.round(heading)).padStart(3, '0');
+    this.fighterSpeed.textContent = String(Math.max(0, Math.round(state.speed ?? 0))).padStart(3, '0');
+    this.fighterAltitude.textContent = String(Math.max(0, Math.round(state.altitude ?? 0))).padStart(3, '0');
+    const verticalSpeed = state.verticalSpeed ?? 0;
+    this.fighterVerticalSpeed.textContent = `${verticalSpeed >= 0 ? '+' : ''}${verticalSpeed.toFixed(1)}`;
+    this.fighterHullFill.style.width = `${Math.min(100, hull / hullMax * 100)}%`;
+    this.fighterShieldFill.style.width = `${Math.min(100, shield / shieldMax * 100)}%`;
+    this.fighterDriveFill.style.width = `${drive * 100}%`;
+    this.fighterHeatFill.style.width = `${heat * 100}%`;
+    this.fighterThrottleFill.style.height = `${Math.abs(throttle) * 100}%`;
+    this.fighterPitchLadder.style.setProperty('--fighter-pitch-offset', `${Math.max(-70, Math.min(70, -(state.pitch ?? 0) * 110))}px`);
+    this.fighterCockpit.dataset.critical = String(hull / hullMax <= 0.25);
+    this.fighterCockpit.dataset.overheated = String(Boolean(state.overheated));
+    this.fighterLock.dataset.locked = String(Boolean(state.locked));
+    this.fighterLock.querySelector('strong')!.textContent = state.locked ? 'MISSILE LOCK' : 'FREE AIM';
+    this.fighterFlightMode.textContent = state.overheated ? 'DRIVE OVERHEAT' : state.flightMode ?? 'FLIGHT';
+    const primaryCooldown = Math.max(0, state.primaryCooldown ?? 0);
+    const missileCooldown = Math.max(0, state.missileCooldown ?? 0);
+    this.fighterPrimaryState.textContent = primaryCooldown <= 0.01 ? 'PLASMA READY' : `CHARGE ${primaryCooldown.toFixed(1)}`;
+    this.fighterMissileState.textContent = missileCooldown <= 0.01 ? 'MISSILE READY' : `RELOAD ${missileCooldown.toFixed(1)}`;
   }
 
   message(text: string): void {

@@ -25,6 +25,8 @@ test('first-person weapons retract at walls without reacting to terrain traversa
     hooks.setReducedMotion(true);
     hooks.setPausedForScreenshot(true);
   });
+  await page.keyboard.press('KeyV');
+  await page.waitForFunction(() => window.__THREE_GAME_DIAGNOSTICS__?.viewMode === 'first-person');
 
   for (const weapon of WEAPONS) {
     const ground = await page.evaluate((id) => {

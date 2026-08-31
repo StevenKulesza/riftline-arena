@@ -4,6 +4,7 @@ import { loadCharacterAsset } from '../assets/CharacterAsset';
 import { JetpackRig } from '../assets/JetpackRig';
 import type { ArenaRuntime } from '../game/Arena';
 import { GRAPPLE, MOVEMENT, POWERUP, type WeaponId } from '../game/config';
+import { JetpackEnergy } from '../game/JetpackEnergy';
 import {
   botArchetypeForId,
   botObjectiveUtility,
@@ -97,6 +98,13 @@ export class Bot {
   speedBoost = 0;
   jetpackActive = false;
   jetpackBursts = 0;
+  jetpackCharge = 1;
+  jetpackLocked = false;
+  dashCooldown = 0;
+  dashesUsed = 0;
+  aimErrorDegrees = 0;
+  aimTracking = 0;
+  reactionRemaining = 0;
 
   private tacticalTimer = 0;
   private fireCooldown = 0;
@@ -110,7 +118,7 @@ export class Bot {
   private grappleCooldown = 0;
   private stuckTimer = 0;
   private jetpackTimer = 0;
-  private jetpackCooldown = 0;
+  private strafeIntent = 0;
   private recoveryRequested = false;
   private readonly availableWeapons = new Set<WeaponId>(['machine', 'shotgun']);
   private readonly progressAnchor = new THREE.Vector3();
@@ -125,6 +133,8 @@ export class Bot {
   private readonly scratchDirectionB = new THREE.Vector3();
   private readonly scratchSegmentEnd = new THREE.Vector3();
   private readonly scratchDesired = new THREE.Vector3();
+  private readonly scratchAimDesired = new THREE.Vector3();
+  private readonly scratchAimRight = new THREE.Vector3();
   private readonly scratchFrameStart = new THREE.Vector3();
   private readonly scratchEscapeNormal = new THREE.Vector3();
   private readonly scratchStartPosition = new THREE.Vector3();
@@ -144,9 +154,14 @@ export class Bot {
   private readonly jumpSpeedThreshold: number;
   private readonly jumpCooldownDuration: number;
   private readonly jetpackBurstDuration: number;
-  private readonly jetpackCooldownDuration: number;
   private readonly grappleCooldownDuration: number;
   private readonly aimErrorRadians: number;
+  private readonly jetpackEnergy = new JetpackEnergy({
+    burnSeconds: MOVEMENT.jetpackBurnSeconds,
+    rechargeDelaySeconds: MOVEMENT.jetpackRechargeDelaySeconds,
+    rechargeSeconds: MOVEMENT.jetpackRechargeSeconds,
+    restartCharge: MOVEMENT.jetpackRestartCharge,
+  });
   private mixer?: THREE.AnimationMixer;
   private readonly actions = new Map<string, THREE.AnimationAction>();
   private activeAnimation = '';
@@ -167,7 +182,9 @@ export class Bot {
     this.grappleMinDistance = THREE.MathUtils.lerp(19, 9, movementTuning.grappleTendency);
     this.grenadeCooldownDuration = THREE.MathUtils.lerp(5.4, 4.35, this.archetypeTuning.aggression);
     this.strafeScale = THREE.MathUtils.lerp(0.72, 1.24, movementTuning.strafeTendency);
-    this.wishSpeedBase = 14.4 * movementTuning.speedScale;
+    // Archetypes differ in route choice and commitment, not in superhuman
+    // top speed. A speed pickup is the only way a bot exceeds player wish speed.
+    this.wishSpeedBase = MOVEMENT.wishSpeed;
     this.chaseDistance = THREE.MathUtils.clamp(
       24 * botObjectiveUtility(this.archetypeTuning, 'player')
         / Math.max(0.35, botObjectiveUtility(this.archetypeTuning, 'core')),
@@ -177,10 +194,9 @@ export class Bot {
     this.jumpSpeedThreshold = THREE.MathUtils.lerp(8.2, 5.6, movementTuning.jumpTendency);
     this.jumpCooldownDuration = THREE.MathUtils.lerp(0.24, 0.12, movementTuning.jumpTendency);
     this.jetpackBurstDuration = THREE.MathUtils.lerp(0.46, 0.72, movementTuning.jetpackTendency);
-    this.jetpackCooldownDuration = THREE.MathUtils.lerp(1.48, 0.98, movementTuning.jetpackTendency);
     this.grappleCooldownDuration = THREE.MathUtils.lerp(1.55, 0.95, movementTuning.grappleTendency);
     this.aimErrorRadians = THREE.MathUtils.degToRad(
-      THREE.MathUtils.lerp(1.05, 0.52, this.archetypeTuning.aggression),
+      THREE.MathUtils.lerp(1.65, 0.65, this.archetypeTuning.aggression),
     );
     this.weapon = (['machine', 'rocket', 'plasma'] as WeaponId[])[id % 3];
     this.availableWeapons.add(this.weapon);
@@ -198,7 +214,14 @@ export class Bot {
     this.respawn(spawn);
   }
 
-  update(delta: number, elapsed: number, target: THREE.Vector3, objective: THREE.Vector3, hasTargetLineOfSight: boolean): void {
+  update(
+    delta: number,
+    elapsed: number,
+    target: THREE.Vector3,
+    targetVelocity: THREE.Vector3,
+    objective: THREE.Vector3,
+    hasTargetLineOfSight: boolean,
+  ): void {
     this.wantsToFire = false;
     this.wantsToThrowGrenade = false;
     if (!this.alive) {
@@ -213,8 +236,8 @@ export class Bot {
     this.jumpCooldown = Math.max(0, this.jumpCooldown - delta);
     this.grenadeCooldown = Math.max(0, this.grenadeCooldown - delta);
     this.grappleCooldown = Math.max(0, this.grappleCooldown - delta);
-    this.jetpackCooldown = Math.max(0, this.jetpackCooldown - delta);
     this.jetpackTimer = Math.max(0, this.jetpackTimer - delta);
+    this.dashCooldown = Math.max(0, this.dashCooldown - delta);
     this.damageBoost = Math.max(0, this.damageBoost - delta);
     this.speedBoost = Math.max(0, this.speedBoost - delta);
     this.tacticalTimer -= delta;
@@ -233,6 +256,7 @@ export class Bot {
     const visible = distance < 155 && hasTargetLineOfSight && this.facingDot > this.awarenessDot;
     this.targetVisible = visible;
     this.targetVisibleFor = visible ? this.targetVisibleFor + delta : 0;
+    this.reactionRemaining = visible ? Math.max(0, this.reactionTimer - this.targetVisibleFor) : this.reactionTimer;
     this.navigationTarget.copy(objective);
     this.avoidTimer = Math.max(0, this.avoidTimer - delta);
     this.chooseWeapon(distance, visible);
@@ -242,7 +266,7 @@ export class Bot {
       this.jetpackRig.update(false, delta, elapsed, false);
       this.velocity.set(0, 0, 0);
       if (visible && targetDistanceSq > 0.001) {
-        this.aimDirection.copy(toTarget).normalize();
+        this.updateAim(delta, elapsed, toTarget, targetVelocity, distance);
         this.group.rotation.y = Math.atan2(this.aimDirection.x, this.aimDirection.z);
       }
       if (visible && this.targetVisibleFor >= this.reactionTimer && this.fireCooldown <= 0) {
@@ -295,12 +319,19 @@ export class Bot {
 
     const horizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
     if (this.tacticalTimer <= 0) {
-      this.tacticalTimer = 0.1;
+      // A slightly irregular decision cadence prevents the metronomic
+      // left/right switching that reads as scripted movement.
+      this.tacticalTimer = 0.085 + (Math.sin(elapsed * 0.71 + this.id * 1.83) * 0.5 + 0.5) * 0.095;
       const chaseTarget = visible && distance < this.chaseDistance ? target : objective;
       const desired = this.scratchDesired.subVectors(chaseTarget, this.group.position).setY(0);
       if (desired.lengthSq() > 0.001) desired.normalize();
       const strafeAmount = (visible ? 0.68 : 0.23) * this.strafeScale;
-      const strafe = Math.sin(elapsed * (0.82 + this.id * 0.06) + this.id * 2.1) * strafeAmount;
+      this.strafeIntent = THREE.MathUtils.lerp(
+        this.strafeIntent,
+        Math.sin(elapsed * (0.47 + this.id * 0.035) + this.id * 2.1),
+        0.38,
+      );
+      const strafe = this.strafeIntent * strafeAmount;
       const desiredX = desired.x;
       const desiredZ = desired.z;
       desired.x -= desiredZ * strafe;
@@ -313,10 +344,8 @@ export class Bot {
       this.wishDirection.copy(desired);
       const wishSpeed = this.wishSpeedBase * (this.speedBoost > 0 ? 1.28 : 1);
       const currentAlong = this.velocity.x * desired.x + this.velocity.z * desired.z;
-      const acceleration = this.grounded
-        ? MOVEMENT.groundAcceleration
-        : MOVEMENT.airAcceleration * (visible ? 3.2 : 2.4) * this.strafeScale;
-      const add = Math.min(acceleration * 0.1 * wishSpeed, wishSpeed - currentAlong);
+      const acceleration = this.grounded ? MOVEMENT.groundAcceleration : MOVEMENT.airAcceleration;
+      const add = Math.min(acceleration * this.tacticalTimer * wishSpeed, wishSpeed - currentAlong);
       if (add > 0) {
         this.velocity.x += desired.x * add;
         this.velocity.z += desired.z * add;
@@ -326,6 +355,13 @@ export class Bot {
         this.grounded = false;
         this.jumpCooldown = this.jumpCooldownDuration;
         this.bunnyHops += 1;
+      }
+      const dashWindow = Math.sin(elapsed * 0.93 + this.id * 2.47) > 0.72;
+      if (this.grounded && this.dashCooldown <= 0 && horizontalSpeed > 4.5
+        && (this.avoidTimer > 0.25 || (visible && distance > 9 && distance < 32 && dashWindow))) {
+        this.velocity.addScaledVector(desired, MOVEMENT.dashImpulse);
+        this.dashCooldown = MOVEMENT.dashCooldown;
+        this.dashesUsed += 1;
       }
     }
 
@@ -359,12 +395,14 @@ export class Bot {
       || target.y > this.group.position.y + 2.4
       || this.velocity.y < -4.2
       || (this.avoidTimer > 0.2 && !this.grounded);
-    if (!this.grounded && this.jetpackTimer <= 0 && this.jetpackCooldown <= 0 && needsVerticalRecovery) {
+    if (!this.grounded && this.jetpackTimer <= 0 && needsVerticalRecovery && !this.jetpackEnergy.snapshot().locked) {
       this.jetpackTimer = this.jetpackBurstDuration;
-      this.jetpackCooldown = this.jetpackCooldownDuration;
       this.jetpackBursts += 1;
     }
-    this.jetpackActive = !this.grounded && this.jetpackTimer > 0;
+    const jetpack = this.jetpackEnergy.update(delta, !this.grounded && this.jetpackTimer > 0, this.grounded);
+    this.jetpackActive = jetpack.active;
+    this.jetpackCharge = jetpack.charge;
+    this.jetpackLocked = jetpack.locked;
     if (this.jetpackActive) {
       this.velocity.y = Math.min(
         MOVEMENT.jetpackMaxRiseSpeed,
@@ -375,7 +413,7 @@ export class Bot {
     if (this.grounded && horizontalSpeed > 0) {
       const floorNormal = this.group.userData.floorNormal as THREE.Vector3 | undefined;
       const skiing = floorNormal ? floorNormal.y < 0.965 && horizontalSpeed > 8 : false;
-      const friction = Math.max(0, 1 - (skiing ? MOVEMENT.skiFriction : 1.7) * delta);
+      const friction = Math.max(0, 1 - (skiing ? MOVEMENT.skiFriction : MOVEMENT.groundFriction) * delta);
       this.velocity.x *= friction;
       this.velocity.z *= friction;
     }
@@ -483,11 +521,7 @@ export class Bot {
     }
 
     if (visible && targetDistanceSq > 0.001) {
-      this.aimDirection.copy(toTarget).normalize();
-      this.aimDirection.applyAxisAngle(
-        THREE.Object3D.DEFAULT_UP,
-        Math.sin(elapsed * 1.7 + this.id * 3) * this.aimErrorRadians,
-      );
+      this.updateAim(delta, elapsed, toTarget, targetVelocity, distance);
     } else if (this.wishDirection.lengthSq() > 0.001) {
       const turn = 1 - Math.exp(-delta * 5.2);
       this.aimDirection.lerp(this.wishDirection, turn).normalize();
@@ -612,7 +646,10 @@ export class Bot {
     this.grappleCooldown = 0;
     this.jetpackActive = false;
     this.jetpackTimer = 0;
-    this.jetpackCooldown = 0;
+    this.jetpackEnergy.reset();
+    this.jetpackCharge = 1;
+    this.jetpackLocked = false;
+    this.dashCooldown = 0;
     this.grenadeAmmo = 3;
     this.grenadeCooldown = 0;
     this.jumpCooldown = 0;
@@ -622,7 +659,62 @@ export class Bot {
     this.progressAnchor.copy(this.group.position);
     this.recoveryRequested = false;
     this.targetOwner = null;
+    this.aimErrorDegrees = 0;
+    this.aimTracking = 0;
+    this.reactionRemaining = this.reactionTimer;
     this.group.visible = true;
+  }
+
+  private updateAim(
+    delta: number,
+    elapsed: number,
+    toTarget: THREE.Vector3,
+    targetVelocity: THREE.Vector3,
+    distance: number,
+  ): void {
+    const projectileSpeed = this.weapon === 'rocket' ? 40
+      : this.weapon === 'plasma' ? 48
+        : this.weapon === 'disc' ? 76
+          : 0;
+    const leadSeconds = projectileSpeed > 0
+      ? Math.min(0.72, distance / projectileSpeed) * THREE.MathUtils.lerp(0.64, 0.88, this.archetypeTuning.aggression)
+      : 0;
+    const desired = this.scratchAimDesired.copy(toTarget).addScaledVector(targetVelocity, leadSeconds);
+    if (desired.lengthSq() < 1e-6) return;
+    desired.normalize();
+    const idealX = desired.x;
+    const idealY = desired.y;
+    const idealZ = desired.z;
+
+    const weaponErrorScale = this.weapon === 'sniper' ? 0.22
+      : this.weapon === 'rail' ? 0.34
+        : this.weapon === 'shotgun' ? 1.45
+          : this.weapon === 'rocket' ? 0.78
+            : 1;
+    const motionScale = 1 + Math.min(0.7, targetVelocity.length() / 38)
+      + Math.min(0.35, Math.hypot(this.velocity.x, this.velocity.z) / 70);
+    const settledScale = THREE.MathUtils.lerp(1.35, 0.72, THREE.MathUtils.smoothstep(this.targetVisibleFor, 0.05, 0.9));
+    const error = this.aimErrorRadians * weaponErrorScale * motionScale * settledScale;
+    const yawNoise = Math.sin(elapsed * 1.13 + this.id * 2.71) * 0.68
+      + Math.sin(elapsed * 2.37 + this.id * 0.91) * 0.32;
+    const pitchNoise = Math.sin(elapsed * 0.89 + this.id * 1.37) * 0.61
+      + Math.sin(elapsed * 2.11 + this.id * 3.17) * 0.39;
+    desired.applyAxisAngle(THREE.Object3D.DEFAULT_UP, yawNoise * error);
+    const aimRight = this.scratchAimRight.crossVectors(desired, THREE.Object3D.DEFAULT_UP);
+    if (aimRight.lengthSq() > 1e-5) desired.applyAxisAngle(aimRight.normalize(), pitchNoise * error * 0.72);
+
+    // Bounded angular pursuit produces a visible acquisition/settling phase
+    // instead of instantly assigning the perfect target vector every tick.
+    const trackingRate = THREE.MathUtils.lerp(5.4, 8.2, this.archetypeTuning.aggression);
+    const blend = 1 - Math.exp(-delta * trackingRate);
+    this.aimDirection.lerp(desired, blend).normalize();
+    this.aimTracking = THREE.MathUtils.clamp(this.aimDirection.dot(desired), -1, 1);
+    const idealDot = THREE.MathUtils.clamp(
+      this.aimDirection.x * idealX + this.aimDirection.y * idealY + this.aimDirection.z * idealZ,
+      -1,
+      1,
+    );
+    this.aimErrorDegrees = THREE.MathUtils.radToDeg(Math.acos(idealDot));
   }
 
   private chooseWeapon(distance: number, visible: boolean): void {
@@ -693,14 +785,14 @@ export class Bot {
 
   private weaponCooldownForCurrentWeapon(): number {
     switch (this.weapon) {
-      case 'shotgun': return 0.95;
-      case 'rocket': return 1.05;
-      case 'plasma': return 0.2;
-      case 'laser': return 0.13;
-      case 'sniper': return 1.2;
-      case 'rail': return 1.55;
-      case 'disc': return 0.78;
-      default: return 0.16;
+      case 'shotgun': return 0.9;
+      case 'rocket': return 0.75;
+      case 'plasma': return 0.125;
+      case 'laser': return 0.1;
+      case 'sniper': return 1.1;
+      case 'rail': return 1.5;
+      case 'disc': return 0.72;
+      default: return 0.09;
     }
   }
 

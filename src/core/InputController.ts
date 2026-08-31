@@ -27,6 +27,7 @@ export class InputController {
   private pauseQueued = false;
   private muteQueued = false;
   private viewToggleQueued = false;
+  private interactQueued = false;
   private hasInteracted = false;
   private blurClearTimer = 0;
   private dragLookActive = false;
@@ -53,6 +54,7 @@ export class InputController {
     private readonly weaponButton: HTMLElement,
     private readonly zoomButton: HTMLElement,
     private readonly viewButton: HTMLElement,
+    private readonly vehicleButton: HTMLElement,
   ) {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -91,6 +93,7 @@ export class InputController {
     this.zoomButton.addEventListener('pointerup', this.onZoomUp);
     this.zoomButton.addEventListener('pointercancel', this.onZoomUp);
     this.viewButton.addEventListener('pointerdown', this.onViewDown);
+    this.vehicleButton.addEventListener('pointerdown', this.onVehicleDown);
   }
 
   readMovement(target: THREE.Vector2): THREE.Vector2 {
@@ -184,6 +187,12 @@ export class InputController {
     return value;
   }
 
+  consumeInteract(): boolean {
+    const value = this.interactQueued;
+    this.interactQueued = false;
+    return value;
+  }
+
   isFireHeld(): boolean {
     return this.fireHeld || this.mousePrimaryHeld || this.keys.has('KeyF');
   }
@@ -194,6 +203,10 @@ export class InputController {
 
   isJumpHeld(): boolean {
     return this.keys.has('Space') || this.jumpButton.dataset.held === 'true';
+  }
+
+  isFighterDescendHeld(): boolean {
+    return this.keys.has('ControlLeft') || this.keys.has('ControlRight');
   }
 
   isZoomHeld(): boolean {
@@ -279,6 +292,7 @@ export class InputController {
     this.zoomButton.removeEventListener('pointerup', this.onZoomUp);
     this.zoomButton.removeEventListener('pointercancel', this.onZoomUp);
     this.viewButton.removeEventListener('pointerdown', this.onViewDown);
+    this.vehicleButton.removeEventListener('pointerdown', this.onVehicleDown);
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -305,6 +319,7 @@ export class InputController {
     if (!event.repeat && (event.code === 'KeyP' || event.code === 'Escape')) this.pauseQueued = true;
     if (!event.repeat && event.code === 'KeyM') this.muteQueued = true;
     if (!event.repeat && event.code === 'KeyV') this.viewToggleQueued = true;
+    if (!event.repeat && event.code === 'KeyR') this.interactQueued = true;
 
   };
 
@@ -327,6 +342,7 @@ export class InputController {
       this.jumpButton.dataset.held = 'false';
       this.grappleQueued = false;
       this.grenadeQueued = false;
+      this.interactQueued = false;
       this.grappleButton.dataset.held = 'false';
     }, 0);
   };
@@ -571,6 +587,12 @@ export class InputController {
     event.preventDefault();
     this.hasInteracted = true;
     this.viewToggleQueued = true;
+  };
+
+  private readonly onVehicleDown = (event: PointerEvent): void => {
+    event.preventDefault();
+    this.hasInteracted = true;
+    this.interactQueued = true;
   };
 
   private updateStick(clientX: number, clientY: number): void {

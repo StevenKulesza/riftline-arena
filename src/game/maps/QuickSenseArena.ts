@@ -1503,8 +1503,16 @@ export class QuickSenseArena implements ArenaRuntime {
     const retiredGeometries = new Set<THREE.BufferGeometry>();
     const groupInverse = this.group.matrixWorld.clone().invert();
     const localTransform = new THREE.Matrix4();
+    const sourceToGroup = new THREE.Matrix4();
+    const instanceTransform = new THREE.Matrix4();
     const localCenter = new THREE.Vector3();
-    const cellSize = 112;
+    // QuickSense's prior zero-anchored 112-unit grid split nearly every shared
+    // route material once on each side of x/z=0. That preserved culling for a
+    // map which is already visible almost end-to-end, but doubled or quadrupled
+    // the dominant deck/side submissions (and their shadow submissions). A
+    // centered 224-unit cell keeps the playable bowl in one batch per material
+    // while leaving distant architecture in adjacent cullable cells.
+    const cellSize = 224;
     const hasImportedTowerAncestor = (object: THREE.Object3D): boolean => {
       let ancestor: THREE.Object3D | null = object;
       while (ancestor && ancestor !== this.group) {
@@ -1520,7 +1528,6 @@ export class QuickSenseArena implements ArenaRuntime {
       if (
         !mesh.isMesh
         || !mesh.visible
-        || (mesh as THREE.InstancedMesh).isInstancedMesh
         || Array.isArray(mesh.material)
         || mesh.children.length > 0
         || animated.has(mesh)
@@ -1535,24 +1542,15 @@ export class QuickSenseArena implements ArenaRuntime {
       if (Object.values(mesh.geometry.attributes).some((attribute) => (
         'isInterleavedBufferAttribute' in attribute && attribute.isInterleavedBufferAttribute
       ))) return;
-      const attributes = Object.entries(mesh.geometry.attributes)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([name, attribute]) => {
-          const arrayName = attribute.array.constructor.name;
-          return `${name}:${attribute.itemSize}:${attribute.normalized ? 1 : 0}:${arrayName}`;
-        })
-        .join('|');
       mesh.geometry.computeBoundingSphere();
       localCenter.copy(mesh.geometry.boundingSphere?.center ?? mesh.position)
         .applyMatrix4(mesh.matrixWorld)
         .applyMatrix4(groupInverse);
-      const cellX = Math.floor(localCenter.x / cellSize);
-      const cellY = Math.floor(localCenter.y / cellSize);
-      const cellZ = Math.floor(localCenter.z / cellSize);
+      const cellX = Math.round(localCenter.x / cellSize);
+      const cellY = Math.round(localCenter.y / cellSize);
+      const cellZ = Math.round(localCenter.z / cellSize);
       const key = [
         mesh.material.uuid,
-        mesh.geometry.index ? 'indexed' : 'plain',
-        attributes,
         mesh.castShadow ? 'cast' : 'no-cast',
         mesh.receiveShadow ? 'receive' : 'no-receive',
         mesh.renderOrder,
@@ -1574,10 +1572,54 @@ export class QuickSenseArena implements ArenaRuntime {
     let batchIndex = 0;
     for (const batch of batches.values()) {
       if (batch.meshes.length < 2) continue;
-      const transformed = batch.meshes.map((mesh) => {
-        localTransform.multiplyMatrices(groupInverse, mesh.matrixWorld);
-        return mesh.geometry.clone().applyMatrix4(localTransform);
-      });
+      const transformed: THREE.BufferGeometry[] = [];
+      const normalizedClone = (source: THREE.BufferGeometry): THREE.BufferGeometry => {
+        const geometry = source.index ? source.toNonIndexed() : source.clone();
+        const keepColor = Boolean((batch.material as THREE.MeshStandardMaterial).vertexColors);
+        for (const attribute of Object.keys(geometry.attributes)) {
+          if (!['position', 'normal', 'uv'].includes(attribute) && !(keepColor && attribute === 'color')) {
+            geometry.deleteAttribute(attribute);
+          }
+        }
+        if (!geometry.getAttribute('normal')) geometry.computeVertexNormals();
+        if (!geometry.getAttribute('uv')) {
+          const positions = geometry.getAttribute('position');
+          geometry.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(positions.count * 2), 2));
+        }
+        if (keepColor && !geometry.getAttribute('color')) {
+          const positions = geometry.getAttribute('position');
+          const colors = new Float32Array(positions.count * 3);
+          colors.fill(1);
+          geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        }
+        for (const attributeName of Object.keys(geometry.attributes)) {
+          const attribute = geometry.getAttribute(attributeName);
+          if (attribute.array instanceof Float32Array && !attribute.normalized) continue;
+          const values = new Float32Array(attribute.count * attribute.itemSize);
+          for (let index = 0; index < attribute.count; index += 1) {
+            const offset = index * attribute.itemSize;
+            values[offset] = attribute.getX(index);
+            if (attribute.itemSize > 1) values[offset + 1] = attribute.getY(index);
+            if (attribute.itemSize > 2) values[offset + 2] = attribute.getZ(index);
+            if (attribute.itemSize > 3) values[offset + 3] = attribute.getW(index);
+          }
+          geometry.setAttribute(attributeName, new THREE.Float32BufferAttribute(values, attribute.itemSize));
+        }
+        return geometry;
+      };
+      for (const mesh of batch.meshes) {
+        sourceToGroup.multiplyMatrices(groupInverse, mesh.matrixWorld);
+        const instanced = mesh as THREE.InstancedMesh;
+        if (instanced.isInstancedMesh) {
+          for (let instance = 0; instance < instanced.count; instance += 1) {
+            instanced.getMatrixAt(instance, instanceTransform);
+            localTransform.multiplyMatrices(sourceToGroup, instanceTransform);
+            transformed.push(normalizedClone(mesh.geometry).applyMatrix4(localTransform));
+          }
+        } else {
+          transformed.push(normalizedClone(mesh.geometry).applyMatrix4(sourceToGroup));
+        }
+      }
       const baselineAttributes = transformed[0].attributes;
       const compatible = Object.keys(baselineAttributes).every((name) => {
         const baseline = baselineAttributes[name] as THREE.BufferAttribute;

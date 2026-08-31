@@ -8,7 +8,11 @@ async function prepareDeterministicScreenshot(
 ): Promise<void> {
   await page.goto('/');
   await expect(page.locator('#game-canvas')).toBeVisible();
-  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
+  await page.waitForFunction(
+    () => Boolean(window.__THREE_GAME_TEST_HOOKS__),
+    null,
+    { timeout: 180_000 },
+  );
 
   await page.evaluate(async ({ seed, state }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__;

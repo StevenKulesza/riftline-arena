@@ -510,6 +510,20 @@
   }
 }
 
+/* Release layout lock: this stylesheet is loaded last, so the equipped weapon
+   panel remains entirely above the three-row touch action grid. */
+@media (pointer: coarse), (max-width: 760px) {
+  .weapon-cluster {
+    bottom: max(190px, calc(env(safe-area-inset-bottom) + 180px));
+  }
+}
+
+@media (pointer: coarse) and (orientation: landscape), (max-height: 520px) and (max-width: 900px) {
+  .weapon-cluster {
+    bottom: max(158px, calc(env(safe-area-inset-bottom) + 148px));
+  }
+}
+
 /* Competitive readout: a peripheral standings rail, explicit objective state,
    and reserved feedback sockets. The center sight picture remains untouched. */
 .standings-strip,

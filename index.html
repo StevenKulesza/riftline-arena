@@ -184,6 +184,37 @@
         <strong id="view-mode-value">First person</strong>
         <small>V // Switch</small>
       </div>
+      <div id="fighter-prompt" class="hidden" role="status" aria-live="polite" aria-atomic="true">
+        <span id="fighter-prompt-key">R</span>
+        <div><strong id="fighter-prompt-title">BOARD STAR SPARROW</strong><small id="fighter-prompt-detail">FLIGHT FRAME READY</small></div>
+      </div>
+      <section id="fighter-cockpit" class="hidden" aria-label="Star Sparrow flight telemetry">
+        <div class="fighter-canopy" aria-hidden="true"><i></i><i></i><b></b><b></b><span></span></div>
+        <div class="fighter-ident"><span>SS-04 // STAR SPARROW</span><strong id="fighter-flight-mode">VTOL READY</strong><small>FLIGHT CONTROL SYSTEM</small></div>
+        <div class="fighter-heading"><span>HDG</span><div class="fighter-heading-tape"><i>300</i><i>NW</i><i>330</i><strong id="fighter-heading-value">000</strong><i>030</i><i>NE</i><i>060</i></div></div>
+        <div class="fighter-flight-cue" aria-hidden="true">
+          <div class="fighter-pitch-ladder" id="fighter-pitch-ladder">
+            <span class="fighter-pitch-line fighter-pitch-line--up2"><b>20</b><i></i><b>20</b></span>
+            <span class="fighter-pitch-line fighter-pitch-line--up1"><b>10</b><i></i><b>10</b></span>
+            <span class="fighter-pitch-line fighter-pitch-line--zero"><b>0</b><i></i><b>0</b></span>
+            <span class="fighter-pitch-line fighter-pitch-line--down1"><b>10</b><i></i><b>10</b></span>
+            <span class="fighter-pitch-line fighter-pitch-line--down2"><b>20</b><i></i><b>20</b></span>
+          </div>
+          <div class="fighter-boresight"><i></i><i></i><b></b><b></b><span></span></div>
+          <div class="fighter-velocity-vector"><i></i><i></i><i></i></div>
+        </div>
+        <aside class="fighter-flight-scale fighter-flight-scale--speed"><span>SPD</span><strong id="fighter-speed-value">000</strong><small>KM/H</small><div><i id="fighter-throttle-fill"></i></div><em>THR</em></aside>
+        <aside class="fighter-flight-scale fighter-flight-scale--altitude"><span>RALT</span><strong id="fighter-altitude-value">000</strong><small>METERS</small><div class="fighter-vspeed"><i></i><b id="fighter-vspeed-value">+0</b></div><em>V/S</em></aside>
+        <div class="fighter-lock" id="fighter-lock-state"><span>FCS // SEEKER</span><strong>FREE AIM</strong><small>NO DESIGNATED TARGET</small></div>
+        <div class="fighter-weapons"><span><small>GUN</small><strong id="fighter-primary-state">PLASMA READY</strong></span><span><small>MSL</small><strong id="fighter-missile-state">MISSILE READY</strong></span><em>LMB // FIRE&nbsp;&nbsp; RMB // MISSILE</em></div>
+        <div class="fighter-systems">
+          <div class="fighter-readout fighter-readout--hull"><span>Hull</span><strong id="fighter-hull-value">260</strong><i><b id="fighter-hull-fill"></b></i></div>
+          <div class="fighter-readout fighter-readout--shield"><span>Shield</span><strong id="fighter-shield-value">140</strong><i><b id="fighter-shield-fill"></b></i></div>
+          <div class="fighter-readout fighter-readout--drive"><span>Drive</span><strong id="fighter-drive-value">100%</strong><i><b id="fighter-drive-fill"></b></i></div>
+          <div class="fighter-readout fighter-readout--heat"><span>Heat</span><strong id="fighter-heat-value">0%</strong><i><b id="fighter-heat-fill"></b></i></div>
+        </div>
+        <div class="fighter-egress">R // EJECT <i></i> SHIFT // AFTERBURNER <i></i> SPACE // VTOL</div>
+      </section>
       <div id="scope-overlay" aria-hidden="true">
         <div class="scope-glass">
           <span class="scope-axis scope-axis--horizontal"></span>
@@ -204,6 +235,9 @@
         </div>
       </div>
       <div id="damage-vignette" aria-hidden="true"></div>
+      <div id="damage-direction-indicator" aria-hidden="true">
+        <span class="damage-bearing-arc"><i></i></span>
+      </div>
 
       <section id="countdown-overlay" class="hidden" aria-live="assertive" aria-atomic="true">
         <div class="countdown-lockup">
@@ -289,6 +323,7 @@
             <div><kbd>1—8</kbd><span>Weapons</span></div>
             <div><kbd>Q</kbd><span>Throw grenade</span></div>
             <div><kbd>V</kbd><span>Switch view</span></div>
+            <div><kbd>R</kbd><span>Board / exit fighter</span></div>
           </div>
           <div class="loadout-strip" aria-hidden="true">
             <span>8 weapon channels</span><i></i><span>mobility online</span><i></i><span>flux core live</span>
@@ -456,6 +491,7 @@
           <button id="weapon-button" class="touch-button touch-button--weapon" type="button"><span>Swap</span></button>
           <button id="zoom-button" class="touch-button touch-button--zoom" type="button" data-held="false"><span>Alt</span></button>
           <button id="view-button" class="touch-button touch-button--view" type="button"><span>View</span></button>
+          <button id="vehicle-button" class="touch-button touch-button--vehicle" type="button"><span>Board</span></button>
           <button id="fire-button" class="touch-button touch-button--fire" type="button"><span>Fire</span></button>
         </div>
       </section>

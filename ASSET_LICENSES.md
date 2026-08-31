@@ -44,6 +44,35 @@ The model directory also contains its original [attribution notice](public/asset
   file contained UVs but no image textures, so QuickSense applies project-authored panel, roughness,
   and emissive signal materials at load time.
 
+## A Star Wars grenade
+
+- File: `public/assets/models/a-star-wars-grenade.glb`
+- Creator: Diadle123
+- Source: https://sketchfab.com/3d-models/a-star-wars-grenade-468280c131084dbdbd00f71c60b46e6e
+- License: CC BY-SA 4.0, https://creativecommons.org/licenses/by-sa/4.0/
+- Integration changes: the supplied GLB is centered and scaled to Riftline's grenade collision
+  diameter at load time; a project-authored fuse indicator preserves player/bot readability.
+
+## Star Sparrow Modular Spaceship
+
+- File: `public/assets/models/star-sparrow-modular-spaceship.glb`
+- Creator: Ebal Studios
+- Source: https://sketchfab.com/3d-models/star-sparrow-modular-spaceship-28806b168f8043bbb5c1c922f98452c9
+- License: Sketchfab Standard License, https://sketchfab.com/licenses
+- Integration changes: the supplied modular spacecraft is normalized to Riftline's fighter scale;
+  project-authored flight physics, collision proxies, hardpoints, shield/thruster effects, boarding,
+  AI piloting, destruction, and rebuild behavior are applied at runtime.
+
+## Scifi Drone
+
+- File: `public/assets/models/scifi-drone.glb`
+- Creator: Doverlock
+- Source: https://sketchfab.com/3d-models/scifi-drone-290de0f82e9e4e4b9a8ae6524311a8db
+- License: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/
+- Integration changes: the supplied GLB is centered and proportionally normalized to a 3.4 m
+  combat diameter; Riftline adds flight AI, laser hardpoints, health, collision, destruction,
+  and respawn behavior without altering the authored texture proportions.
+
 ## Fonts
 
 - Oxanium 700/800: Oxanium project, distributed through Google Fonts under the SIL Open Font

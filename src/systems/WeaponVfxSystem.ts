@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import type { WeaponId } from '../game/config';
 
 type Effect = {
@@ -58,9 +61,9 @@ const SURFACE_NORMAL = new THREE.Vector3(0, 0, 1);
 const UP = new THREE.Vector3(0, 1, 0);
 const ORIENT_DIRECTION = new THREE.Vector3();
 const MAX_TRANSIENT_EFFECTS = 48;
-const MAX_TRAIL_EFFECTS = 8;
+const MAX_TRAIL_EFFECTS = 6;
 const MAX_STUCK_TRACERS = 12;
-const MAX_IMPACT_MARKS = 24;
+const MAX_IMPACT_MARKS = 12;
 const MAX_EFFECTS_BY_KIND: Record<NonNullable<Effect['kind']>, number> = {
   muzzle: 2,
   beam: 12,
@@ -79,8 +82,11 @@ const MAX_MARKS_BY_WEAPON: Record<WeaponId, number> = {
   rail: 8,
   disc: 10,
 };
-const TRAIL_SPAWNS_PER_SECOND = 45;
-const TRAIL_BURST_ALLOWANCE = 5;
+// Persistent projectile silhouettes carry the shot; these short-lived trail
+// wisps only need enough overlap to read as motion. Keeping the global token
+// rate bounded avoids allocation/GC bursts when several bots fire together.
+const TRAIL_SPAWNS_PER_SECOND = 20;
+const TRAIL_BURST_ALLOWANCE = 3;
 const GRAPPLE_CURVE_AMOUNTS = [0.12, 0.34, 0.58, 0.82] as const;
 
 function additiveMaterial(color: number, opacity = 1, depthTest = true): THREE.MeshBasicMaterial {
@@ -96,8 +102,79 @@ function additiveMaterial(color: number, opacity = 1, depthTest = true): THREE.M
   });
 }
 
-function smokeMaterial(color = 0x665e58, opacity = 0.14, depthTest = false): THREE.MeshBasicMaterial {
-  return new THREE.MeshBasicMaterial({
+function createSmokeTexture(): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Unable to create weapon smoke texture.');
+  const image = context.createImageData(size, size);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const nx = (x + 0.5) / size * 2 - 1;
+      const ny = (y + 0.5) / size * 2 - 1;
+      const radius = Math.hypot(nx * 0.94, ny);
+      const broad = Math.max(0, 1 - radius);
+      const billow = Math.sin(nx * 9.7 + Math.sin(ny * 5.3) * 1.7) * 0.5
+        + Math.sin(ny * 13.1 - nx * 4.6) * 0.3
+        + Math.sin((nx + ny) * 23.7) * 0.2;
+      const density = THREE.MathUtils.clamp(
+        Math.pow(broad, 1.55) * (0.76 + billow * 0.24) - Math.max(0, radius - 0.72) * 0.16,
+        0,
+        1,
+      );
+      const offset = (y * size + x) * 4;
+      image.data[offset] = 255;
+      image.data[offset + 1] = 255;
+      image.data[offset + 2] = 255;
+      image.data[offset + 3] = Math.round(density * 255);
+    }
+  }
+  context.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.name = 'weapon-soft-smoke-alpha';
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = true;
+  texture.userData.source = 'procedural-soft-density';
+  return texture;
+}
+
+function createTracerRampTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 8;
+  canvas.height = 128;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Unable to create weapon tracer ramp.');
+  const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0, '#000000');
+  gradient.addColorStop(0.08, '#525252');
+  gradient.addColorStop(0.24, '#f2f2f2');
+  gradient.addColorStop(0.5, '#ffffff');
+  gradient.addColorStop(0.76, '#f2f2f2');
+  gradient.addColorStop(0.94, '#3b3b3b');
+  gradient.addColorStop(1, '#000000');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.name = 'weapon-tracer-longitudinal-ramp';
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.userData.source = 'procedural-longitudinal-energy-ramp';
+  return texture;
+}
+
+function smokeMaterial(
+  map: THREE.Texture,
+  color = 0x665e58,
+  opacity = 0.14,
+  depthTest = false,
+): THREE.SpriteMaterial {
+  return new THREE.SpriteMaterial({
+    map,
     color,
     transparent: true,
     opacity,
@@ -136,6 +213,7 @@ export class WeaponVfxSystem {
   private readonly laserPoints = Array.from({ length: 11 }, () => new THREE.Vector3());
   private readonly sharedGeometries = new Map<string, THREE.BufferGeometry>();
   private readonly sharedGeometrySet = new Set<THREE.BufferGeometry>();
+  private readonly sharedProjectileMaterials = new Map<string, THREE.Material>();
   private readonly grappleCurvePoints = Array.from({ length: 6 }, () => new THREE.Vector3());
   private continuousLaser?: ContinuousLaser;
   private grappleRoot?: THREE.Group;
@@ -146,6 +224,8 @@ export class WeaponVfxSystem {
   private readonly grappleMaterials: THREE.Material[] = [];
   private readonly machineMuzzlePool: MachineMuzzlePoolEntry[] = [];
   private readonly machineBeamPool: MachineBeamPoolEntry[] = [];
+  private readonly smokeTexture = createSmokeTexture();
+  private readonly tracerRampTexture = createTracerRampTexture();
   private machineMuzzleCursor = 0;
   private machineBeamCursor = 0;
   private laserPhase = 0;
@@ -157,8 +237,15 @@ export class WeaponVfxSystem {
     private readonly scene: THREE.Scene,
     private readonly camera: THREE.Camera,
     private readonly random: () => number,
+    private readonly grenadeModel: THREE.Group,
     private readonly reducedEffects = false,
-  ) {}
+  ) {
+    // Imported geometry is shared by every thrown clone. Marking it as a VFX
+    // resource keeps Game's per-entity cleanup from disposing the source mesh.
+    this.grenadeModel.traverse((object) => {
+      if (object instanceof THREE.Mesh) object.geometry.userData.sharedWeaponVfx = true;
+    });
+  }
 
   prewarm(renderer: THREE.WebGLRenderer): void {
     // Dynamic weapon effects otherwise compile/upload on the first trigger
@@ -170,7 +257,9 @@ export class WeaponVfxSystem {
     prewarmScene.fog = this.scene.fog;
     const hot = additiveMaterial(0xffffff, 1, false);
     const glow = additiveMaterial(0x79e8ff, 0.72, true);
-    const smoke = smokeMaterial(0x776f68, 0.1, false);
+    hot.alphaMap = this.tracerRampTexture;
+    glow.alphaMap = this.tracerRampTexture;
+    const smoke = smokeMaterial(this.smokeTexture, 0x776f68, 0.1, false);
     const standard = new THREE.MeshStandardMaterial({ color: 0xb9a7a0, roughness: 0.28, metalness: 0.88 });
     const physical = new THREE.MeshPhysicalMaterial({
       color: 0x5f1717,
@@ -188,14 +277,12 @@ export class WeaponVfxSystem {
     const geometries = [
       this.sharedGeometry('muzzle-machine-cone-7', () => new THREE.ConeGeometry(1, 1, 7, 1, true)),
       this.sharedGeometry('muzzle-shotgun-cone-12', () => new THREE.ConeGeometry(1, 1, 12, 1, true)),
-      this.sharedGeometry('muzzle-shotgun-smoke', () => new THREE.IcosahedronGeometry(0.1, 1)),
       this.sharedGeometry('muzzle-laser-cone', () => new THREE.ConeGeometry(0.045, 0.44, 10, 1, true)),
       ...Array.from({ length: 3 }, (_, index) => this.sharedGeometry(
         `muzzle-laser-aperture-${index}`,
         () => new THREE.TorusGeometry(0.07 + index * 0.035, 0.007, 5, 24),
       )),
       this.sharedGeometry('muzzle-sniper-cone', () => new THREE.ConeGeometry(0.045, 0.82, 7, 1, true)),
-      this.sharedGeometry('muzzle-sniper-smoke', () => new THREE.IcosahedronGeometry(1, 1)),
       this.sharedGeometry('muzzle-rail-outer', () => new THREE.ConeGeometry(0.045, 1.05, 7, 1, true)),
       this.sharedGeometry('muzzle-rail-core', () => new THREE.ConeGeometry(0.035, 1.2, 8, 1, true)),
       ...Array.from({ length: 4 }, (_, index) => this.sharedGeometry(
@@ -263,12 +350,9 @@ export class WeaponVfxSystem {
       this.sharedGeometry('projectile-rocket-pressure', () => new THREE.TorusGeometry(0.1, 0.009, 5, 18)),
       this.sharedGeometry('trail-rocket-ember', () => new THREE.IcosahedronGeometry(0.052, 1)),
       this.sharedGeometry('trail-rocket-heat', () => new THREE.SphereGeometry(0.11, 8, 6)),
-      this.sharedGeometry('trail-rocket-smoke', () => new THREE.IcosahedronGeometry(0.09, 1)),
       this.sharedGeometry('trail-disc-ring-0', () => new THREE.TorusGeometry(0.19, 0.006, 5, 24)),
       this.sharedGeometry('trail-disc-ring-1', () => new THREE.TorusGeometry(0.155, 0.006, 5, 24)),
-      this.sharedGeometry('grenade-body', () => new THREE.SphereGeometry(0.18, 12, 8)),
-      this.sharedGeometry('grenade-band', () => new THREE.TorusGeometry(0.185, 0.018, 6, 18)),
-      this.sharedGeometry('grenade-cap', () => new THREE.CylinderGeometry(0.06, 0.06, 0.04, 8)),
+      this.sharedGeometry('grenade-fuse-indicator', () => new THREE.TorusGeometry(0.15, 0.008, 6, 24)),
       this.sharedGeometry('explosion-rocket-core', () => new THREE.SphereGeometry(0.24, 14, 10)),
       this.sharedGeometry('explosion-rocket-wave', () => new THREE.RingGeometry(0.22, 0.3, 32)),
       this.sharedGeometry('grapple-segment', () => new THREE.CylinderGeometry(0.035, 0.035, 1, 6, 1, true)),
@@ -291,12 +375,36 @@ export class WeaponVfxSystem {
       this.sharedGeometry('tracer-ring', () => new THREE.TorusGeometry(0.05, 0.008, 5, 12)),
     ];
     geometries.forEach((geometry, index) => {
-      const material = index === geometries.length - 1 ? smoke : index % 2 ? glow : hot;
+      const material = index % 2 ? glow : hot;
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set((index % 4) * 0.02, Math.floor(index / 4) * 0.02, -1);
       mesh.frustumCulled = false;
       prewarmScene.add(mesh);
     });
+    const smokeSprite = new THREE.Sprite(smoke);
+    smokeSprite.position.set(0, 0, -1);
+    smokeSprite.scale.setScalar(0.2);
+    smokeSprite.frustumCulled = false;
+    prewarmScene.add(smokeSprite);
+    const sniperLineGeometry = new LineGeometry();
+    sniperLineGeometry.setPositions([0, 0, -1, 0.25, 0, -4]);
+    const sniperLineMaterial = new LineMaterial({
+      color: 0xfff4df,
+      linewidth: 3.4,
+      worldUnits: false,
+      transparent: true,
+      opacity: 0.92,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+    });
+    sniperLineMaterial.resolution.set(
+      Math.max(1, window.innerWidth * window.devicePixelRatio),
+      Math.max(1, window.innerHeight * window.devicePixelRatio),
+    );
+    const sniperLine = new Line2(sniperLineGeometry, sniperLineMaterial);
+    sniperLine.frustumCulled = false;
+    prewarmScene.add(sniperLine);
     const unitBox = this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1));
     const standardMesh = new THREE.Mesh(unitBox, standard);
     const physicalMesh = new THREE.Mesh(unitBox, physical);
@@ -328,18 +436,22 @@ export class WeaponVfxSystem {
     this.scene.remove(laserRoot);
     laserRoot.visible = true;
     prewarmScene.add(laserRoot);
+    prewarmScene.add(this.grenadeModel);
     renderer.compile(prewarmScene, this.camera);
     // compile() prepares shader programs but does not force every vertex/index
     // buffer through the driver. One hidden startup render uploads the shared
     // projectile and impact geometry now instead of blocking the first rocket
     // or plasma volley in the middle of a match.
     renderer.render(prewarmScene, this.camera);
+    prewarmScene.remove(this.grenadeModel);
     prewarmScene.remove(laserRoot);
     laserRoot.visible = false;
     this.scene.add(laserRoot);
     hot.dispose();
     glow.dispose();
     smoke.dispose();
+    sniperLineGeometry.dispose();
+    sniperLineMaterial.dispose();
     standard.dispose();
     physical.dispose();
     anisotropicPhysical.dispose();
@@ -405,6 +517,8 @@ export class WeaponVfxSystem {
         root.visible = false;
         const core = additiveMaterial(0xfff4c2, 0.92);
         const glow = additiveMaterial(0xffbe55, 0.22);
+        core.alphaMap = this.tracerRampTexture;
+        glow.alphaMap = this.tracerRampTexture;
         const packet = new THREE.Mesh(packetGeometry, core);
         packet.name = 'machine-hot-tracer';
         const halo = new THREE.Mesh(haloGeometry, glow);
@@ -540,15 +654,14 @@ export class WeaponVfxSystem {
         blast.scale.set(0.14 + index * 0.09, 0.7 + index * 0.17, 0.14 + index * 0.09);
         root.add(blast);
       }
-      const smoke = smokeMaterial(0x8c8377, 0.13, false);
+      const smoke = smokeMaterial(this.smokeTexture, 0x8c8377, 0.13, false);
       materials.push(smoke);
-      const wisp = new THREE.Mesh(
-        this.sharedGeometry('muzzle-shotgun-smoke', () => new THREE.IcosahedronGeometry(0.1, 1)),
-        smoke,
-      );
+      const wisp = new THREE.Sprite(smoke);
       wisp.name = 'shotgun-smoke-wisp';
       wisp.position.set(0.04, 0.06, -0.24);
+      wisp.scale.setScalar(0.22);
       root.add(wisp);
+      root.userData.softSmoke = true;
       for (let index = 0; index < (this.reducedEffects ? 1 : 2); index += 1) {
         const spark = new THREE.Mesh(
           this.sharedGeometry('unit-box', () => new THREE.BoxGeometry(1, 1, 1)),
@@ -664,18 +777,16 @@ export class WeaponVfxSystem {
         blade.rotation.z = index * Math.PI / 3;
         root.add(blade);
       }
-      const smoke = smokeMaterial(0x7d7870, 0.1, false);
-      materials.push(smoke);
       for (let index = 0; index < (this.reducedEffects ? 1 : 3); index += 1) {
-        const wisp = new THREE.Mesh(
-          this.sharedGeometry('muzzle-sniper-smoke', () => new THREE.IcosahedronGeometry(1, 1)),
-          smoke,
-        );
+        const smoke = smokeMaterial(this.smokeTexture, 0x7d7870, 0.09 - index * 0.012, false);
+        materials.push(smoke);
+        const wisp = new THREE.Sprite(smoke);
         wisp.name = `sniper-smoke-${index}`;
-        wisp.scale.setScalar(0.06 + index * 0.02);
+        wisp.scale.setScalar(0.14 + index * 0.035);
         wisp.position.set((this.random() - 0.5) * 0.13, 0.04 + this.random() * 0.12, -0.1 - index * 0.11);
         root.add(wisp);
       }
+      root.userData.softSmoke = true;
     } else if (weapon === 'disc') {
       // The launcher pinches a wide magnetic aperture down around the disc.
       // Teal field lines and amber induction sparks keep this distinct from
@@ -805,7 +916,10 @@ export class WeaponVfxSystem {
     const coreMaterial = additiveMaterial(weapon === 'rail' ? 0xfaffd8 : weapon === 'sniper' ? 0xfff4d6 : color, 1);
     const glowMaterial = additiveMaterial(color, 0.34);
     const accentMaterial = additiveMaterial(weapon === 'rail' ? 0x96fbff : 0xffffff, 0.58);
-    const materials = [coreMaterial, glowMaterial, accentMaterial];
+    coreMaterial.alphaMap = this.tracerRampTexture;
+    glowMaterial.alphaMap = this.tracerRampTexture;
+    accentMaterial.alphaMap = this.tracerRampTexture;
+    const materials: THREE.Material[] = [coreMaterial, glowMaterial, accentMaterial];
     const coreOpacity = weapon === 'shotgun' ? duration > 0.1 ? 0.92 : 0.18
       : weapon === 'sniper' ? 0.96 : 1;
     const glowOpacity = weapon === 'shotgun' ? duration > 0.1 ? 0.24 : 0.035
@@ -813,6 +927,8 @@ export class WeaponVfxSystem {
     coreMaterial.opacity = coreOpacity;
     glowMaterial.opacity = glowOpacity;
     accentMaterial.opacity = weapon === 'rail' ? 0.7 : 0.45;
+    let sniperLineCore: LineMaterial | undefined;
+    let sniperLineHalo: LineMaterial | undefined;
 
     const addCylinder = (
       name: string,
@@ -858,24 +974,50 @@ export class WeaponVfxSystem {
         }
       }
     } else if (weapon === 'sniper') {
-      const tracerLength = Math.min(12, Math.max(3.5, length * 0.18));
-      addCylinder('sniper-high-velocity-core', 0.011, tracerLength, -length * 0.1, coreMaterial, 6);
-      addCylinder('sniper-directional-haze', 0.042, tracerLength * 1.12, -length * 0.1, glowMaterial, 8);
-      const wakeLength = Math.min(length * 0.42, 18);
-      addCylinder('sniper-ballistic-wake', 0.004, wakeLength, -length * 0.28, accentMaterial, 5);
-      for (let index = 0; index < (this.reducedEffects ? 1 : 2); index += 1) {
-        const wave = new THREE.Mesh(
-          this.sharedGeometry(
-            `beam-sniper-wave-${index}`,
-            () => new THREE.TorusGeometry(0.035 + index * 0.035, 0.005, 5, 18),
-          ),
-          glowMaterial,
-        );
-        wave.name = `sniper-pressure-wave-${index}`;
-        wave.rotation.x = Math.PI * 0.5;
-        wave.position.y = -length * (0.18 + index * 0.18);
-        root.add(wave);
-      }
+      // A sniper shot is hitscan, but the visual has to describe the complete
+      // muzzle-to-impact relationship in a single glance. One continuous,
+      // tapered path is clearer and cheaper than several detached packets and
+      // pressure rings, which read as ambient glints on long bright lanes.
+      // A fixed-pixel ballistic line stays continuous across 100m+ lanes.
+      // World-space tubes become a dotted one-pixel staircase at that range,
+      // while simply widening them makes the near end look like a laser wall.
+      const lineGeometry = new LineGeometry();
+      lineGeometry.setPositions([0, -length * 0.5, 0, 0, length * 0.5, 0]);
+      sniperLineHalo = new LineMaterial({
+        color,
+        linewidth: this.reducedEffects ? 4.2 : 6.2,
+        worldUnits: false,
+        transparent: true,
+        opacity: 0.16,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        // The trace endpoint already comes from the authoritative world ray.
+        // Disabling depth test prevents shallow grazing shots from stippling
+        // against terrain triangles without ever drawing beyond cover.
+        depthTest: false,
+      });
+      sniperLineCore = new LineMaterial({
+        color: 0xfff4df,
+        linewidth: this.reducedEffects ? 2.4 : 3.4,
+        worldUnits: false,
+        transparent: true,
+        opacity: 0.92,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const lineResolutionWidth = Math.max(1, window.innerWidth * window.devicePixelRatio);
+      const lineResolutionHeight = Math.max(1, window.innerHeight * window.devicePixelRatio);
+      sniperLineHalo.resolution.set(lineResolutionWidth, lineResolutionHeight);
+      sniperLineCore.resolution.set(lineResolutionWidth, lineResolutionHeight);
+      materials.push(sniperLineHalo, sniperLineCore);
+      const haloLine = new Line2(lineGeometry, sniperLineHalo);
+      haloLine.name = 'sniper-screen-space-haze';
+      haloLine.frustumCulled = false;
+      const coreLine = new Line2(lineGeometry, sniperLineCore);
+      coreLine.name = 'sniper-screen-space-core';
+      coreLine.frustumCulled = false;
+      root.add(haloLine, coreLine);
     } else if (weapon === 'rail') {
       const overcharged = duration > 0.25;
       addCylinder('rail-collapse-core', overcharged ? 0.034 : 0.026, length, 0, coreMaterial, 8);
@@ -919,9 +1061,10 @@ export class WeaponVfxSystem {
       // rise, spread, and fade in place behind the round.
       const smokeRoot = new THREE.Group();
       smokeRoot.name = 'sniper-smoke-trace';
+      smokeRoot.userData.softSmoke = true;
       const smokePuffs: Array<{
-        mesh: THREE.Mesh;
-        material: THREE.MeshBasicMaterial;
+        mesh: THREE.Sprite;
+        material: THREE.SpriteMaterial;
         velocity: THREE.Vector3;
         baseScale: number;
         baseOpacity: number;
@@ -931,29 +1074,30 @@ export class WeaponVfxSystem {
       if (smokeSide.lengthSq() < 0.0001) smokeSide.set(1, 0, 0);
       else smokeSide.normalize();
       const smokeUp = new THREE.Vector3().crossVectors(smokeSide, direction).normalize();
-      const smokeLength = Math.min(
-        length * 0.72,
-        Math.min(14, Math.max(0.75, length * 0.24)),
-      );
+      // Real rifle smoke blooms at the muzzle; it does not form evenly spaced
+      // clouds all the way to the target. Keeping the envelope within the first
+      // few metres also stops distant puffs reading as a dotted second tracer.
+      const smokeLength = Math.min(3.2, Math.max(0.9, length * 0.06));
 
-      for (let index = 0; index < (this.reducedEffects ? 2 : 5); index += 1) {
+      const puffCount = this.reducedEffects ? 3 : 6;
+      for (let index = 0; index < puffCount; index += 1) {
         const material = smokeMaterial(
-          index % 2 === 0 ? 0x6f6962 : 0x81786e,
-          0.15 - index * 0.01,
+          this.smokeTexture,
+          index % 2 === 0 ? 0xa8a19a : 0xc1b9b0,
+          0.32 - index * 0.015,
           false,
         );
-        const mesh = new THREE.Mesh(
-          this.sharedGeometry('muzzle-sniper-smoke', () => new THREE.IcosahedronGeometry(1, 1)),
-          material,
-        );
-        const amount = 0.12 + index * 0.18;
-        const lateralOffset = (this.random() - 0.5) * 0.12;
-        const verticalOffset = (this.random() - 0.5) * 0.09;
+        const mesh = new THREE.Sprite(material);
+        const amount = 0.08 + index * (0.68 / Math.max(1, puffCount - 1));
+        const lateralOffset = (this.random() - 0.5) * 0.18;
+        const verticalOffset = (this.random() - 0.5) * 0.14;
         mesh.position.copy(visibleStart)
           .addScaledVector(direction, smokeLength * amount)
           .addScaledVector(smokeSide, lateralOffset)
           .addScaledVector(smokeUp, verticalOffset);
-        const baseScale = 0.11 + this.random() * 0.055 + index * 0.012;
+        // Adjacent puffs deliberately overlap into one soft turbulent envelope;
+        // gaps between small sprites made the previous trail look cel-shaded.
+        const baseScale = 0.9 + this.random() * 0.28 + index * 0.055;
         mesh.scale.setScalar(baseScale);
         mesh.rotation.set(this.random() * Math.PI, this.random() * Math.PI, this.random() * Math.PI);
         mesh.frustumCulled = false;
@@ -983,7 +1127,7 @@ export class WeaponVfxSystem {
             puff.mesh.position.addScaledVector(puff.velocity, delta);
             puff.mesh.rotation.x += delta * puff.spin;
             puff.mesh.rotation.z += delta * puff.spin * 0.72;
-            puff.mesh.scale.setScalar(puff.baseScale * (1 + progress * 2.1));
+            puff.mesh.scale.setScalar(puff.baseScale * (1 + progress * 1.45));
             puff.material.opacity = puff.baseOpacity * fade;
           }
         },
@@ -1000,9 +1144,9 @@ export class WeaponVfxSystem {
         coreMaterial.opacity = envelope * coreOpacity;
         glowMaterial.opacity = envelope * glowOpacity;
         accentMaterial.opacity = envelope * (weapon === 'rail' ? 0.7 : 0.45);
-        if (weapon === 'sniper') {
-          root.position.addScaledVector(direction, delta * Math.max(55, length / Math.max(duration, 0.04)));
-        } else if (weapon === 'rail') {
+        if (sniperLineCore) sniperLineCore.opacity = envelope * 0.92;
+        if (sniperLineHalo) sniperLineHalo.opacity = envelope * 0.16;
+        if (weapon === 'rail') {
           root.scale.x = root.scale.z = 0.5 + envelope * 0.72;
           for (const child of root.children) {
             if (!child.name.startsWith('rail-collapse-wave')) continue;
@@ -1024,7 +1168,7 @@ export class WeaponVfxSystem {
     const glow = additiveMaterial(color, weapon === 'rocket' ? 0.62 : weapon === 'disc' ? 0.2 : 0.48);
     const hot = additiveMaterial(weapon === 'rocket' ? 0xffefb2 : weapon === 'disc' ? 0xffcb64 : 0xfff0ff, weapon === 'disc' ? 0.34 : 0.82);
     const materials: THREE.Material[] = [glow, hot];
-    let smokeWisp: THREE.Mesh | undefined;
+    let smokeWisp: THREE.Sprite | undefined;
     let plasmaShell: THREE.Mesh | undefined;
     const discAfterRings: THREE.Object3D[] = [];
 
@@ -1044,15 +1188,14 @@ export class WeaponVfxSystem {
       if (!this.reducedEffects) root.add(ember);
       // Warm, translucent vapour avoids the opaque charcoal discs that were
       // reading as black holes in the player's firing screenshots.
-      const smokeMat = smokeMaterial(0x8b796a, 0.1);
+      const smokeMat = smokeMaterial(this.smokeTexture, 0x8b796a, 0.13, true);
       materials.push(smokeMat);
-      smokeWisp = new THREE.Mesh(
-        this.sharedGeometry('trail-rocket-smoke', () => new THREE.IcosahedronGeometry(0.09, 1)),
-        smokeMat,
-      );
+      smokeWisp = new THREE.Sprite(smokeMat);
       smokeWisp.name = 'rocket-smoke-wisp';
       smokeWisp.position.set((this.random() - 0.5) * 0.1, (this.random() - 0.5) * 0.1, 0.08);
+      smokeWisp.scale.setScalar(0.24);
       root.add(smokeWisp);
+      root.userData.softSmoke = true;
     } else if (weapon === 'plasma') {
       const mote = new THREE.Mesh(
         this.sharedGeometry('trail-plasma-mote', () => new THREE.IcosahedronGeometry(0.075, 1)),
@@ -1109,7 +1252,7 @@ export class WeaponVfxSystem {
         glow.opacity = envelope * (weapon === 'rocket' ? 0.62 : weapon === 'disc' ? 0.2 : 0.48);
         hot.opacity = envelope * (weapon === 'disc' ? 0.34 : 0.82);
         root.scale.multiplyScalar(1 + delta * (weapon === 'rocket' ? 1.9 : weapon === 'disc' ? 0.55 : 1.25));
-        if (smokeWisp) (smokeWisp.material as THREE.MeshBasicMaterial).opacity = envelope * 0.1;
+        if (smokeWisp) (smokeWisp.material as THREE.SpriteMaterial).opacity = envelope * 0.13;
         if (plasmaShell) plasmaShell.rotation.z += delta * 9;
         for (const ring of discAfterRings) ring.rotation.z += delta * (ring.id % 2 ? 24 : -24);
       },
@@ -1527,14 +1670,27 @@ export class WeaponVfxSystem {
     });
   }
 
-  createProjectile(weapon: 'rocket' | 'plasma' | 'disc', color: number): THREE.Group {
+  createProjectile(
+    weapon: 'rocket' | 'plasma' | 'disc',
+    color: number,
+    streamlined = false,
+  ): THREE.Group {
     const root = new THREE.Group();
     root.name = `${weapon}-projectile`;
     if (weapon === 'rocket') {
-      const body = new THREE.MeshStandardMaterial({ color: 0xb9a7a0, roughness: 0.28, metalness: 0.88 });
-      const shell = new THREE.MeshPhysicalMaterial({ color: 0x5f1717, roughness: 0.3, metalness: 0.48, clearcoat: 0.62 });
-      const glow = additiveMaterial(0xff5b20, 0.82);
-      const hot = additiveMaterial(0xfff0bd, 0.96);
+      const body = this.sharedProjectileMaterial('rocket-body', () => new THREE.MeshStandardMaterial({
+        color: 0xb9a7a0,
+        roughness: 0.28,
+        metalness: 0.88,
+      }));
+      const shell = this.sharedProjectileMaterial('rocket-shell', () => new THREE.MeshPhysicalMaterial({
+        color: 0x5f1717,
+        roughness: 0.3,
+        metalness: 0.48,
+        clearcoat: 0.62,
+      }));
+      const glow = this.sharedProjectileMaterial('rocket-glow', () => additiveMaterial(0xff5b20, 0.82));
+      const hot = this.sharedProjectileMaterial('rocket-hot', () => additiveMaterial(0xfff0bd, 0.96));
       const fuselage = new THREE.Mesh(
         this.sharedGeometry('projectile-rocket-fuselage', () => new THREE.CylinderGeometry(0.075, 0.09, 0.34, 12)),
         shell,
@@ -1542,6 +1698,23 @@ export class WeaponVfxSystem {
       fuselage.name = 'rocket-fuselage';
       fuselage.rotation.x = Math.PI * 0.5;
       root.add(fuselage);
+      if (streamlined) {
+        // Bot volleys can leave many rockets alive at once. At combat distance
+        // the readable information is the red body plus hot exhaust; fins,
+        // bands, heat shells, and pressure rings only multiply draw calls.
+        // Player-fired hero projectiles retain the complete presentation.
+        const exhaust = new THREE.Mesh(
+          this.sharedGeometry('projectile-rocket-exhaust', () => new THREE.ConeGeometry(0.085, 0.32, 10, 1, true)),
+          hot,
+        );
+        exhaust.name = 'rocket-exhaust-plume';
+        exhaust.rotation.x = Math.PI * 0.5;
+        exhaust.position.z = 0.32;
+        root.add(exhaust);
+        root.userData.vfxParts = { fins: [], plume: exhaust };
+        root.traverse((object) => { object.frustumCulled = false; });
+        return root;
+      }
       const nose = new THREE.Mesh(
         this.sharedGeometry('projectile-rocket-nose', () => new THREE.ConeGeometry(0.075, 0.15, 12)),
         body,
@@ -1601,8 +1774,8 @@ export class WeaponVfxSystem {
       root.add(heatGlow, pressureRing);
       root.userData.vfxParts = { spinRing: warheadBand, fins, plume: exhaust, heatGlow, pressureRing };
     } else if (weapon === 'plasma') {
-      const glow = additiveMaterial(color, 0.82);
-      const hot = additiveMaterial(0xffffff, 1);
+      const glow = this.sharedProjectileMaterial(`plasma-glow-${color}`, () => additiveMaterial(color, 0.82));
+      const hot = this.sharedProjectileMaterial('plasma-hot', () => additiveMaterial(0xffffff, 1));
       root.add(new THREE.Mesh(
         this.sharedGeometry('projectile-plasma-core', () => new THREE.IcosahedronGeometry(0.14, 2)),
         hot,
@@ -1613,6 +1786,15 @@ export class WeaponVfxSystem {
       );
       shell.name = 'plasma-shell';
       root.add(shell);
+      if (streamlined) {
+        // The emissive core/shell pair already gives an incoming plasma round
+        // a crisp silhouette. Its pooled motion trail supplies direction, so
+        // per-round rings and a separate tail are redundant in bot volleys.
+        root.scale.setScalar(0.62);
+        root.userData.vfxParts = { shell, rings: [], arcs: [] };
+        root.traverse((object) => { object.frustumCulled = false; });
+        return root;
+      }
       const rings: THREE.Object3D[] = [];
       for (let index = 0; index < 2; index += 1) {
         const ring = new THREE.Mesh(
@@ -1636,25 +1818,27 @@ export class WeaponVfxSystem {
     } else {
       const rotor = new THREE.Group();
       rotor.name = 'disc-projectile-rotor';
-      const carbide = new THREE.MeshPhysicalMaterial({
-        color: 0x7d878b,
-        roughness: 0.2,
-        metalness: 1,
-        envMapIntensity: 0.78,
-        anisotropy: 1,
-      });
+      const carbide = this.sharedProjectileMaterial('disc-carbide', () => new THREE.MeshPhysicalMaterial({
+          color: 0x7d878b,
+          roughness: 0.2,
+          metalness: 1,
+          envMapIntensity: 0.78,
+          anisotropy: 1,
+        }));
 
       const cutterGeometry = this.sharedGeometry('projectile-disc-cutter', () => this.createDiscCutterGeometry());
       const cutterBody = new THREE.Mesh(cutterGeometry, carbide);
       cutterBody.name = 'disc-projectile-body';
       rotor.add(cutterBody);
-      const armoredHub = new THREE.Mesh(
-        this.sharedGeometry('projectile-disc-hub', () => new THREE.CylinderGeometry(0.125, 0.125, 0.085, 18, 1)),
-        carbide,
-      );
-      armoredHub.name = 'disc-projectile-hub';
-      armoredHub.rotation.x = Math.PI * 0.5;
-      rotor.add(armoredHub);
+      if (!streamlined) {
+        const armoredHub = new THREE.Mesh(
+          this.sharedGeometry('projectile-disc-hub', () => new THREE.CylinderGeometry(0.125, 0.125, 0.085, 18, 1)),
+          carbide,
+        );
+        armoredHub.name = 'disc-projectile-hub';
+        armoredHub.rotation.x = Math.PI * 0.5;
+        rotor.add(armoredHub);
+      }
       // The saw flies flat like the exposed blade in the launcher instead of
       // turning face-on to the camera. Its local Z spin axis becomes world-up.
       rotor.rotation.x = -Math.PI * 0.5;
@@ -1668,23 +1852,24 @@ export class WeaponVfxSystem {
   createGrenade(color: number): THREE.Group {
     const root = new THREE.Group();
     root.name = 'grenade';
-    const shell = new THREE.MeshStandardMaterial({ color: 0x252b31, roughness: 0.34, metalness: 0.76 });
+    const model = this.grenadeModel.clone(true);
+    model.name = 'a-star-wars-grenade';
+    model.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      object.material = Array.isArray(object.material)
+        ? object.material.map((material) => material.clone())
+        : object.material.clone();
+    });
+
     const glow = additiveMaterial(color, 0.8);
-    const body = new THREE.Mesh(
-      this.sharedGeometry('grenade-body', () => new THREE.SphereGeometry(0.18, 12, 8)),
-      shell,
-    );
-    const band = new THREE.Mesh(
-      this.sharedGeometry('grenade-band', () => new THREE.TorusGeometry(0.185, 0.018, 6, 18)),
+    const indicator = new THREE.Mesh(
+      this.sharedGeometry('grenade-fuse-indicator', () => new THREE.TorusGeometry(0.15, 0.008, 6, 24)),
       glow,
     );
-    band.rotation.x = Math.PI * 0.5;
-    const cap = new THREE.Mesh(
-      this.sharedGeometry('grenade-cap', () => new THREE.CylinderGeometry(0.06, 0.06, 0.04, 8)),
-      glow,
-    );
-    cap.position.y = 0.18;
-    root.add(body, band, cap);
+    indicator.name = 'grenade-fuse-indicator';
+    indicator.rotation.x = Math.PI * 0.5;
+    root.add(model, indicator);
+    root.userData.vfxParts = { indicator };
     root.traverse((object) => { object.frustumCulled = false; });
     return root;
   }
@@ -1694,8 +1879,13 @@ export class WeaponVfxSystem {
       root.quaternion.setFromUnitVectors(FORWARD, this.tempDirection.copy(velocity).normalize());
     }
     root.rotateZ(elapsed * 9.5);
-    const cap = root.children.find((child) => child instanceof THREE.Mesh && child.position.y > 0.1);
-    if (cap) cap.rotation.z = elapsed * 12;
+    const parts = root.userData.vfxParts as { indicator?: THREE.Mesh } | undefined;
+    if (parts?.indicator) {
+      const pulse = 0.9 + Math.sin(elapsed * 14) * 0.12;
+      parts.indicator.scale.setScalar(pulse);
+      const material = parts.indicator.material as THREE.MeshBasicMaterial;
+      material.opacity = 0.62 + Math.sin(elapsed * 14) * 0.18;
+    }
   }
 
   grenadeExplosion(position: THREE.Vector3, color: number): void {
@@ -1708,11 +1898,19 @@ export class WeaponVfxSystem {
     if (!this.hasTransientCapacity()) return;
     const root = new THREE.Group();
     root.name = 'rocket-blast-wave';
+    root.userData.softSmoke = true;
     root.position.copy(position);
     root.lookAt(this.camera.position);
     const glow = additiveMaterial(0xff5b20, 0.82);
     const hot = additiveMaterial(0xfff4c1, 0.96);
-    const materials = [glow, hot];
+    const materials: THREE.Material[] = [glow, hot];
+    const smokePuffs: Array<{
+      sprite: THREE.Sprite;
+      material: THREE.SpriteMaterial;
+      velocity: THREE.Vector3;
+      baseScale: number;
+      baseOpacity: number;
+    }> = [];
     const core = new THREE.Mesh(
       this.sharedGeometry('explosion-rocket-core', () => new THREE.SphereGeometry(0.24, 14, 10)),
       hot,
@@ -1723,6 +1921,29 @@ export class WeaponVfxSystem {
     );
     wave.position.z = -0.02;
     root.add(core, wave);
+    for (let index = 0; index < (this.reducedEffects ? 2 : 5); index += 1) {
+      const smoke = smokeMaterial(
+        this.smokeTexture,
+        index % 2 ? 0x655d56 : 0x756a60,
+        0.16 - index * 0.012,
+        true,
+      );
+      const sprite = new THREE.Sprite(smoke);
+      const angle = index / 5 * Math.PI * 2 + this.random() * 0.45;
+      const baseScale = 0.48 + this.random() * 0.24;
+      sprite.position.set(Math.cos(angle) * 0.12, Math.sin(angle) * 0.08, 0.03 + index * 0.006);
+      sprite.scale.setScalar(baseScale);
+      sprite.name = `rocket-smoke-billow-${index}`;
+      root.add(sprite);
+      materials.push(smoke);
+      smokePuffs.push({
+        sprite,
+        material: smoke,
+        velocity: new THREE.Vector3(Math.cos(angle) * 0.5, 0.35 + this.random() * 0.42, Math.sin(angle) * 0.35),
+        baseScale,
+        baseOpacity: smoke.opacity,
+      });
+    }
     this.scene.add(root);
     this.addEffect({
       root,
@@ -1730,13 +1951,18 @@ export class WeaponVfxSystem {
       duration: 0.62,
       materials,
       kind: 'impact',
-      update: (progress) => {
+      update: (progress, delta) => {
         const envelope = Math.pow(1 - progress, 1.25);
         hot.opacity = envelope;
         glow.opacity = envelope * 0.86;
         core.scale.setScalar(0.8 + progress * 3.4);
         wave.scale.setScalar(0.6 + progress * 4.6);
         wave.rotation.z += 0.08;
+        for (const puff of smokePuffs) {
+          puff.sprite.position.addScaledVector(puff.velocity, delta);
+          puff.sprite.scale.setScalar(puff.baseScale * (1 + progress * 2.9));
+          puff.material.opacity = puff.baseOpacity * (1 - THREE.MathUtils.smoothstep(progress, 0.08, 1));
+        }
       },
     });
     this.burst(position, color, 24);
@@ -1946,9 +2172,14 @@ export class WeaponVfxSystem {
     }
     this.machineMuzzlePool.length = 0;
     this.machineBeamPool.length = 0;
+    for (const material of this.sharedProjectileMaterials.values()) material.dispose();
+    this.sharedProjectileMaterials.clear();
+    this.smokeTexture.dispose();
+    this.tracerRampTexture.dispose();
     for (const geometry of this.sharedGeometries.values()) geometry.dispose();
     this.sharedGeometries.clear();
     this.sharedGeometrySet.clear();
+    this.disposeImportedGrenade();
   }
 
   get activeEffects(): number {
@@ -1963,8 +2194,44 @@ export class WeaponVfxSystem {
     return this.countEffects('tracer');
   }
 
+  get activeSoftSmoke(): number {
+    let count = 0;
+    for (const effect of this.effects) {
+      if (effect.root.userData.softSmoke) count += 1;
+    }
+    return count;
+  }
+
+  get smokeTextureSource(): string {
+    return String(this.smokeTexture.userData.source ?? 'unknown');
+  }
+
+  get tracerTextureSource(): string {
+    return String(this.tracerRampTexture.userData.source ?? 'unknown');
+  }
+
   get continuousLaserActive(): boolean {
     return this.continuousLaser?.root.visible ?? false;
+  }
+
+  private disposeImportedGrenade(): void {
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const textures = new Set<THREE.Texture>();
+    this.grenadeModel.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      geometries.add(object.geometry);
+      const meshMaterials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of meshMaterials) {
+        materials.add(material);
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) textures.add(value);
+        }
+      }
+    });
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
+    for (const texture of textures) texture.dispose();
   }
 
   get continuousLaserBend(): number {
@@ -2029,6 +2296,15 @@ export class WeaponVfxSystem {
     this.sharedGeometries.set(key, geometry);
     this.sharedGeometrySet.add(geometry);
     return geometry;
+  }
+
+  private sharedProjectileMaterial<T extends THREE.Material>(key: string, create: () => T): T {
+    const cached = this.sharedProjectileMaterials.get(key);
+    if (cached) return cached as T;
+    const material = create();
+    material.userData.sharedWeaponVfx = true;
+    this.sharedProjectileMaterials.set(key, material);
+    return material;
   }
 
   private createRailMuzzleArcGeometry(index: number): THREE.TubeGeometry {

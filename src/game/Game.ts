@@ -6,6 +6,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { loadGrenadeAsset } from '../assets/GrenadeAsset';
 import { createWeaponViewModel, updateWeaponViewModel, type WeaponViewModel } from '../assets/WeaponViewModel';
 import { JetpackRig } from '../assets/JetpackRig';
 import { PlayerAvatar } from '../assets/PlayerAvatar';
@@ -15,6 +16,19 @@ import { createRenderer, getRenderDpr, resizeRenderer } from '../core/Renderer';
 import { Bot } from '../entities/Bot';
 import { AudioSystem } from '../systems/AudioSystem';
 import { AdaptiveQualitySystem } from '../systems/AdaptiveQualitySystem';
+import {
+  DRONE_TUNING,
+  DroneSwarmSystem,
+  type CombatDroneRuntime,
+  type DroneLaserEvent,
+  type DroneRayHit,
+  type DroneTargetSnapshot,
+} from '../systems/DroneSwarmSystem';
+import {
+  FighterAiPilotController,
+  type FighterAiIntent,
+  type FighterAiVehicleSnapshot,
+} from '../systems/FighterAiPilotController';
 import { FluxCoreDirector, type FluxCoreAnchor } from '../systems/FluxCoreDirector';
 import { Hud } from '../systems/Hud';
 import { StyleSystem, type StyleEvent } from '../systems/StyleSystem';
@@ -27,15 +41,38 @@ import {
 } from '../systems/SpeedTrailSystem';
 import { WeatherGameplaySystem, type WeatherGameplaySnapshot } from '../systems/WeatherGameplaySystem';
 import { WeaponVfxSystem } from '../systems/WeaponVfxSystem';
+import { FighterArenaCollisionAdapter } from '../systems/FighterArenaCollisionAdapter';
+import {
+  FIGHTER_BOARD_RANGE,
+  FIGHTER_HULL_MAX,
+  FIGHTER_MISSILE_COOLDOWN,
+  FIGHTER_PRIMARY_COOLDOWN,
+  FIGHTER_RESPAWN_SECONDS,
+  FIGHTER_SHIELD_MAX,
+  createQuickSenseFighters,
+  nearestBoardableFighter,
+  resetFighterAtPad,
+  updateFighterPresentation,
+  type FighterRuntime,
+} from '../systems/FighterSquadronSystem';
 import { createSeededRandom } from '../utils/random';
 import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact, type SurfaceHit } from './Arena';
 import { GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
 import { JetpackEnergy } from './JetpackEnergy';
+import {
+  FIGHTER_FIXED_STEP,
+  FIGHTER_FLIGHT_TUNING,
+  resetFighterFlightState,
+  stepFighterFlight,
+  type FighterCollisionHit,
+  type FighterCollisionQuery,
+} from './FighterFlightPhysics';
 import { skiMomentumCurve, type SkiMomentumCurve } from './SkiMomentum';
 
 type GameMode = 'ready' | 'countdown' | 'running' | 'respawning' | 'paused' | 'complete';
 type ViewMode = 'first-person' | 'third-person';
 type Owner = 'player' | number;
+type DamageSource = Owner | 'drone';
 type PickupKind = 'health' | 'armor' | 'damage' | 'speed' | WeaponId;
 type CountdownCue = 'READY' | '3' | '2' | '1';
 export type GameLoadProgress = {
@@ -162,7 +199,7 @@ const BOT_FIXED_STEP = 1 / 60;
 const HUD_UPDATE_INTERVAL = 1 / 15;
 const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
 const BASE_GAME_FOV = 80;
-const THIRD_PERSON_FOV = 58;
+const THIRD_PERSON_FOV = 62;
 const MAX_SPEED_FOV = 98;
 const QUICKSENSE_FOG_DENSITY = 0.00074;
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
@@ -179,6 +216,9 @@ const WEAPON_VIEW_WALL_CONVERGENCE_DISTANCE = 0.9;
 // because their broad hitscan proxy crosses the low/right weapon envelope.
 const WEAPON_WALL_MAX_NORMAL_Y = MOVEMENT.maxSlopeCosine - 0.08;
 const WEAPON_WALL_MIN_FACING = 0.18;
+const FIGHTER_PRIMARY_PROJECTILE_SPEED = 220;
+const FIGHTER_MISSILE_PROJECTILE_SPEED = 120;
+const FIGHTER_AIM_RANGE = 320;
 // Camera-to-muzzle reach includes each weapon's authored presentation scale,
 // side angle, and a small allowance for its visible muzzle cage. Keeping this
 // per weapon prevents the Longshot from forcing compact guns to tuck early.
@@ -192,19 +232,30 @@ const WEAPON_VIEW_SAFE_REACH: Record<WeaponId, number> = {
   sniper: 3.18,
   rail: 2.28,
 };
-const THIRD_PERSON_CAMERA_DISTANCE = 1.42;
+const THIRD_PERSON_CAMERA_DISTANCE = 2.2;
 const THIRD_PERSON_CAMERA_PORTRAIT_DISTANCE_SCALE = 1.1;
 const THIRD_PERSON_CAMERA_PORTRAIT_DISTANCE_MAX = 0.62;
-const THIRD_PERSON_CAMERA_SHOULDER_MIN = 0.46;
-const THIRD_PERSON_CAMERA_SHOULDER_MAX = 0.9;
-const THIRD_PERSON_CAMERA_SHOULDER_ASPECT_SCALE = 0.52;
-const THIRD_PERSON_CAMERA_HEIGHT = 1.44;
-const THIRD_PERSON_CAMERA_TARGET_HEIGHT = 1.16;
+const THIRD_PERSON_CAMERA_SHOULDER_MIN = 0.56;
+const THIRD_PERSON_CAMERA_SHOULDER_MAX = 0.72;
+const THIRD_PERSON_CAMERA_SHOULDER_ASPECT_SCALE = 0.42;
+const THIRD_PERSON_CAMERA_HEIGHT = 1.72;
+const THIRD_PERSON_CAMERA_TARGET_HEIGHT = 1.35;
 const THIRD_PERSON_CAMERA_CLEARANCE = 0.26;
 const THIRD_PERSON_CAMERA_GROUND_CLEARANCE = 0.42;
 const THIRD_PERSON_CAMERA_TERRAIN_HEADROOM = 1.25;
 const THIRD_PERSON_CAMERA_MAX_LIFT = 1.65;
 const THIRD_PERSON_CAMERA_TERRAIN_PROBES = 4;
+const THIRD_PERSON_WEAPON_FORWARD = new THREE.Vector3(0, 0, -1);
+const THIRD_PERSON_WEAPON_SCALE: Record<WeaponId, number> = {
+  machine: 0.59,
+  shotgun: 0.56,
+  rocket: 0.51,
+  plasma: 0.58,
+  laser: 0.58,
+  sniper: 0.58,
+  rail: 0.59,
+  disc: 0.51,
+};
 
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
@@ -236,8 +287,33 @@ export class Game {
   private readonly softwareRenderer: boolean;
   private readonly visualCapture: boolean;
   private readonly bots: Bot[] = [];
+  private readonly droneSwarm: DroneSwarmSystem;
+  private readonly droneTargetSnapshots: DroneTargetSnapshot[] = [];
+  private readonly botDroneTargets = new Map<number, string>();
+  private readonly fighters: FighterRuntime[];
+  private readonly fighterCollision: FighterArenaCollisionAdapter;
+  private readonly fighterAi = new Map<number, FighterAiPilotController>();
   private readonly projectiles: Projectile[] = [];
   private readonly grenades: GrenadeEntity[] = [];
+  private readonly grenadeSweepOffsets = [
+    new THREE.Vector3(),
+    new THREE.Vector3(GRENADE.radius, 0, 0),
+    new THREE.Vector3(-GRENADE.radius, 0, 0),
+    new THREE.Vector3(0, GRENADE.radius, 0),
+    new THREE.Vector3(0, -GRENADE.radius, 0),
+    new THREE.Vector3(0, 0, GRENADE.radius),
+    new THREE.Vector3(0, 0, -GRENADE.radius),
+  ];
+  private readonly grenadeSweepStart = new THREE.Vector3();
+  private readonly grenadeSweepEnd = new THREE.Vector3();
+  private readonly grenadeSweepCenter = new THREE.Vector3();
+  private readonly grenadeSweepSeparation = new THREE.Vector3();
+  private readonly grenadeSweepResult: SurfaceHit = {
+    point: new THREE.Vector3(),
+    normal: new THREE.Vector3(),
+    distance: 0,
+    surface: 'metal',
+  };
   private readonly pickups: PickupState[] = [];
   private readonly botTargets = new Map<number, Owner>();
   private readonly recentSpawnIndices: number[] = [];
@@ -253,9 +329,13 @@ export class Game {
   private readonly grappleSocket = new THREE.Object3D();
   private readonly grappleAnchor = new THREE.Vector3();
   private readonly weaponModel = new THREE.Group();
+  private readonly thirdPersonWeaponModel = new THREE.Group();
+  private readonly thirdPersonMuzzleSocket = new THREE.Object3D();
   private weaponVisual?: WeaponViewModel;
+  private thirdPersonWeaponVisual?: WeaponViewModel;
   private inspectionWeaponVisual?: WeaponViewModel;
   private readonly weaponVisualCache = new Map<WeaponId, WeaponViewModel>();
+  private readonly thirdPersonWeaponCache = new Map<WeaponId, WeaponViewModel>();
   private muzzleSocket = new THREE.Object3D();
   private readonly coreGroup = new THREE.Group();
   private readonly coreLight = new THREE.PointLight(0x3ee8ff, 6, 26, 2);
@@ -278,6 +358,7 @@ export class Game {
   private readonly optionsBack: HTMLButtonElement;
   private readonly viewModeValue: HTMLElement;
   private readonly viewButton: HTMLButtonElement;
+  private readonly vehicleButton: HTMLButtonElement;
   private readonly physicsQaMode = new URLSearchParams(window.location.search).get('qa') === 'physics';
   private environmentTexture?: THREE.Texture;
 
@@ -342,6 +423,7 @@ export class Game {
   private weaponInspectionMode = false;
   private lastGroundImpact = 0;
   private lastDamageDirection = '';
+  private lastDamageBearing = 0;
   private muted = false;
   private rocketJumpCount = 0;
   private lastPhysicsContacts = 0;
@@ -398,6 +480,8 @@ export class Game {
   private readonly cameraLocalAimScratch = new THREE.Vector3();
   private readonly weaponBoreScratch = new THREE.Vector3();
   private readonly weaponMuzzleScratch = new THREE.Vector3();
+  private readonly thirdPersonMuzzleForwardScratch = new THREE.Vector3();
+  private readonly thirdPersonMuzzleRightScratch = new THREE.Vector3();
   private readonly grappleOriginScratch = new THREE.Vector3();
   private readonly movementStartScratch = new THREE.Vector3();
   private readonly tangentGravityScratch = new THREE.Vector3();
@@ -438,21 +522,48 @@ export class Game {
   private ccdWallHits = 0;
   private ccdCeilingHits = 0;
   private ccdBoundaryHits = 0;
-  private viewMode: ViewMode = 'first-person';
+  private viewMode: ViewMode = 'third-person';
   private overtime = false;
   private overtimeBaselineScores: number[] = [];
   private playerShots = 0;
   private playerHits = 0;
   private coreCaptures = 0;
   private maxPlayerSpeed = 0;
+  private playerFighter: FighterRuntime | null = null;
+  private fighterBoostQueued = false;
+  private fighterMissileQueued = false;
+  private readonly fighterForwardScratch = new THREE.Vector3();
+  private readonly fighterRightScratch = new THREE.Vector3();
+  private readonly fighterUpScratch = new THREE.Vector3();
+  private readonly fighterCameraDesiredScratch = new THREE.Vector3();
+  private readonly fighterCameraLookScratch = new THREE.Vector3();
+  private readonly fighterMuzzleScratch = new THREE.Vector3();
+  private readonly fighterAimScratch = new THREE.Vector3();
+  private readonly fighterAimPointScratch = new THREE.Vector3();
+  private readonly fighterAimHitScratch = new THREE.Vector3();
+  private readonly fighterAimRay = new THREE.Ray();
+  private readonly fighterQuaternionScratch = new THREE.Quaternion();
+  private readonly fighterDynamicProxyScratch = new THREE.Vector3();
+  private readonly fighterDynamicSweepScratch = new THREE.Vector3();
+  private readonly fighterDynamicDeltaScratch = new THREE.Vector3();
+  private readonly fighterCharacterDeltaScratch = new THREE.Vector3();
+  private readonly fighterCharacterNormalScratch = new THREE.Vector3(1, 0, 0);
+  private fighterCollisionSubject: FighterRuntime | null = null;
+  private readonly queryFighterWorldCollision = (
+    query: FighterCollisionQuery,
+    outHit: FighterCollisionHit,
+  ): boolean => this.castFighterWorldCollision(query, outHit);
 
   static async create(canvas: HTMLCanvasElement, reportProgress: GameLoadReporter = () => undefined): Promise<Game> {
     reportProgress({ fraction: 0.06, label: 'Loading arena geometry' });
     await yieldDuringLoad();
-    const arena = await Arena.load();
+    const [arena, grenadeAsset] = await Promise.all([
+      Arena.load(),
+      loadGrenadeAsset(),
+    ]);
     reportProgress({ fraction: 0.48, label: 'Building combat systems' });
     await yieldDuringLoad();
-    const game = new Game(canvas, arena);
+    const game = new Game(canvas, arena, grenadeAsset);
     reportProgress({ fraction: 0.68, label: 'Loading combat frames' });
     await game.prepareVisualResources(reportProgress);
     reportProgress({ fraction: 1, label: 'Arena ready' });
@@ -466,6 +577,7 @@ export class Game {
   private constructor(
     private readonly canvas: HTMLCanvasElement,
     arena: ArenaRuntime,
+    grenadeAsset: THREE.Group,
   ) {
     this.arena = arena;
     const nexusName = arena.mapInfo.name === 'QuickSense' ? 'QUICKSENSE // RIFT NEXUS' : 'RIFT NEXUS';
@@ -503,18 +615,26 @@ export class Game {
       : this.mobileQuality
         ? 1
         : arena.mapInfo.name === 'QuickSense'
-          // QuickSense already settled at 0.75 after its first adaptive
-          // window. Starting at the proven steady-state resolution prevents
-          // a live WebGL/composer target reallocation during the opening run
-          // and removes that avoidable hitch source from active play.
+          // Start crisp, then retain one small measured fallback for unusually
+          // heavy combat. The optimized steady path normally remains here.
           ? 0.75
           : 1.25;
     this.renderDprCap = this.maxRenderDpr;
+    const quickSenseQuality = arena.mapInfo.name === 'QuickSense';
     this.adaptiveQuality = new AdaptiveQualitySystem({
-      minDpr: this.softwareRenderer ? this.maxRenderDpr : this.mobileQuality ? 0.7 : 0.75,
+      // QuickSense's dense multi-level sightlines get one restrained fallback
+      // under measured overload. Capture/software paths remain deterministic
+      // at their explicit QA resolution.
+      minDpr: this.softwareRenderer
+        ? this.maxRenderDpr
+        : this.mobileQuality
+          ? 0.7
+          : quickSenseQuality
+            ? 0.625
+            : 0.75,
       maxDpr: this.maxRenderDpr,
       sampleWindowMs: 750,
-      dprStep: 0.25,
+      dprStep: quickSenseQuality ? 0.125 : 0.25,
       degradeCooldownMs: 750,
     });
     // Ordinary software-rendered play stays cheap, but explicit QA captures
@@ -539,6 +659,7 @@ export class Game {
     this.optionsBack = this.element<HTMLButtonElement>('#options-back');
     this.viewModeValue = this.element('#view-mode-value');
     this.viewButton = this.element<HTMLButtonElement>('#view-button');
+    this.vehicleButton = this.element<HTMLButtonElement>('#vehicle-button');
     this.input = new InputController(
       canvas,
       this.element('#touch-stick'),
@@ -552,12 +673,50 @@ export class Game {
       this.element('#weapon-button'),
       this.element('#zoom-button'),
       this.viewButton,
+      this.vehicleButton,
     );
-    this.weaponVfx = new WeaponVfxSystem(this.scene, this.camera, () => this.rng(), this.mobileQuality);
+    this.weaponVfx = new WeaponVfxSystem(
+      this.scene,
+      this.camera,
+      () => this.rng(),
+      grenadeAsset,
+      this.mobileQuality,
+    );
     this.createScene();
+    this.droneSwarm = new DroneSwarmSystem(this.scene, this.arena);
+    this.fighterCollision = new FighterArenaCollisionAdapter(this.arena);
+    this.fighters = this.arena.mapInfo.name === 'QuickSense'
+      ? createQuickSenseFighters(this.scene)
+      : [];
     this.scene.add(this.playerAvatar.root);
+    this.thirdPersonWeaponModel.name = 'third-person-equipped-weapon';
+    this.scene.add(this.thirdPersonWeaponModel);
     this.composer = this.createPostProcessing();
     this.createBots();
+    this.droneTargetSnapshots.push({
+      owner: 'player',
+      position: new THREE.Vector3(),
+      velocity: new THREE.Vector3(),
+      alive: true,
+    });
+    for (const bot of this.bots) {
+      this.droneTargetSnapshots.push({
+        owner: bot.id,
+        position: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        alive: true,
+      });
+    }
+    for (const bot of this.bots) {
+      this.fighterAi.set(bot.id, new FighterAiPilotController(
+        bot.id,
+        bot.id === 2 ? 'hard' : 'normal',
+        // Vehicle roots sit at the pad center while the solid hull surrounds
+        // them. AI must be able to enter from beside the canopy rather than
+        // trying to walk through collision to a 2.2 m root radius.
+        { enterDistance: 10 },
+      ));
+    }
     this.speedTrailSources.push({ position: this.playerPosition, velocity: this.playerVelocity, active: false });
     for (const bot of this.bots) {
       this.speedTrailSources.push({ position: bot.group.position, velocity: bot.velocity, active: bot.alive });
@@ -600,6 +759,7 @@ export class Game {
     const restoreCulling: THREE.Object3D[] = [];
     const restoreVisibility: THREE.Object3D[] = [];
     const inactiveWeaponRoots: THREE.Object3D[] = [];
+    const inactiveThirdPersonWeaponRoots: THREE.Object3D[] = [];
     const playerWasVisible = this.playerAvatar.root.visible;
     const coreWasVisible = this.coreGroup.visible;
     const speedTrailsWereVisible = this.speedTrails.mesh.visible;
@@ -616,6 +776,11 @@ export class Game {
       if (visual === this.weaponVisual) continue;
       inactiveWeaponRoots.push(visual.root);
       this.weaponModel.add(visual.root);
+    }
+    for (const visual of this.thirdPersonWeaponCache.values()) {
+      if (visual === this.thirdPersonWeaponVisual) continue;
+      inactiveThirdPersonWeaponRoots.push(visual.root);
+      this.thirdPersonWeaponModel.add(visual.root);
     }
     // The batched speed ribbon normally has an empty draw range until an actor
     // first exceeds 70 km/h. A six-vertex preload prevents that exciting
@@ -642,6 +807,7 @@ export class Game {
     for (const object of restoreCulling) object.frustumCulled = true;
     for (const object of restoreVisibility) object.visible = false;
     for (const root of inactiveWeaponRoots) this.weaponModel.remove(root);
+    for (const root of inactiveThirdPersonWeaponRoots) this.thirdPersonWeaponModel.remove(root);
     this.playerAvatar.root.visible = playerWasVisible;
     this.coreGroup.visible = coreWasVisible;
     this.speedTrails.mesh.visible = speedTrailsWereVisible;
@@ -659,6 +825,8 @@ export class Game {
     await Promise.all([
       this.playerAvatar.ready,
       ...this.bots.map((bot) => bot.ready),
+      ...this.fighters.map((fighter) => fighter.visual.ready),
+      this.droneSwarm.ready,
     ]);
     // Build every weapon exactly once behind the deployment screen. Their
     // authored geometry and battle-wear textures stay cached for the match,
@@ -673,6 +841,12 @@ export class Game {
         await yieldDuringLoad();
         if (!this.weaponVisualCache.has(definition.id)) {
           this.weaponVisualCache.set(definition.id, createWeaponViewModel(definition, true, true));
+        }
+        if (!this.thirdPersonWeaponCache.has(definition.id)) {
+          this.thirdPersonWeaponCache.set(
+            definition.id,
+            this.createThirdPersonWeaponClone(this.weaponVisualCache.get(definition.id)!),
+          );
         }
       }
     }
@@ -703,10 +877,17 @@ export class Game {
     this.playerAvatar.dispose();
     this.arena.dispose();
     for (const bot of this.bots) bot.dispose();
+    this.droneSwarm.dispose();
+    for (const fighter of this.fighters) fighter.visual.dispose();
     for (const projectile of this.projectiles) this.disposeObject(projectile.root);
     for (const grenade of this.grenades) this.disposeObject(grenade.root);
     for (const pickup of this.pickups) this.disposeObject(pickup.group);
     this.disposeObject(this.coreGroup);
+    // These clones share the first-person cache's GPU resources. Detach them
+    // before the owning visuals are disposed so shared textures and geometry
+    // are released exactly once.
+    this.thirdPersonWeaponModel.clear();
+    this.thirdPersonWeaponCache.clear();
     // The active cached frame is already traversed through weaponModel. Dispose
     // detached cached frames separately and exactly once.
     this.disposeObject(this.weaponModel);
@@ -718,6 +899,7 @@ export class Game {
     }
     this.weaponVisualCache.clear();
     this.weaponModel.clear();
+    this.scene.remove(this.thirdPersonWeaponModel);
     this.environmentTexture?.dispose();
     this.composer.dispose();
     this.renderer.dispose();
@@ -784,6 +966,7 @@ export class Game {
     this.viewMode = this.isThirdPerson() ? 'first-person' : 'third-person';
     const thirdPerson = this.isThirdPerson();
     this.weaponModel.visible = !thirdPerson;
+    this.thirdPersonWeaponModel.visible = thirdPerson && Boolean(this.thirdPersonWeaponVisual);
     this.playerAvatar.setVisible(thirdPerson);
     this.updateViewModeUi();
     if (this.mode === 'running') this.hud.message(thirdPerson ? 'THIRD-PERSON CAMERA' : 'FIRST-PERSON CAMERA');
@@ -869,16 +1052,26 @@ export class Game {
     if (resizeRenderer(this.renderer, this.camera, this.renderDprCap)) this.resizePostProcessing();
 
     this.input.consumeLook(this.lookInput);
-    if (this.sniperScopeRequested()) this.lookInput.multiplyScalar(0.28);
+    if (!this.playerFighter && this.sniperScopeRequested()) this.lookInput.multiplyScalar(0.28);
     this.yaw -= this.lookInput.x * 0.0018;
     this.pitch = THREE.MathUtils.clamp(this.pitch - this.lookInput.y * 0.0016, -1.28, 1.22);
-    if (this.input.consumeJump()) this.jumpBuffer = MOVEMENT.jumpBuffer;
-    if (this.input.consumeDash()) this.dashBuffer = 0.12;
-    if (this.input.consumeGrapple()) this.toggleGrapple();
-    if (this.input.consumeGrenade()) this.tryThrowGrenade();
-    if (this.grappleActive && !this.input.isGrappleHeld()) this.detachGrapple();
-    this.handleWeaponRequest();
-    if (this.input.consumeAltFire()) this.trySecondaryFire();
+    if (this.input.consumeInteract()) this.togglePlayerFighter();
+    if (this.input.consumeJump() && !this.playerFighter) this.jumpBuffer = MOVEMENT.jumpBuffer;
+    if (this.input.consumeDash()) {
+      if (this.playerFighter) this.fighterBoostQueued = true;
+      else this.dashBuffer = 0.12;
+    }
+    if (this.input.consumeGrapple() && !this.playerFighter) this.toggleGrapple();
+    if (this.input.consumeGrenade()) {
+      if (this.playerFighter) this.fighterMissileQueued = true;
+      else this.tryThrowGrenade();
+    }
+    if (!this.playerFighter && this.grappleActive && !this.input.isGrappleHeld()) this.detachGrapple();
+    if (!this.playerFighter) this.handleWeaponRequest();
+    if (this.input.consumeAltFire()) {
+      if (this.playerFighter) this.fighterMissileQueued = true;
+      else this.trySecondaryFire();
+    }
     if (this.input.consumeMute()) {
       this.muted = !this.muted;
       this.audio.setMuted(this.muted);
@@ -909,20 +1102,29 @@ export class Game {
     this.arena.update(this.pausedForScreenshot ? this.screenshotArenaTime : elapsed, this.reducedMotion);
     this.updatePickupVisuals(delta, elapsed);
     this.updateEffects(this.pausedForScreenshot ? 0 : delta);
-    this.playerJetpack.update(this.jetpackActive, this.pausedForScreenshot ? 0 : delta, elapsed, this.reducedMotion);
-    this.playerJetpack.root.visible = !this.isThirdPerson() && this.playerJetpack.root.visible;
+    this.playerJetpack.update(this.jetpackActive && !this.playerFighter, this.pausedForScreenshot ? 0 : delta, elapsed, this.reducedMotion);
+    this.playerJetpack.root.visible = !this.playerFighter && !this.isThirdPerson() && this.playerJetpack.root.visible;
     this.playerAvatar.root.position.copy(this.playerPosition);
+    this.playerAvatar.root.visible = !this.playerFighter && this.isThirdPerson();
     this.playerAvatar.setPose(this.yaw, this.moveInput.x);
     this.playerAvatar.update(
       this.pausedForScreenshot ? 0 : delta,
       elapsed,
       this.grounded,
       Math.hypot(this.playerVelocity.x, this.playerVelocity.z),
-      this.input.isFireHeld(),
+      this.input.isFireHeld() && !this.playerFighter,
       this.jetpackActive,
       this.reducedMotion,
     );
-    this.audio.setJetpackActive(this.jetpackActive);
+    this.audio.setJetpackActive(this.jetpackActive || Boolean(this.playerFighter?.flight.afterburnerActive));
+    for (const fighter of this.fighters) {
+      updateFighterPresentation(fighter, this.pausedForScreenshot ? 0 : delta, this.reducedMotion);
+      // The local pilot sees the cockpit/flight glass only. Rendering the full
+      // exterior around a seat camera exposes wings and fuselage, unlike the
+      // dedicated cockpit views in PlanetSide 2 and Battlefront.
+      if (fighter === this.playerFighter) fighter.visual.root.visible = false;
+    }
+    this.updateMobilePresentationDetail();
     this.updateCamera(delta);
     this.updateSpeedEffects(this.pausedForScreenshot ? 0 : delta, elapsed);
     this.audio.updateListener(this.camera.position, this.viewDirection(this.audioDirectionScratch));
@@ -955,6 +1157,463 @@ export class Game {
       }
     }
     this.speedTrails.update(this.speedTrailSources, elapsed, this.reducedMotion);
+  }
+
+  private updateMobilePresentationDetail(): void {
+    if (!this.mobileQuality) {
+      for (const fighter of this.fighters) fighter.visual.setHighDetail(true);
+      return;
+    }
+
+    // Cull only beyond each actor's gameplay awareness envelope so mobile
+    // never receives damage from an invisible combatant. Fighters retain a
+    // low-poly silhouette at range because their 28.5 m profile is part of the
+    // map composition; the full imported hull returns well before boarding.
+    const fighterHighDetailDistanceSq = 72 * 72;
+    const botVisibleDistanceSq = 160 * 160;
+    const droneVisibleDistanceSq = 126 * 126;
+    for (const fighter of this.fighters) {
+      fighter.visual.setHighDetail(
+        fighter === this.playerFighter
+        || fighter.flight.position.distanceToSquared(this.playerPosition) <= fighterHighDetailDistanceSq,
+      );
+    }
+    for (const bot of this.bots) {
+      if (!bot.alive || this.fighterForPilot(bot.id)) continue;
+      bot.group.visible = bot.group.position.distanceToSquared(this.playerPosition) <= botVisibleDistanceSq;
+    }
+    for (const drone of this.droneSwarm.drones) {
+      if (!drone.alive) continue;
+      drone.visual.root.visible = drone.position.distanceToSquared(this.playerPosition) <= droneVisibleDistanceSq;
+    }
+  }
+
+  private togglePlayerFighter(): void {
+    if (this.mode !== 'running' || this.fighters.length === 0) return;
+    if (this.playerFighter) {
+      this.exitPlayerFighter();
+      return;
+    }
+    const fighter = nearestBoardableFighter(this.fighters, this.playerPosition);
+    if (!fighter) {
+      this.hud.message('NO STAR SPARROW IN BOARDING RANGE');
+      return;
+    }
+    if (fighter.reservedBy !== null) {
+      const bot = this.bots[fighter.reservedBy];
+      if (bot) this.hud.message(`${bot.displayName} RESERVATION OVERRIDDEN`);
+    }
+    fighter.reservedBy = null;
+    fighter.reservationSeconds = 0;
+    fighter.pilot = 'player';
+    this.playerFighter = fighter;
+    this.detachGrapple();
+    this.jetpackActive = false;
+    this.playerPosition.copy(fighter.flight.position);
+    this.playerVelocity.copy(fighter.flight.velocity);
+    const forward = this.fighterForwardScratch.set(0, 0, -1).applyQuaternion(fighter.flight.orientation);
+    this.yaw = Math.atan2(-forward.x, -forward.z);
+    this.pitch = Math.asin(THREE.MathUtils.clamp(forward.y, -1, 1));
+    this.weaponModel.visible = false;
+    this.playerAvatar.root.visible = false;
+    this.vehicleButton.textContent = 'EJECT';
+    document.body.dataset.pilotingFighter = 'true';
+    this.hud.message(`STAR SPARROW ONLINE · ${fighter.pad.label}`);
+    this.audio.dash();
+  }
+
+  private exitPlayerFighter(): void {
+    const fighter = this.playerFighter;
+    if (!fighter) return;
+    const right = this.fighterRightScratch.set(1, 0, 0).applyQuaternion(fighter.flight.orientation);
+    const up = this.fighterUpScratch.set(0, 1, 0).applyQuaternion(fighter.flight.orientation);
+    this.playerPosition.copy(fighter.flight.position)
+      .addScaledVector(right, 10)
+      .addScaledVector(up, 3.2);
+    const safe = this.arena.safeSpawnPoint(this.playerPosition, 0.34, 1.78);
+    if (safe) this.playerPosition.copy(safe);
+    this.playerVelocity.copy(fighter.flight.velocity).multiplyScalar(0.55).addScaledVector(up, 4.5);
+    fighter.pilot = null;
+    this.playerFighter = null;
+    this.fighterBoostQueued = false;
+    this.fighterMissileQueued = false;
+    this.grounded = false;
+    this.vehicleButton.textContent = 'BOARD';
+    document.body.dataset.pilotingFighter = 'false';
+    this.weaponModel.visible = !this.isThirdPerson();
+    this.hud.message('EJECTED · JETPACK CONTROL RESTORED');
+  }
+
+  /**
+   * Adds dynamic craft contacts to the arena's static 120 Hz sweep. The same
+   * six-sphere compound used for building impacts represents every other live
+   * fighter, including docked craft. Relative motion keeps boosted head-on
+   * contacts from tunnelling and supplies the other hull's velocity to the
+   * existing slide/restitution/impact-damage solver.
+   */
+  private castFighterWorldCollision(
+    query: FighterCollisionQuery,
+    outHit: FighterCollisionHit,
+  ): boolean {
+    let found = this.fighterCollision.query(query, outHit);
+    let bestFraction = found && Number.isFinite(outHit.fraction)
+      ? outHit.fraction
+      : Number.POSITIVE_INFINITY;
+    const subject = this.fighterCollisionSubject;
+    if (!subject || query.kind !== 'body') return found;
+
+    const relativeSweep = this.fighterDynamicSweepScratch
+      .copy(query.end)
+      .sub(query.start);
+    const originalDx = relativeSweep.x;
+    const originalDy = relativeSweep.y;
+    const originalDz = relativeSweep.z;
+    for (let fighterIndex = 0; fighterIndex < this.fighters.length; fighterIndex += 1) {
+      const other = this.fighters[fighterIndex];
+      if (other === subject || other.destroyed) continue;
+      for (let proxyIndex = 0; proxyIndex < FIGHTER_FLIGHT_TUNING.collisionProxies.length; proxyIndex += 1) {
+        const proxy = FIGHTER_FLIGHT_TUNING.collisionProxies[proxyIndex];
+        const proxyCenter = this.fighterDynamicProxyScratch
+          .set(proxy.x, proxy.y, proxy.z)
+          .applyQuaternion(other.flight.orientation)
+          .add(other.flight.position);
+        relativeSweep.set(
+          originalDx - other.flight.velocity.x * FIGHTER_FIXED_STEP,
+          originalDy - other.flight.velocity.y * FIGHTER_FIXED_STEP,
+          originalDz - other.flight.velocity.z * FIGHTER_FIXED_STEP,
+        );
+        const delta = this.fighterDynamicDeltaScratch.copy(query.start).sub(proxyCenter);
+        const combinedRadius = query.radius + proxy.radius + 0.035;
+        const c = delta.lengthSq() - combinedRadius * combinedRadius;
+        const a = relativeSweep.lengthSq();
+        let fraction = Number.POSITIVE_INFINITY;
+        if (c <= 0) fraction = 0;
+        else if (a > 1e-9) {
+          const b = delta.dot(relativeSweep);
+          const discriminant = b * b - a * c;
+          if (b < 0 && discriminant >= 0) fraction = (-b - Math.sqrt(discriminant)) / a;
+        }
+        if (fraction < 0 || fraction > 1 || fraction >= bestFraction) continue;
+
+        proxyCenter.addScaledVector(other.flight.velocity, FIGHTER_FIXED_STEP * fraction);
+        delta.set(
+          query.start.x + originalDx * fraction,
+          query.start.y + originalDy * fraction,
+          query.start.z + originalDz * fraction,
+        ).sub(proxyCenter);
+        if (delta.lengthSq() < 1e-8) {
+          delta.copy(query.start).sub(other.flight.position);
+          if (delta.lengthSq() < 1e-8) delta.set(1, 0, 0);
+        }
+        delta.normalize();
+        bestFraction = fraction;
+        found = true;
+        outHit.fraction = fraction;
+        outHit.distance = query.maxDistance * fraction;
+        outHit.normal.copy(delta);
+        outHit.point.set(
+          query.start.x + originalDx * fraction - delta.x * query.radius,
+          query.start.y + originalDy * fraction - delta.y * query.radius,
+          query.start.z + originalDz * fraction - delta.z * query.radius,
+        );
+        outHit.surfaceVelocity.copy(other.flight.velocity);
+        outHit.colliderId = 10_000 + fighterIndex * 16 + proxyIndex;
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Resolve an upright infantry capsule against the fighter compound. Three
+   * retained horizontal sphere slices block both players and bots without
+   * turning the broad visual AABB into an invisible wall around the wings.
+   */
+  private resolveCharacterAgainstFighters(
+    position: THREE.Vector3,
+    velocity: THREE.Vector3,
+    radius: number,
+    height: number,
+  ): number {
+    let contacts = 0;
+    const sliceYs = [radius, height * 0.5, height - radius] as const;
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      for (const fighter of this.fighters) {
+        if (fighter.destroyed) continue;
+        for (const proxy of FIGHTER_FLIGHT_TUNING.collisionProxies) {
+          const proxyCenter = this.fighterDynamicProxyScratch
+            .set(proxy.x, proxy.y, proxy.z)
+            .applyQuaternion(fighter.flight.orientation)
+            .add(fighter.flight.position);
+          // Infantry intersects the lower visible hull, whereas the flight
+          // compound is centered for symmetric aerial response. Lower this
+          // character-only sampling layer to cover the ventral housing.
+          proxyCenter.y -= 1;
+          for (const sliceY of sliceYs) {
+            const dy = position.y + sliceY - proxyCenter.y;
+            // The authored hull's ventral housing reaches about 3.05 m below
+            // the root while the flight spheres are intentionally tighter for
+            // responsive building grazes. Infantry receives a small shell
+            // expansion so it cannot stand in that visible lower body.
+            const combinedRadius = radius + proxy.radius + 0.35;
+            if (Math.abs(dy) >= combinedRadius) continue;
+            const allowedHorizontal = Math.sqrt(Math.max(0, combinedRadius * combinedRadius - dy * dy));
+            const delta = this.fighterCharacterDeltaScratch.set(
+              position.x - proxyCenter.x,
+              0,
+              position.z - proxyCenter.z,
+            );
+            const horizontalSq = delta.x * delta.x + delta.z * delta.z;
+            if (horizontalSq >= allowedHorizontal * allowedHorizontal) continue;
+            const horizontalDistance = Math.sqrt(horizontalSq);
+            const normal = this.fighterCharacterNormalScratch;
+            if (horizontalDistance > 1e-6) normal.copy(delta).multiplyScalar(1 / horizontalDistance);
+            else {
+              normal.set(1, 0, 0).applyQuaternion(fighter.flight.orientation).setY(0);
+              if (normal.lengthSq() < 1e-8) normal.set(1, 0, 0);
+              else normal.normalize();
+            }
+            const separation = allowedHorizontal - horizontalDistance + 0.012;
+            position.addScaledVector(normal, separation);
+            const inwardSpeed = velocity.x * normal.x + velocity.z * normal.z;
+            if (inwardSpeed < 0) velocity.addScaledVector(normal, -inwardSpeed);
+            contacts += 1;
+          }
+        }
+      }
+    }
+    return contacts;
+  }
+
+  private updateFighters(delta: number): void {
+    for (const fighter of this.fighters) {
+      fighter.primaryCooldown = Math.max(0, fighter.primaryCooldown - delta);
+      fighter.missileCooldown = Math.max(0, fighter.missileCooldown - delta);
+      fighter.shieldDelay = Math.max(0, fighter.shieldDelay - delta);
+      fighter.hullHit = Math.max(0, fighter.hullHit - delta * 4.8);
+      fighter.shieldHit = Math.max(0, fighter.shieldHit - delta * 5.8);
+      fighter.reservationSeconds = Math.max(0, fighter.reservationSeconds - delta);
+      if (fighter.reservationSeconds <= 0) fighter.reservedBy = null;
+
+      if (fighter.destroyed) {
+        fighter.respawnSeconds = Math.max(0, fighter.respawnSeconds - delta);
+        if (fighter.respawnSeconds <= 0) {
+          resetFighterAtPad(fighter);
+          this.hud.message(`STAR SPARROW REBUILT · ${fighter.pad.label}`);
+        }
+        continue;
+      }
+
+      if (fighter.shieldDelay <= 0 && fighter.shield < FIGHTER_SHIELD_MAX) {
+        fighter.shield = Math.min(FIGHTER_SHIELD_MAX, fighter.shield + delta * 55);
+      }
+
+      const intent = fighter.intent;
+      if (fighter.pilot === 'player') {
+        this.input.readMovement(this.moveInput);
+        const forward = this.fighterForwardScratch.set(0, 0, -1).applyQuaternion(fighter.flight.orientation);
+        const right = this.fighterRightScratch.set(1, 0, 0).applyQuaternion(fighter.flight.orientation);
+        const up = this.fighterUpScratch.set(0, 1, 0).applyQuaternion(fighter.flight.orientation);
+        const desired = this.viewDirection(this.fighterAimScratch);
+        intent.throttle = this.moveInput.y;
+        intent.strafe = this.moveInput.x;
+        intent.lift = this.input.isJumpHeld() ? 1 : this.input.isFighterDescendHeld() ? -0.55 : 0;
+        if (fighter.flight.grounded && (intent.throttle > 0.1 || this.input.isJumpHeld())) {
+          intent.lift = Math.max(intent.lift, 0.72);
+        }
+        intent.pitch = THREE.MathUtils.clamp(desired.dot(up) * 2.4, -1, 1);
+        intent.yaw = THREE.MathUtils.clamp(desired.dot(right) * 2.6, -1, 1);
+        intent.roll = THREE.MathUtils.clamp(intent.yaw * 0.68 + this.moveInput.x * 0.22, -1, 1);
+        intent.afterburner = this.input.isSkiHeld() && intent.throttle > 0.1;
+        intent.boost = this.fighterBoostQueued;
+        // Keep camera/aim stable if a hard collision rotates the craft through
+        // the reticle; flight response, not direct quaternion assignment, closes it.
+        void forward;
+      } else if (fighter.pilot === null) {
+        intent.throttle = 0;
+        intent.strafe = 0;
+        intent.lift = 0;
+        intent.pitch = 0;
+        intent.yaw = 0;
+        intent.roll = 0;
+        intent.afterburner = false;
+        intent.boost = false;
+      }
+
+      const dockedAndUnpiloted = fighter.pilot === null
+        && fighter.flight.position.distanceToSquared(fighter.pad.position) <= 2.2 * 2.2
+        && fighter.flight.velocity.lengthSq() <= 3 * 3;
+      if (dockedAndUnpiloted) {
+        fighter.flight.position.copy(fighter.pad.position);
+        fighter.flight.velocity.set(0, 0, 0);
+        fighter.flight.angularVelocity.set(0, 0, 0);
+        fighter.flight.grounded = true;
+        fighter.flight.landingReady = true;
+        fighter.flight.landingReadiness = 1;
+        fighter.flight.supportDistance = 0.12;
+        fighter.flightAccumulator = 0;
+        continue;
+      }
+
+      fighter.flightAccumulator = Math.min(
+        fighter.flightAccumulator + delta,
+        FIGHTER_FIXED_STEP * 3,
+      );
+      while (fighter.flightAccumulator >= FIGHTER_FIXED_STEP) {
+        this.fighterCollisionSubject = fighter;
+        stepFighterFlight(fighter.flight, intent, this.queryFighterWorldCollision);
+        this.fighterCollisionSubject = null;
+        fighter.flightAccumulator -= FIGHTER_FIXED_STEP;
+        intent.boost = false;
+        if (fighter.flight.impactDamageThisStep > 0) {
+          this.damageFighter(
+            fighter,
+            fighter.flight.impactDamageThisStep,
+            fighter.pilot ?? 'player',
+            'IMPACT',
+          );
+          if (fighter.destroyed) break;
+        }
+      }
+
+      if (fighter.pilot === 'player') {
+        this.playerPosition.copy(fighter.flight.position);
+        this.playerVelocity.copy(fighter.flight.velocity);
+        if (this.input.isFireHeld()) this.fireFighterWeapon(fighter, false);
+        if (this.fighterMissileQueued) this.fireFighterWeapon(fighter, true);
+      } else if (typeof fighter.pilot === 'number') {
+        const bot = this.bots[fighter.pilot];
+        if (bot) {
+          bot.group.position.copy(fighter.flight.position);
+          bot.velocity.copy(fighter.flight.velocity);
+          bot.group.visible = false;
+        }
+      }
+    }
+    this.fighterCollisionSubject = null;
+    this.fighterBoostQueued = false;
+    this.fighterMissileQueued = false;
+  }
+
+  private fireFighterWeapon(fighter: FighterRuntime, missile: boolean, explicitAimPoint?: THREE.Vector3): void {
+    const cooldown = missile ? fighter.missileCooldown : fighter.primaryCooldown;
+    if (fighter.destroyed || fighter.pilot === null || cooldown > 0) return;
+    const owner = fighter.pilot;
+    const sockets = fighter.visual.weaponSockets;
+    const socket = sockets.length > 0
+      ? sockets[fighter.weaponAlternator % sockets.length]
+      : null;
+    fighter.visual.root.updateMatrixWorld(true);
+    const origin = socket
+      ? socket.getWorldPosition(this.fighterMuzzleScratch)
+      : this.fighterMuzzleScratch.copy(fighter.flight.position)
+        .addScaledVector(this.fighterForwardScratch.set(0, 0, -1).applyQuaternion(fighter.flight.orientation), 3.4);
+    const aimPoint = explicitAimPoint ?? (owner === 'player'
+      ? this.playerFighterAimPoint(fighter, FIGHTER_AIM_RANGE)
+      : this.fighterAimPointScratch.copy(fighter.flight.position)
+        .addScaledVector(
+          this.fighterAimScratch.set(0, 0, -1).applyQuaternion(fighter.flight.orientation),
+          FIGHTER_AIM_RANGE,
+        ));
+    const direction = this.fighterAimScratch.copy(aimPoint).sub(origin);
+    if (direction.lengthSq() > 1e-8) direction.normalize();
+    else direction.set(0, 0, -1).applyQuaternion(fighter.flight.orientation);
+    const baseDefinition = this.weapon(missile ? 'rocket' : 'plasma');
+    const definition: WeaponDefinition = {
+      ...baseDefinition,
+      projectileSpeed: missile
+        ? FIGHTER_MISSILE_PROJECTILE_SPEED
+        : FIGHTER_PRIMARY_PROJECTILE_SPEED,
+    };
+    this.spawnProjectile(origin, direction, owner, definition, missile ? { life: 5.2 } : { life: 3.2 });
+    fighter.weaponAlternator += 1;
+    if (missile) fighter.missileCooldown = FIGHTER_MISSILE_COOLDOWN;
+    else fighter.primaryCooldown = FIGHTER_PRIMARY_COOLDOWN;
+    if (owner === 'player') this.audio.weaponPlayer(definition.id, this.rng() - 0.5);
+    else this.audio.weaponWorld(definition.id, origin, `fighter-${fighter.id}`, (owner - 1) * 0.14);
+    this.fovPunch = Math.max(this.fovPunch, missile ? 3.4 : 0.75);
+    this.recoil = Math.max(this.recoil, missile ? 0.45 : 0.12);
+  }
+
+  /** Converges offset fighter hardpoints onto the first target under the HUD reticle. */
+  private playerFighterAimPoint(subject: FighterRuntime, range: number): THREE.Vector3 {
+    const origin = this.camera.position;
+    const view = this.viewDirection(this.fighterAimScratch);
+    const result = this.fighterAimPointScratch.copy(origin).addScaledVector(view, range);
+    const worldHit = this.arena.segmentHit(origin, result);
+    let bestDistance = worldHit ? origin.distanceTo(worldHit) : range;
+    if (worldHit) result.copy(worldHit);
+    this.fighterAimRay.set(origin, view);
+
+    for (const fighter of this.fighters) {
+      if (fighter === subject || fighter.destroyed) continue;
+      const radius = Math.max(1.8, fighter.visual.radius * 0.68);
+      const hit = this.fighterAimRay.intersectSphere(
+        new THREE.Sphere(fighter.flight.position, radius),
+        this.fighterAimHitScratch,
+      );
+      if (!hit) continue;
+      const distance = origin.distanceTo(hit);
+      if (distance <= 0.05 || distance >= bestDistance) continue;
+      bestDistance = distance;
+      result.copy(hit);
+    }
+    for (const bot of this.bots) {
+      if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)) continue;
+      const hit = this.rayOwnerCapsuleHit(origin, view, bot.id, bestDistance, 'plasma');
+      if (!hit) continue;
+      const distance = origin.distanceTo(hit);
+      if (distance <= 0.05 || distance >= bestDistance) continue;
+      bestDistance = distance;
+      result.copy(hit);
+    }
+    return result;
+  }
+
+  private damageFighter(fighter: FighterRuntime, amount: number, owner: Owner, cause: string): void {
+    if (fighter.destroyed || amount <= 0) return;
+    fighter.shieldDelay = 4;
+    let remaining = amount;
+    if (fighter.shield > 0) {
+      const shieldDamage = Math.min(fighter.shield, remaining);
+      fighter.shield -= shieldDamage;
+      remaining -= shieldDamage;
+      fighter.shieldHit = Math.min(1, fighter.shieldHit + shieldDamage / 32);
+    }
+    if (remaining > 0) {
+      fighter.hull = Math.max(0, fighter.hull - remaining);
+      fighter.hullHit = Math.min(1, fighter.hullHit + remaining / 42);
+    }
+    if (fighter.hull > 0) return;
+    this.destroyFighter(fighter, owner, cause);
+  }
+
+  private destroyFighter(fighter: FighterRuntime, owner: Owner, cause: string): void {
+    const pilot = fighter.pilot;
+    fighter.destroyed = true;
+    fighter.respawnSeconds = FIGHTER_RESPAWN_SECONDS;
+    fighter.pilot = null;
+    fighter.reservedBy = null;
+    fighter.flight.velocity.set(0, 0, 0);
+    fighter.flight.angularVelocity.set(0, 0, 0);
+    this.weaponVfx.rocketExplosion(fighter.flight.position, 0xff713b);
+    this.spawnBurst(fighter.flight.position, 0xff713b, 32);
+    this.audio.projectileImpact('rocket', fighter.flight.position, this.rng() - 0.5);
+    if (pilot === 'player') {
+      this.playerFighter = null;
+      this.playerPosition.copy(fighter.flight.position);
+      this.playerVelocity.set(0, 0, 0);
+      this.vehicleButton.textContent = 'BOARD';
+      document.body.dataset.pilotingFighter = 'false';
+      this.damagePlayer(999, owner, `STAR SPARROW DESTROYED · ${cause}`, fighter.flight.position);
+    } else if (typeof pilot === 'number') {
+      const bot = this.bots[pilot];
+      if (bot) {
+        bot.group.visible = true;
+        bot.group.position.copy(fighter.flight.position);
+        this.applyDamageToBot(bot, 999, owner, `STAR SPARROW DESTROYED · ${cause}`);
+      }
+    }
+    this.hud.message(`STAR SPARROW DESTROYED · REBUILD ${FIGHTER_RESPAWN_SECONDS}s`);
   }
 
   private fixedUpdate(delta: number): void {
@@ -990,6 +1649,7 @@ export class Game {
     }
 
     if (this.mode !== 'running') {
+      if (this.mode === 'respawning') this.updateFighters(delta);
       this.botAccumulator = 0;
       this.jetpackActive = false;
       this.jetpackEnergy.update(0, false, this.grounded);
@@ -1052,7 +1712,13 @@ export class Game {
       this.scene.fog.density = baseline / Math.max(0.82, this.weatherSnapshot.multipliers.visibilityMultiplier);
     }
 
-    this.updatePlayerMovement(delta);
+    this.updateFighters(delta);
+    if (!this.playerFighter) this.updatePlayerMovement(delta);
+    else {
+      this.jetpackActive = false;
+      this.jetpackEnergy.update(0, false, false);
+    }
+    this.updateDrones(delta);
     this.maxPlayerSpeed = Math.max(this.maxPlayerSpeed, Math.hypot(this.playerVelocity.x, this.playerVelocity.z));
     this.updateGrapple(delta);
     if (!this.physicsQaMode) {
@@ -1066,7 +1732,7 @@ export class Game {
     this.updateGrenades(delta);
     this.updatePickups(delta);
     this.updateCore(delta);
-    if (this.input.isFireHeld()) {
+    if (this.input.isFireHeld() && !this.playerFighter) {
       if (WEAPONS[this.selectedWeapon].id === 'laser') this.fireContinuousLaserTick(delta);
       else {
         this.weaponVfx.stopContinuousLaser();
@@ -1259,6 +1925,17 @@ export class Game {
     const impact = -this.playerVelocity.y;
     const blockedPosition = this.substepBlockedPosition.copy(this.playerPosition);
     let contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+    const fighterContacts = this.resolveCharacterAgainstFighters(
+      this.playerPosition,
+      this.playerVelocity,
+      MOVEMENT.playerRadius,
+      MOVEMENT.playerHeight,
+    );
+    if (fighterContacts > 0) {
+      contact.wallContact = true;
+      contact.wallNormal.copy(this.fighterCharacterNormalScratch);
+      contact.contacts += fighterContacts;
+    }
     if (sweptContact.wallNormal) {
       contact.wallContact = true;
       contact.wallNormal.copy(sweptContact.wallNormal);
@@ -1655,35 +2332,329 @@ export class Game {
     }
   }
 
+  private fighterForPilot(pilot: Owner): FighterRuntime | null {
+    return this.fighters.find((fighter) => fighter.pilot === pilot) ?? null;
+  }
+
+  private fighterVehicleSnapshot(fighter: FighterRuntime): FighterAiVehicleSnapshot {
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(fighter.flight.orientation);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(fighter.flight.orientation);
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(fighter.flight.orientation);
+    const speed = fighter.flight.velocity.length();
+    const phase = fighter.destroyed
+      ? 'destroyed'
+      : fighter.pilot === null && speed < 2.5
+        ? 'parked'
+        : fighter.flight.landingReady
+          ? 'landing'
+          : fighter.flight.position.y < fighter.pad.position.y + 10
+            ? 'launching'
+            : 'airborne';
+    return {
+      id: fighter.id,
+      teamId: null,
+      available: !fighter.destroyed && fighter.pilot === null,
+      destroyed: fighter.destroyed,
+      phase,
+      position: fighter.flight.position,
+      velocity: fighter.flight.velocity,
+      forward,
+      right,
+      up,
+      pilotId: fighter.pilot,
+      reservedBy: fighter.reservedBy,
+      hull: fighter.hull,
+      maxHull: FIGHTER_HULL_MAX,
+      primaryReady: fighter.primaryCooldown <= 0,
+      secondaryReady: fighter.missileCooldown <= 0,
+      secondaryAmmo: fighter.destroyed ? 0 : 4,
+      homePadId: fighter.pad.id,
+    };
+  }
+
+  private updateBotFighterAi(bot: Bot, delta: number): { groundTarget: THREE.Vector3 | null; piloting: boolean } {
+    const controller = this.fighterAi.get(bot.id);
+    if (!controller || this.fighters.length === 0) return { groundTarget: null, piloting: false };
+    const currentFighter = this.fighterForPilot(bot.id);
+    const vehicles = this.fighters.map((fighter) => this.fighterVehicleSnapshot(fighter));
+    const targets = [
+      {
+        id: 'player',
+        teamId: 'player',
+        alive: this.mode === 'running' && this.health > 0,
+        targetable: this.mode === 'running' && this.health > 0,
+        sensorVisible: bot.group.position.distanceToSquared(this.playerPosition) <= 190 * 190,
+        airborne: Boolean(this.playerFighter) || !this.grounded,
+        threat: this.playerFighter ? 1 : 0.72,
+        radius: this.playerFighter ? 2.4 : 0.75,
+        position: this.playerPosition,
+        velocity: this.playerVelocity,
+      },
+      ...this.bots.filter((targetBot) => targetBot.id !== bot.id).map((targetBot) => ({
+        id: targetBot.id,
+        teamId: targetBot.id,
+        alive: targetBot.alive,
+        targetable: targetBot.alive,
+        sensorVisible: bot.group.position.distanceToSquared(targetBot.group.position) <= 190 * 190,
+        airborne: Boolean(this.fighterForPilot(targetBot.id)) || !targetBot.grounded,
+        threat: this.fighterForPilot(targetBot.id) ? 0.92 : 0.58,
+        radius: this.fighterForPilot(targetBot.id) ? 2.4 : 0.75,
+        position: targetBot.group.position,
+        velocity: targetBot.velocity,
+      })),
+    ];
+    const threats = this.projectiles
+      .filter((projectile) => projectile.owner !== bot.id)
+      .slice(0, 8)
+      .map((projectile, index) => {
+        const distance = projectile.root.position.distanceTo(bot.group.position);
+        return {
+          id: `${projectile.weapon}-${index}`,
+          sensorVisible: distance <= 85,
+          position: projectile.root.position,
+          velocity: projectile.velocity,
+          timeToImpact: distance / Math.max(1, projectile.velocity.length()),
+          severity: projectile.weapon === 'rocket' ? 1 : projectile.weapon === 'plasma' ? 0.62 : 0.42,
+        };
+      });
+    const pads = this.fighters.map((fighter) => {
+      const padForward = new THREE.Vector3(-Math.sin(fighter.pad.yaw), 0, -Math.cos(fighter.pad.yaw));
+      return {
+        id: fighter.pad.id,
+        teamId: null,
+        enabled: true,
+        occupiedBy: fighter.destroyed ? null : fighter.id,
+        position: fighter.pad.position,
+        approachPosition: fighter.pad.position.clone().addScaledVector(padForward, 14).add(new THREE.Vector3(0, 12, 0)),
+      };
+    });
+    const intent = controller.update({
+      deltaSeconds: delta,
+      actor: {
+        id: bot.id,
+        teamId: bot.id,
+        alive: bot.alive,
+        canUseFighters: true,
+        position: bot.group.position,
+        velocity: bot.velocity,
+        currentVehicleId: currentFighter?.id ?? null,
+      },
+      vehicles,
+      targets,
+      incomingThreats: threats,
+      pads,
+      context: {
+        allowFighterUse: true,
+        fighterDemand: 0.88,
+        patrolCenter: { x: 0, y: 72, z: 24 },
+        patrolRadius: 58,
+        patrolAltitude: 30,
+      },
+      world: {
+        terrainHeightAt: (x, z) => this.arena.floorHeightAt(x, z, 180) ?? 0,
+        hasLineOfSight: (fromX, fromY, fromZ, toX, toY, toZ) => this.arena.hasLineOfSight(
+          new THREE.Vector3(fromX, fromY, fromZ),
+          new THREE.Vector3(toX, toY, toZ),
+          0.5,
+        ),
+        isFlightPathClear: (fromX, fromY, fromZ, toX, toY, toZ) => !this.arena.segmentHitDetails(
+          new THREE.Vector3(fromX, fromY, fromZ),
+          new THREE.Vector3(toX, toY, toZ),
+        ),
+      },
+    });
+    const groundTarget = this.applyBotFighterIntent(bot, intent);
+    return { groundTarget, piloting: Boolean(this.fighterForPilot(bot.id)) };
+  }
+
+  private applyBotFighterIntent(bot: Bot, intent: FighterAiIntent): THREE.Vector3 | null {
+    if (intent.releaseVehicleId !== null) {
+      const fighter = this.fighters.find((candidate) => candidate.id === intent.releaseVehicleId);
+      if (fighter?.reservedBy === bot.id) {
+        fighter.reservedBy = null;
+        fighter.reservationSeconds = 0;
+      }
+    }
+    if (intent.claimVehicleId !== null) {
+      const fighter = this.fighters.find((candidate) => candidate.id === intent.claimVehicleId);
+      if (fighter && !fighter.destroyed && fighter.pilot === null
+        && (fighter.reservedBy === null || fighter.reservedBy === bot.id)) {
+        fighter.reservedBy = bot.id;
+        fighter.reservationSeconds = Math.max(0.25, intent.claimLeaseSeconds);
+      }
+    }
+    if (intent.enterVehicleId !== null) {
+      const fighter = this.fighters.find((candidate) => candidate.id === intent.enterVehicleId);
+      if (fighter && !fighter.destroyed && fighter.pilot === null && fighter.reservedBy === bot.id
+        && fighter.flight.position.distanceToSquared(bot.group.position) <= FIGHTER_BOARD_RANGE ** 2) {
+        fighter.pilot = bot.id;
+        fighter.reservedBy = null;
+        fighter.reservationSeconds = 0;
+        bot.group.visible = false;
+        this.hud.message(`${bot.displayName} LAUNCHED A STAR SPARROW`);
+      }
+    }
+
+    const fighter = this.fighterForPilot(bot.id);
+    if (fighter) {
+      fighter.intent.throttle = intent.throttle * (1 - intent.brake);
+      fighter.intent.strafe = 0;
+      fighter.intent.lift = intent.state === 'launch' ? 0.82 : intent.landingGear ? -0.34 : 0;
+      fighter.intent.pitch = intent.pitch;
+      fighter.intent.yaw = intent.yaw;
+      fighter.intent.roll = intent.roll;
+      fighter.intent.afterburner = intent.boost && intent.throttle > 0.5;
+      fighter.intent.boost = intent.boost;
+      const aimPoint = intent.hasAimPoint
+        ? new THREE.Vector3(intent.aimX, intent.aimY, intent.aimZ)
+        : undefined;
+      if (intent.firePrimary) this.fireFighterWeapon(fighter, false, aimPoint);
+      if (intent.fireSecondary) this.fireFighterWeapon(fighter, true, aimPoint);
+      if (intent.dockAtPadId !== null
+        && intent.dockAtPadId === fighter.pad.id
+        && fighter.flight.position.distanceToSquared(fighter.pad.position) <= 4.5 ** 2) {
+        const orientation = this.fighterQuaternionScratch.setFromEuler(new THREE.Euler(0, fighter.pad.yaw, 0));
+        resetFighterFlightState(fighter.flight, fighter.pad.position, orientation);
+      }
+      if (intent.exitVehicle) {
+        fighter.pilot = null;
+        bot.group.visible = true;
+        bot.group.position.copy(fighter.pad.position).add(new THREE.Vector3(
+          fighter.pad.position.x > 0 ? -10 : 10,
+          0.2,
+          0,
+        ));
+        bot.velocity.set(0, 0, 0);
+      }
+      return null;
+    }
+
+    if (intent.groundSprint || Math.abs(intent.groundMoveX) + Math.abs(intent.groundMoveZ) > 0.01) {
+      return new THREE.Vector3(intent.groundTargetX, intent.groundTargetY, intent.groundTargetZ);
+    }
+    return null;
+  }
+
   private updateBots(delta: number): void {
     for (const bot of this.bots) {
       if (bot.readyToRespawn()) {
         bot.respawn(this.selectSafeSpawn(bot.id));
       }
       if (!bot.alive) {
-        bot.update(delta, this.elapsed, bot.group.position, this.arena.corePosition, false);
+        this.updateBotFighterAi(bot, delta);
+        bot.update(delta, this.elapsed, bot.group.position, bot.velocity, this.arena.corePosition, false);
         continue;
       }
+      const fighterAi = this.updateBotFighterAi(bot, delta);
+      const pilotedFighter = this.fighterForPilot(bot.id);
+      if (pilotedFighter || fighterAi.piloting) {
+        const activeFighter = pilotedFighter ?? this.fighterForPilot(bot.id);
+        if (activeFighter) {
+          bot.group.position.copy(activeFighter.flight.position);
+          bot.velocity.copy(activeFighter.flight.velocity);
+          bot.group.visible = false;
+        }
+        continue;
+      }
+      bot.group.visible = true;
       if (bot.consumeRecoveryRequest()) {
         bot.respawn(this.selectSafeSpawn(bot.id, bot.navigationTarget));
         bot.collisionRecoveries += 1;
       }
 
-      const targetOwner = this.chooseBotTarget(bot);
-      bot.targetOwner = targetOwner;
-      if (targetOwner !== null) this.botTargets.set(bot.id, targetOwner);
-      else this.botTargets.delete(bot.id);
       const botEye = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-      const target = targetOwner === null ? this.arena.corePosition : this.ownerPosition(targetOwner, 1.05);
+      const droneTarget = this.droneSwarm.nearestVisibleDrone(botEye, 105);
+      const targetOwner = droneTarget ? null : this.chooseBotTarget(bot);
+      bot.targetOwner = targetOwner;
+      if (droneTarget) {
+        this.botDroneTargets.set(bot.id, droneTarget.id);
+        this.botTargets.delete(bot.id);
+      } else {
+        this.botDroneTargets.delete(bot.id);
+        if (targetOwner !== null) this.botTargets.set(bot.id, targetOwner);
+        else this.botTargets.delete(bot.id);
+      }
+      const target = droneTarget?.position
+        ?? (targetOwner === null ? this.arena.corePosition : this.ownerPosition(targetOwner, 1.05));
+      const targetVelocity = droneTarget?.velocity
+        ?? (targetOwner === null ? new THREE.Vector3() : this.ownerVelocity(targetOwner));
       const visibilityRange = 155 * this.weatherSnapshot.multipliers.visibilityMultiplier;
-      const canSeeTarget = targetOwner !== null
+      const canSeeTarget = (targetOwner !== null || droneTarget !== null)
         && botEye.distanceToSquared(target) <= visibilityRange * visibilityRange
         && this.arena.hasLineOfSight(botEye, target, 0.3);
-      const objective = this.chooseBotObjective(bot, target, canSeeTarget);
-      bot.update(delta, this.elapsed, target, objective, canSeeTarget);
+      const objective = fighterAi.groundTarget ?? this.chooseBotObjective(bot, target, canSeeTarget);
+      bot.update(delta, this.elapsed, target, targetVelocity, objective, canSeeTarget);
+      this.resolveCharacterAgainstFighters(bot.group.position, bot.velocity, 0.43, 1.82);
       if (bot.wantsToThrowGrenade && targetOwner !== null) this.botThrowGrenade(bot, targetOwner);
-      if (bot.wantsToFire && targetOwner !== null) this.botFire(bot, targetOwner);
+      if (bot.wantsToFire && droneTarget) this.botFireDrone(bot, droneTarget);
+      else if (bot.wantsToFire && targetOwner !== null) this.botFire(bot, targetOwner);
     }
+  }
+
+  private updateDrones(delta: number): void {
+    const playerTarget = this.droneTargetSnapshots[0];
+    playerTarget.position.copy(this.playerPosition);
+    playerTarget.position.y += 0.95;
+    playerTarget.velocity.copy(this.playerVelocity);
+    playerTarget.alive = this.mode === 'running' && this.health > 0 && !this.playerFighter;
+    for (let index = 0; index < this.bots.length; index += 1) {
+      const bot = this.bots[index];
+      const target = this.droneTargetSnapshots[index + 1];
+      target.position.copy(bot.group.position);
+      target.position.y += 1.05;
+      target.velocity.copy(bot.velocity);
+      target.alive = bot.alive && !this.fighterForPilot(bot.id);
+    }
+    this.droneSwarm.update(delta, this.elapsed, this.droneTargetSnapshots, (event) => this.resolveDroneLaser(event));
+  }
+
+  private resolveDroneLaser(event: DroneLaserEvent): void {
+    if (event.started) this.audio.weaponWorld('laser', event.origin, event.droneId, 0.22);
+    if (event.targetOwner === 'player') {
+      if (!this.playerFighter) this.damagePlayer(event.damage, 'drone', 'HOSTILE DRONE LASER', event.origin);
+      return;
+    }
+    const bot = this.bots[event.targetOwner];
+    if (bot?.alive && !this.fighterForPilot(bot.id)) {
+      this.applyDamageToBot(bot, event.damage, 'drone', 'HOSTILE DRONE LASER');
+    }
+  }
+
+  private botFireDrone(bot: Bot, intendedTarget: CombatDroneRuntime): void {
+    if (!intendedTarget.alive) return;
+    const origin = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+    if (!this.arena.hasLineOfSight(origin, intendedTarget.position, 0.3)) return;
+    const definition = this.weapon(bot.weapon);
+    if (bot.weapon === 'rocket' || bot.weapon === 'plasma' || bot.weapon === 'disc') {
+      this.spawnProjectile(origin, bot.aimDirection, bot.id, definition);
+      this.audio.weaponWorld(bot.weapon, origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
+      return;
+    }
+    const range = definition.range ?? (bot.weapon === 'shotgun' ? 34 : 110);
+    const bulletEnd = origin.clone().addScaledVector(bot.aimDirection, range);
+    const worldHit = this.arena.segmentHit(origin, bulletEnd);
+    const worldDistance = worldHit ? origin.distanceTo(worldHit) : range;
+    const droneHit = this.droneSwarm.raycast(origin, bot.aimDirection, worldDistance);
+    const visibleEnd = droneHit?.point ?? worldHit ?? bulletEnd;
+    const visualWeapon = bot.weapon === 'laser' || bot.weapon === 'rail' || bot.weapon === 'sniper' ? bot.weapon : 'machine';
+    this.weaponVfx.beam(
+      origin,
+      visibleEnd,
+      visualWeapon,
+      definition.color,
+      bot.weapon === 'rail' ? 0.13 : bot.weapon === 'sniper' ? 0.14 : 0.065,
+    );
+    if (droneHit) {
+      let damage = definition.damage;
+      if (bot.weapon === 'shotgun') {
+        const falloff = THREE.MathUtils.clamp(1 - Math.max(0, droneHit.distance - 5) / 30, 0.12, 1);
+        damage *= Math.max(2, Math.round((definition.pellets ?? 10) * falloff * 0.62));
+      }
+      if (bot.damageBoost > 0) damage *= 1.35;
+      this.applyDamageToDrone(droneHit.drone, damage, bot.id, definition.name);
+    }
+    this.audio.tracerPass(origin.clone().lerp(visibleEnd, 0.55), !droneHit, (bot.id - 1) * 0.2, `bot-${bot.id}`);
+    this.audio.weaponWorld(bot.weapon, origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
   }
 
   private botFire(bot: Bot, targetOwner: Owner): void {
@@ -1705,14 +2676,18 @@ export class Game {
     const worldHit = this.arena.segmentHit(origin, bulletEnd);
     const visibleEnd = worldHit ?? bulletEnd;
     const visualWeapon = bot.weapon === 'laser' || bot.weapon === 'rail' || bot.weapon === 'sniper' ? bot.weapon : 'machine';
-    this.weaponVfx.beam(origin, visibleEnd, visualWeapon, definition.color, bot.weapon === 'rail' ? 0.13 : 0.065);
-    const toTarget = target.sub(origin);
-    const along = toTarget.dot(bot.aimDirection);
-    const closest = origin.clone().addScaledVector(bot.aimDirection, along);
     const worldDistance = worldHit ? origin.distanceTo(worldHit) : range;
-    const hitRadius = bot.weapon === 'shotgun' ? 1.75 : bot.weapon === 'machine' ? 1.08 : 0.82;
-    let targetHit = false;
-    if (along > 0 && along <= worldDistance + 0.02 && closest.distanceTo(this.ownerPosition(targetOwner, 0.9)) < hitRadius) {
+    const targetHitPoint = this.rayOwnerCapsuleHit(origin, bot.aimDirection, targetOwner, worldDistance, bot.weapon);
+    this.weaponVfx.beam(
+      origin,
+      targetHitPoint ?? visibleEnd,
+      visualWeapon,
+      definition.color,
+      bot.weapon === 'rail' ? 0.13 : bot.weapon === 'sniper' ? 0.14 : 0.065,
+    );
+    let targetHit = targetHitPoint !== null;
+    if (targetHitPoint) {
+      const along = targetHitPoint.distanceTo(origin);
       targetHit = true;
       let damage = definition.damage;
       if (bot.weapon === 'shotgun') {
@@ -1803,9 +2778,73 @@ export class Game {
       : this.bots[owner].group.position.clone().add(new THREE.Vector3(0, centerY, 0));
   }
 
+  private ownerVelocity(owner: Owner): THREE.Vector3 {
+    return owner === 'player' ? this.playerVelocity.clone() : this.bots[owner].velocity.clone();
+  }
+
+  private rayOwnerCapsuleHit(
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    owner: Owner,
+    maxDistance: number,
+    weapon: WeaponId,
+  ): THREE.Vector3 | null {
+    const occupiedFighter = this.fighterForPilot(owner);
+    if (occupiedFighter) {
+      const ray = new THREE.Ray(origin, direction);
+      return ray.intersectSphere(
+        new THREE.Sphere(occupiedFighter.flight.position, Math.max(1.8, occupiedFighter.visual.radius * 0.68)),
+        new THREE.Vector3(),
+      );
+    }
+    const feet = this.ownerPosition(owner, 0);
+    const capsuleStart = feet.clone().add(new THREE.Vector3(0, 0.28, 0));
+    const capsuleEnd = feet.add(new THREE.Vector3(0, 1.52, 0));
+    const pointOnRay = new THREE.Vector3();
+    const pointOnCapsule = new THREE.Vector3();
+    const ray = new THREE.Ray(origin, direction);
+    const distanceSq = ray.distanceSqToSegment(capsuleStart, capsuleEnd, pointOnRay, pointOnCapsule);
+    const radius = weapon === 'shotgun' ? 1.58
+      : weapon === 'machine' ? 0.58
+        : weapon === 'laser' ? 0.5
+          : weapon === 'sniper' ? 0.5
+            : 0.46;
+    const along = pointOnRay.distanceTo(origin);
+    if (distanceSq > radius * radius || along <= 0 || along > maxDistance + 0.02) return null;
+    return pointOnRay;
+  }
+
   private applyDamageToOwner(owner: Owner, damage: number, attacker: Owner, cause: string, hitOrigin?: THREE.Vector3): void {
-    if (owner === 'player') this.damagePlayer(damage, attacker, cause.toUpperCase(), hitOrigin);
+    const occupiedFighter = this.fighterForPilot(owner);
+    if (occupiedFighter) this.damageFighter(occupiedFighter, damage, attacker, cause.toUpperCase());
+    else if (owner === 'player') this.damagePlayer(damage, attacker, cause.toUpperCase(), hitOrigin);
     else this.applyDamageToBot(this.bots[owner], damage, attacker, cause);
+  }
+
+  private damageFirstFighterOnRay(
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    maxDistance: number,
+    damage: number,
+    owner: Owner,
+    cause: string,
+  ): FighterRuntime | null {
+    const ray = new THREE.Ray(origin, direction);
+    let best: FighterRuntime | null = null;
+    let bestDistance = maxDistance;
+    const hitPoint = new THREE.Vector3();
+    for (const fighter of this.fighters) {
+      if (fighter.destroyed || fighter.pilot === owner) continue;
+      const radius = Math.max(1.8, fighter.visual.radius * 0.68);
+      const hit = ray.intersectSphere(new THREE.Sphere(fighter.flight.position, radius), hitPoint);
+      if (!hit) continue;
+      const distance = origin.distanceTo(hit);
+      if (distance >= bestDistance) continue;
+      best = fighter;
+      bestDistance = distance;
+    }
+    if (best) this.damageFighter(best, damage, owner, cause);
+    return best;
   }
 
   private selectSafeSpawn(excludedBotId?: number, recoveryObjective?: THREE.Vector3): THREE.Vector3 {
@@ -1864,7 +2903,7 @@ export class Game {
     const origin = this.weaponMuzzleWorldPosition();
     const direction = this.shotDirectionFromMuzzle(origin, 120);
     this.recordPlayerShot(definition.id, origin);
-    this.weaponVfx.muzzle(definition.id, definition.color, this.muzzleSocket);
+    this.weaponVfx.muzzle(definition.id, definition.color, this.playerMuzzleVfxSocket(origin, direction));
     if (definition.projectileSpeed) {
       this.spawnProjectile(origin, direction, 'player', definition);
     } else if (definition.pellets) {
@@ -1884,15 +2923,35 @@ export class Game {
           .normalize();
         this.lastPelletSpread = Math.max(this.lastPelletSpread, Math.acos(THREE.MathUtils.clamp(direction.dot(pelletDirection), -1, 1)));
         const trace = this.traceBotShot(origin, pelletDirection, definition.falloffEnd ?? 30, false);
-        if (trace.first) {
+        this.damageFirstFighterOnRay(
+          origin,
+          pelletDirection,
+          origin.distanceTo(trace.combatEnd),
+          definition.damage * 0.72 * this.damageMultiplier(),
+          'player',
+          definition.name,
+        );
+        if (trace.firstTarget === 'drone' && trace.drone) {
+          const falloff = 1 - THREE.MathUtils.smoothstep(
+            trace.drone.distance,
+            definition.falloffStart ?? 5,
+            definition.falloffEnd ?? 30,
+          ) * 0.58;
+          this.applyDamageToDrone(
+            trace.drone.drone,
+            definition.damage * falloff * this.damageMultiplier(),
+            'player',
+            definition.name,
+          );
+        } else if (trace.first) {
           const distance = trace.first.t;
           const falloff = 1 - THREE.MathUtils.smoothstep(distance, definition.falloffStart ?? 5, definition.falloffEnd ?? 30) * 0.58;
           const locationMultiplier = trace.first.zone === 'head' ? 1.25 : 1;
           hits.set(trace.first.bot, (hits.get(trace.first.bot) ?? 0) + definition.damage * falloff * locationMultiplier);
         }
-        const pelletEnd = trace.first?.point ?? trace.end;
+        const pelletEnd = trace.combatEnd;
         this.weaponVfx.beam(origin, pelletEnd, definition.id, definition.color, 0.055 + pellet * 0.0015);
-        if (!trace.first && trace.worldHit) {
+        if (trace.firstTarget === null && trace.worldHit) {
           this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), definition.id, definition.color);
           if (pellet % 3 === 0) this.weaponVfx.impact(trace.worldHit, definition.color, definition.id, trace.worldNormal ?? undefined);
           if (pellet % 3 === 0) this.registerConcreteTraceImpact(trace, definition.damage * 2.4);
@@ -1909,14 +2968,28 @@ export class Game {
         )
         : direction;
       const trace = this.traceBotShot(origin, hitscanDirection, range, piercing, definition.damage * this.damageMultiplier(), definition.name, definition.id);
-      const end = piercing ? trace.end : trace.first?.point ?? trace.end;
-      this.weaponVfx.beam(origin, end, definition.id, definition.color, definition.id === 'rail' ? 0.2 : 0.085);
-      if (!trace.first && trace.worldHit) {
+      this.damageFirstFighterOnRay(
+        origin,
+        hitscanDirection,
+        origin.distanceTo(piercing ? trace.end : trace.combatEnd),
+        definition.damage * this.damageMultiplier(),
+        'player',
+        definition.name,
+      );
+      const end = piercing ? trace.end : trace.combatEnd;
+      this.weaponVfx.beam(
+        origin,
+        end,
+        definition.id,
+        definition.color,
+        definition.id === 'rail' ? 0.2 : definition.id === 'sniper' ? 0.15 : 0.085,
+      );
+      if (trace.firstTarget === null && trace.worldHit) {
         this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), definition.id, definition.color);
         this.weaponVfx.impact(trace.worldHit, definition.color, definition.id, trace.worldNormal ?? undefined);
         this.registerConcreteTraceImpact(trace, definition.damage);
       }
-      if (trace.first && definition.id === 'machine') {
+      if (trace.firstTarget === 'bot' && trace.first && definition.id === 'machine') {
         this.weaponVfx.stickTracer(trace.first.bot.group, trace.first.point, hitscanDirection, definition.color);
       }
     }
@@ -1945,23 +3018,39 @@ export class Game {
     const direction = this.shotDirectionFromMuzzle(origin, range);
     const trace = this.traceBotShot(origin, direction, range, false);
     const botHit = trace.first;
-    const botVisible = botHit !== null;
-    const end = botVisible ? botHit.point : trace.end;
+    const botVisible = trace.firstTarget === 'bot' && botHit !== null;
+    const droneVisible = trace.firstTarget === 'drone' && trace.drone !== null;
+    const end = trace.combatEnd;
     this.audio.setLaserBeamActive(true);
     this.weaponVfx.updateContinuousLaser(origin, end, definition.color, delta);
     this.recordPlayerShot('laser', origin);
     this.laserHeat = Math.min(1.1, this.laserHeat + delta * (focused ? 1.08 : 0.7));
 
-    if (!wasActive) this.weaponVfx.muzzle('laser', definition.color, this.muzzleSocket);
+    if (!wasActive) this.weaponVfx.muzzle('laser', definition.color, this.playerMuzzleVfxSocket(origin, direction));
     if (this.weaponCooldown > 0) return;
 
     this.weaponCooldown = definition.cooldown * (focused ? 1.35 : 1);
     this.ammo.set('laser', Math.max(0, ammo - ammoCost));
     this.recoil = Math.min(0.34, this.recoil + definition.recoil);
     this.trauma = Math.min(0.22, this.trauma + definition.trauma);
+    this.damageFirstFighterOnRay(
+      origin,
+      direction,
+      origin.distanceTo(trace.combatEnd),
+      definition.damage * (focused ? 1.8 : 1) * this.damageMultiplier(),
+      'player',
+      focused ? 'HELIX CUTTING FOCUS' : definition.name,
+    );
     if (botVisible && botHit) {
       this.applyDamageToBot(
         botHit.bot,
+        definition.damage * (focused ? 1.8 : 1) * this.damageMultiplier(),
+        'player',
+        focused ? 'HELIX CUTTING FOCUS' : definition.name,
+      );
+    } else if (droneVisible && trace.drone) {
+      this.applyDamageToDrone(
+        trace.drone.drone,
         definition.damage * (focused ? 1.8 : 1) * this.damageMultiplier(),
         'player',
         focused ? 'HELIX CUTTING FOCUS' : definition.name,
@@ -1995,7 +3084,7 @@ export class Game {
     const origin = this.weaponMuzzleWorldPosition();
     const direction = this.shotDirectionFromMuzzle(origin, 220);
     this.recordPlayerShot(definition.id, origin);
-    this.weaponVfx.muzzle(definition.id, definition.color, this.muzzleSocket);
+    this.weaponVfx.muzzle(definition.id, definition.color, this.playerMuzzleVfxSocket(origin, direction));
 
     if (definition.id === 'shotgun') {
       this.weaponCooldown = 1.15;
@@ -2008,9 +3097,9 @@ export class Game {
         'SCATTER SABOT',
         'shotgun',
       );
-      const end = trace.first?.point ?? trace.end;
+      const end = trace.combatEnd;
       this.weaponVfx.beam(origin, end, 'shotgun', 0xffe2a6, 0.16);
-      if (!trace.first && trace.worldHit) {
+      if (trace.firstTarget === null && trace.worldHit) {
         this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), 'shotgun', 0xffe2a6);
         this.weaponVfx.impact(trace.worldHit, 0xffe2a6, 'shotgun', trace.worldNormal ?? undefined);
         this.registerConcreteTraceImpact(trace, 110);
@@ -2038,7 +3127,7 @@ export class Game {
         'rail',
       );
       this.weaponVfx.beam(origin, trace.end, 'rail', 0xffffff, 0.34);
-      if (!trace.first && trace.worldHit) {
+      if (trace.firstTarget === null && trace.worldHit) {
         this.weaponVfx.mark(trace.worldHit, trace.worldNormal ?? new THREE.Vector3(0, 1, 0), 'rail', definition.color);
         this.weaponVfx.impact(trace.worldHit, definition.color, 'rail', trace.worldNormal ?? undefined);
         this.registerConcreteTraceImpact(trace, 175);
@@ -2078,6 +3167,23 @@ export class Game {
   }
 
   private weaponMuzzleWorldPosition(): THREE.Vector3 {
+    if (this.isThirdPerson()) {
+      if (this.thirdPersonWeaponVisual) {
+        this.updateThirdPersonWeaponPose(this.viewDirection(new THREE.Vector3()));
+        this.thirdPersonWeaponVisual.muzzleSocket.updateWorldMatrix(true, false);
+        return this.thirdPersonWeaponVisual.muzzleSocket.getWorldPosition(new THREE.Vector3());
+      }
+      // Asset-load fallback: preserve a plausible shouldered origin if the
+      // cached world weapon is unavailable. Normal play uses its real socket.
+      const forward = this.thirdPersonMuzzleForwardScratch
+        .set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+      const right = this.thirdPersonMuzzleRightScratch
+        .set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+      return new THREE.Vector3().copy(this.playerPosition)
+        .addScaledVector(forward, 0.72)
+        .addScaledVector(right, 0.28)
+        .add(new THREE.Vector3(0, 1.28, 0));
+    }
     this.camera.position.copy(this.playerPosition).add(new THREE.Vector3(0, PLAYER_EYE, 0));
     this.camera.rotation.order = 'YXZ';
     this.camera.rotation.y = this.yaw;
@@ -2087,11 +3193,29 @@ export class Game {
     return this.muzzleSocket.getWorldPosition(new THREE.Vector3());
   }
 
+  private playerMuzzleVfxSocket(origin: THREE.Vector3, direction: THREE.Vector3): THREE.Object3D {
+    if (!this.isThirdPerson()) return this.muzzleSocket;
+    if (this.thirdPersonWeaponVisual) {
+      this.thirdPersonWeaponVisual.muzzleSocket.updateWorldMatrix(true, false);
+      return this.thirdPersonWeaponVisual.muzzleSocket;
+    }
+    this.thirdPersonMuzzleSocket.position.copy(origin);
+    this.thirdPersonMuzzleSocket.quaternion.setFromUnitVectors(
+      this.thirdPersonMuzzleForwardScratch.set(0, 0, -1),
+      direction,
+    );
+    this.thirdPersonMuzzleSocket.updateMatrixWorld(true);
+    return this.thirdPersonMuzzleSocket;
+  }
+
   private shotDirectionFromMuzzle(origin: THREE.Vector3, range: number): THREE.Vector3 {
     const eye = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0));
     const view = this.viewDirection();
     const cameraEnd = eye.clone().addScaledVector(view, range);
-    const aimPoint = this.arena.segmentHit(eye, cameraEnd) ?? cameraEnd;
+    // Arena hit results use retained vectors. Clone the hit point before
+    // deriving a direction so a later arena query cannot overwrite a live
+    // projectile/grenade velocity that was built from this return value.
+    const aimPoint = this.arena.segmentHit(eye, cameraEnd)?.clone() ?? cameraEnd;
     const direction = aimPoint.sub(origin);
     return direction.lengthSq() > 1e-6 ? direction.normalize() : view;
   }
@@ -2127,19 +3251,23 @@ export class Game {
     weaponId?: WeaponId,
   ): {
     first: { bot: Bot; point: THREE.Vector3; t: number; zone: 'body' | 'head' } | null;
+    drone: DroneRayHit | null;
+    firstTarget: 'bot' | 'drone' | null;
     worldHit: THREE.Vector3 | null;
     worldNormal: THREE.Vector3 | null;
     worldSurface: ArenaSurface | null;
     end: THREE.Vector3;
+    combatEnd: THREE.Vector3;
   } {
     const rangeEnd = origin.clone().addScaledVector(direction, range);
     const surfaceHit = this.arena.segmentHitDetails(origin, rangeEnd);
     const worldHit = surfaceHit?.point ?? null;
     const worldDistance = surfaceHit?.distance ?? range;
     const ray = new THREE.Ray(origin, direction);
+    const droneHit = this.droneSwarm.raycast(origin, direction, worldDistance);
     const hits: Array<{ bot: Bot; t: number; point: THREE.Vector3; zone: 'body' | 'head' }> = [];
     for (const bot of this.bots) {
-      if (!bot.alive) continue;
+      if (!bot.alive || this.fighterForPilot(bot.id)) continue;
       const bodyHit = ray.intersectSphere(
         new THREE.Sphere(bot.group.position.clone().add(new THREE.Vector3(0, 0.88, 0)), 0.66),
         new THREE.Vector3(),
@@ -2156,21 +3284,41 @@ export class Game {
       hits.push({ bot, t, point: zone === 'head' ? headHit! : bodyHit!, zone });
     }
     hits.sort((a, b) => a.t - b.t);
+    const firstBot = hits[0] ?? null;
+    const firstTarget = droneHit && (!firstBot || droneHit.distance < firstBot.t)
+      ? 'drone'
+      : firstBot
+        ? 'bot'
+        : null;
     if (damage > 0) {
-      const targets = piercing ? hits : hits.slice(0, 1);
+      const targets = piercing ? hits : firstTarget === 'bot' ? hits.slice(0, 1) : [];
       for (const hit of targets) {
         const criticalMultiplier = hit.zone === 'head'
           ? weaponId === 'sniper' ? 1.75 : weaponId === 'rail' ? 1.35 : weaponId === 'machine' ? 1.25 : 1.15
           : 1;
         this.applyDamageToBot(hit.bot, damage * criticalMultiplier, 'player', weaponName);
       }
+      if (droneHit && (piercing || firstTarget === 'drone')) {
+        this.applyDamageToDrone(droneHit.drone, damage, 'player', weaponName);
+      }
     }
+    const end = worldHit ?? rangeEnd;
+    const combatEnd = piercing
+      ? end
+      : firstTarget === 'drone' && droneHit
+        ? droneHit.point
+        : firstTarget === 'bot' && firstBot
+          ? firstBot.point
+          : end;
     return {
-      first: hits[0] ?? null,
+      first: piercing ? firstBot : firstTarget === 'bot' ? firstBot : null,
+      drone: droneHit,
+      firstTarget,
       worldHit,
       worldNormal: surfaceHit?.normal ?? null,
       worldSurface: surfaceHit?.surface ?? null,
-      end: worldHit ?? rangeEnd,
+      end,
+      combatEnd,
     };
   }
 
@@ -2196,7 +3344,11 @@ export class Game {
     const projectileWeapon = definition.id === 'rocket' || definition.id === 'plasma' || definition.id === 'disc'
       ? definition.id
       : 'plasma';
-    const root = this.weaponVfx.createProjectile(projectileWeapon, definition.color);
+    const root = this.weaponVfx.createProjectile(
+      projectileWeapon,
+      definition.color,
+      owner !== 'player',
+    );
     root.position.copy(origin);
     if (owner === 'player') this.lastProjectileOrigin.copy(root.position);
     this.weaponVfx.orientProjectile(root, direction, this.elapsed, definition.id);
@@ -2306,15 +3458,31 @@ export class Game {
       grenade.velocity.z += this.weatherSnapshot.modifiers.wind.z * delta;
       const distance = grenade.velocity.length() * delta;
       grenade.trailDistance += distance;
-      const steps = Math.max(1, Math.ceil(distance / 0.14));
+      // Keep each advance shorter than the grenade radius, then sweep the
+      // center and all six sphere extrema. A center-only ray can miss thin or
+      // oblique map faces and leave the next substep starting behind them.
+      const steps = Math.max(1, Math.ceil(distance / (GRENADE.radius * 0.72)));
       const step = delta / steps;
       for (let substep = 0; substep < steps; substep += 1) {
         grenade.velocity.y -= GRENADE.gravity * step;
         const previousPosition = grenade.root.position.clone();
         grenade.root.position.addScaledVector(grenade.velocity, step);
-        const surfaceHit = this.arena.segmentHitDetails(previousPosition, grenade.root.position);
+        const surfaceHit = this.sweepGrenadeAgainstArena(previousPosition, grenade.root.position);
         if (!surfaceHit) continue;
-        grenade.root.position.copy(surfaceHit.point).addScaledVector(surfaceHit.normal, GRENADE.radius * 0.72);
+        const travelDistance = previousPosition.distanceTo(grenade.root.position);
+        const hitFraction = travelDistance > 1e-7
+          ? THREE.MathUtils.clamp(surfaceHit.distance / travelDistance, 0, 1)
+          : 0;
+        this.grenadeSweepCenter.lerpVectors(previousPosition, grenade.root.position, hitFraction);
+        const separation = this.grenadeSweepSeparation
+          .copy(this.grenadeSweepCenter)
+          .sub(surfaceHit.point)
+          .dot(surfaceHit.normal);
+        grenade.root.position.copy(this.grenadeSweepCenter).addScaledVector(
+          surfaceHit.normal,
+          Math.max(0.004, GRENADE.radius + 0.004 - separation),
+        );
+        const impactSpeed = grenade.velocity.length();
         const normalSpeed = grenade.velocity.dot(surfaceHit.normal);
         if (normalSpeed < -2.5) {
           this.audio.surfaceImpact(
@@ -2329,6 +3497,10 @@ export class Game {
         if (normalSpeed < 0) {
           grenade.velocity.addScaledVector(surfaceHit.normal, -normalSpeed * (1 + GRENADE.restitution));
           grenade.velocity.multiplyScalar(GRENADE.tangentialDamping);
+          const reboundSpeed = grenade.velocity.length();
+          if (reboundSpeed > impactSpeed && reboundSpeed > 1e-7) {
+            grenade.velocity.multiplyScalar(impactSpeed / reboundSpeed);
+          }
           grenade.bounces += 1;
           if (surfaceHit.normal.y > 0.55 && grenade.velocity.lengthSq() < 3.2) {
             grenade.velocity.y = 0;
@@ -2342,6 +3514,24 @@ export class Game {
         this.explodeGrenade(index);
       }
     }
+  }
+
+  private sweepGrenadeAgainstArena(start: THREE.Vector3, end: THREE.Vector3): SurfaceHit | null {
+    let bestDistance = Number.POSITIVE_INFINITY;
+    let found = false;
+    for (const offset of this.grenadeSweepOffsets) {
+      this.grenadeSweepStart.copy(start).add(offset);
+      this.grenadeSweepEnd.copy(end).add(offset);
+      const hit = this.arena.segmentHitDetails(this.grenadeSweepStart, this.grenadeSweepEnd);
+      if (!hit || hit.distance >= bestDistance) continue;
+      found = true;
+      bestDistance = hit.distance;
+      this.grenadeSweepResult.point.copy(hit.point);
+      this.grenadeSweepResult.normal.copy(hit.normal).normalize();
+      this.grenadeSweepResult.distance = hit.distance;
+      this.grenadeSweepResult.surface = hit.surface;
+    }
+    return found ? this.grenadeSweepResult : null;
   }
 
   private explodeGrenade(index: number): void {
@@ -2361,6 +3551,18 @@ export class Game {
       const impulse = target.sub(position).normalize().multiplyScalar(falloff * 7.5);
       bot.velocity.add(impulse);
       bot.velocity.y = Math.max(bot.velocity.y, impulse.y + 2.2);
+    }
+    for (const drone of this.droneSwarm.drones) {
+      if (!drone.alive) continue;
+      const distance = drone.position.distanceTo(position);
+      if (distance >= GRENADE.splash || !this.explosionHasLineOfSight(position, drone.position)) continue;
+      const falloff = THREE.MathUtils.clamp(1 - distance / GRENADE.splash, 0, 1);
+      this.applyDamageToDrone(
+        drone,
+        GRENADE.damage * (falloff * 0.3 + falloff * falloff * 0.7),
+        grenade.owner,
+        'FRAG GRENADE',
+      );
     }
     const playerCenter = this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0));
     const playerDistance = playerCenter.distanceTo(position);
@@ -2435,8 +3637,64 @@ export class Game {
           remove = true;
           break;
         }
+        const droneHit = this.droneSwarm.raycastSegment(
+          previousPosition,
+          projectile.root.position,
+          projectile.weapon === 'rocket' ? 0.18 : 0.08,
+        );
+        if (droneHit) {
+          projectile.root.position.copy(droneHit.point);
+          this.applyDamageToDrone(
+            droneHit.drone,
+            projectile.damage,
+            projectile.owner,
+            this.weapon(projectile.weapon).name,
+          );
+          if (projectile.splash > 0 || projectile.weapon === 'disc') {
+            this.explodeProjectile(
+              projectile,
+              undefined,
+              false,
+              false,
+              undefined,
+              undefined,
+              undefined,
+              droneHit.drone,
+            );
+          } else {
+            this.weaponVfx.impact(projectile.root.position, this.weapon(projectile.weapon).color, projectile.weapon);
+            if (projectile.weapon === 'rocket' || projectile.weapon === 'plasma') {
+              this.audio.projectileImpact(projectile.weapon, projectile.root.position, this.rng() - 0.5);
+            }
+          }
+          remove = true;
+          break;
+        }
+        for (const fighter of this.fighters) {
+          if (fighter.destroyed || fighter.pilot === projectile.owner) continue;
+          const hitRadius = Math.max(1.4, fighter.visual.radius * 0.72);
+          if (projectile.root.position.distanceToSquared(fighter.flight.position) >= hitRadius * hitRadius) continue;
+          this.damageFighter(
+            fighter,
+            projectile.damage,
+            projectile.owner,
+            this.weapon(projectile.weapon).name,
+          );
+          if (projectile.splash > 0 || projectile.weapon === 'disc') {
+            this.explodeProjectile(projectile, undefined, false, false, undefined, undefined, fighter);
+          } else {
+            this.weaponVfx.impact(projectile.root.position, this.weapon(projectile.weapon).color, projectile.weapon);
+            if (projectile.weapon === 'rocket' || projectile.weapon === 'plasma') {
+              this.audio.projectileImpact(projectile.weapon, projectile.root.position, this.rng() - 0.5);
+            }
+          }
+          remove = true;
+          break;
+        }
+        if (remove) break;
         for (const bot of this.bots) {
-          if (!bot.alive || (projectile.owner === bot.id && (projectile.weapon !== 'disc' || projectile.ownerSafeTime > 0))) continue;
+          if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)
+            || (projectile.owner === bot.id && (projectile.weapon !== 'disc' || projectile.ownerSafeTime > 0))) continue;
           const botCenter = bot.group.position.clone().add(new THREE.Vector3(0, 0.9, 0));
           if (projectile.root.position.distanceTo(botCenter) >= 0.88) continue;
           this.applyDamageToBot(bot, projectile.damage, projectile.owner, this.weapon(projectile.weapon).name);
@@ -2453,7 +3711,8 @@ export class Game {
           remove = true;
           break;
         }
-        if (!remove && (projectile.owner !== 'player' || (projectile.weapon === 'disc' && projectile.ownerSafeTime <= 0)) && this.mode === 'running'
+        if (!remove && !this.playerFighter
+          && (projectile.owner !== 'player' || (projectile.weapon === 'disc' && projectile.ownerSafeTime <= 0)) && this.mode === 'running'
           && projectile.root.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0))) < 0.9) {
           const impactSource = projectile.root.position.clone().addScaledVector(projectile.velocity.clone().normalize(), -1.5);
           this.damagePlayer(
@@ -2503,6 +3762,8 @@ export class Game {
     worldImpact = false,
     surfaceNormal?: THREE.Vector3,
     surface?: 'grass' | 'soil' | 'rock' | 'metal' | 'concrete' | 'water',
+    directlyHitFighter?: FighterRuntime,
+    directlyHitDrone?: CombatDroneRuntime,
   ): void {
     const position = projectile.root.position.clone();
     const color = this.weapon(projectile.weapon).color;
@@ -2518,7 +3779,8 @@ export class Game {
     }
     if (projectile.splash <= 0) return;
     for (const bot of this.bots) {
-      if (!bot.alive || bot === directlyHit || projectile.owner === bot.id) continue;
+      if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)
+        || bot === directlyHit || projectile.owner === bot.id) continue;
       const target = bot.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
       const distance = target.distanceTo(position);
       if (distance < projectile.splash && this.explosionHasLineOfSight(position, target)) {
@@ -2532,9 +3794,33 @@ export class Game {
         }
       }
     }
+    for (const fighter of this.fighters) {
+      if (fighter.destroyed || fighter === directlyHitFighter || fighter.pilot === projectile.owner) continue;
+      const distance = fighter.flight.position.distanceTo(position);
+      if (distance >= projectile.splash || !this.explosionHasLineOfSight(position, fighter.flight.position)) continue;
+      const falloff = 1 - distance / projectile.splash;
+      this.damageFighter(
+        fighter,
+        projectile.damage * 0.78 * (falloff * 0.3 + falloff * falloff * 0.7),
+        projectile.owner,
+        `${this.weapon(projectile.weapon).name} SPLASH`,
+      );
+    }
+    for (const drone of this.droneSwarm.drones) {
+      if (!drone.alive || drone === directlyHitDrone || drone.position.distanceToSquared(position) >= projectile.splash * projectile.splash) continue;
+      const distance = drone.position.distanceTo(position);
+      if (!this.explosionHasLineOfSight(position, drone.position)) continue;
+      const falloff = 1 - distance / projectile.splash;
+      this.applyDamageToDrone(
+        drone,
+        projectile.damage * 0.78 * (falloff * 0.3 + falloff * falloff * 0.7),
+        projectile.owner,
+        `${this.weapon(projectile.weapon).name} SPLASH`,
+      );
+    }
     const playerCenter = this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0));
     const playerDistance = playerCenter.distanceTo(position);
-    if (!directlyHitPlayer && playerDistance < projectile.splash && this.mode === 'running' && this.explosionHasLineOfSight(position, playerCenter)) {
+    if (!this.playerFighter && !directlyHitPlayer && playerDistance < projectile.splash && this.mode === 'running' && this.explosionHasLineOfSight(position, playerCenter)) {
       const selfRocketJump = projectile.owner === 'player' && projectile.weapon === 'rocket';
       if (!selfRocketJump) {
         const selfScale = projectile.owner === 'player' ? 0.55 : 0.78;
@@ -2595,7 +3881,39 @@ export class Game {
     return this.arena.hasLineOfSight(origin.clone().addScaledVector(direction, 0.08), target, 0.2);
   }
 
-  private applyDamageToBot(bot: Bot, damage: number, owner: Owner, weaponName: string): void {
+  private applyDamageToDrone(
+    drone: CombatDroneRuntime,
+    damage: number,
+    owner: Owner,
+    weaponName: string,
+  ): boolean {
+    const result = this.droneSwarm.damage(drone, damage);
+    if (!result.applied) return false;
+    this.spawnBurst(result.position, result.destroyed ? 0xffb33c : 0xff3155, result.destroyed ? 28 : 4);
+    if (owner === 'player') {
+      this.playerHits += 1;
+      this.hud.hitMarker(result.destroyed);
+      this.audio.hit(result.destroyed ? 1.4 : 0.75);
+    }
+    if (!result.destroyed) return false;
+    this.weaponVfx.rocketExplosion(result.position, 0xff7a31);
+    this.audio.projectileImpact('rocket', result.position, this.rng() - 0.5);
+    this.fovPunch = Math.max(this.fovPunch, 3.5);
+    this.trauma = Math.min(1, this.trauma + 0.22);
+    if (owner === 'player') {
+      this.score += 1;
+      this.hud.message(`HOSTILE ${drone.id.toUpperCase()} DESTROYED · ${weaponName.toUpperCase()}`);
+    } else {
+      const bot = this.bots[owner];
+      if (bot) {
+        bot.score += 1;
+        this.hud.message(`${bot.displayName} DESTROYED ${drone.id.toUpperCase()} · ${weaponName.toUpperCase()}`);
+      }
+    }
+    return true;
+  }
+
+  private applyDamageToBot(bot: Bot, damage: number, owner: DamageSource, weaponName: string): void {
     const coreDenial = this.coreActive && this.coreOwner === bot.id && this.coreProgress >= 0.25;
     const eliminationDistance = this.playerPosition.distanceTo(bot.group.position);
     const eliminationSpeed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
@@ -2621,12 +3939,14 @@ export class Game {
         speed: eliminationSpeed,
       });
       this.hud.message(`YOU FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`);
-    } else {
+    } else if (typeof owner === 'number') {
       const shooter = this.bots[owner];
       if (shooter) {
         shooter.score += 1;
         this.hud.message(`${shooter.displayName} FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`);
       }
+    } else {
+      this.hud.message(`HOSTILE DRONE FRAGGED ${bot.displayName} · LASER`);
     }
     this.fovPunch = Math.max(this.fovPunch, 4);
     this.trauma = Math.min(1, this.trauma + 0.3);
@@ -2660,14 +3980,16 @@ export class Game {
     }
   }
 
-  private damagePlayer(amount: number, owner: Owner, cause: string, hitOrigin?: THREE.Vector3): void {
+  private damagePlayer(amount: number, owner: DamageSource, cause: string, hitOrigin?: THREE.Vector3): void {
     if (this.mode !== 'running') return;
     const armored = this.armor > 0;
     const absorbed = Math.min(this.armor, amount * 0.66);
     this.armor -= absorbed;
     this.health -= amount - absorbed;
-    this.lastDamageDirection = this.resolveDamageDirection(owner, hitOrigin);
-    this.hud.damage(this.lastDamageDirection);
+    const damageRead = this.resolveDamageDirection(owner, hitOrigin);
+    this.lastDamageDirection = damageRead.label;
+    this.lastDamageBearing = damageRead.bearing;
+    this.hud.damage(damageRead.label, damageRead.bearing, Math.min(1, amount / 70));
     this.audio.damage(armored);
     this.audio.grunt(undefined, Math.min(1.35, amount / 42), 'player');
     this.trauma = Math.min(1, this.trauma + Math.min(0.55, amount * 0.009));
@@ -2678,25 +4000,30 @@ export class Game {
       this.respawnTimer = 1.6;
       this.respawnCause = cause;
       if (owner === 'player') this.score = Math.max(-5, this.score - 1);
-      else this.bots[owner].score += 1;
+      else if (typeof owner === 'number') this.bots[owner].score += 1;
       this.audio.death();
-      this.hud.message(owner === 'player' ? `SELF-DESTRUCT · ${cause}` : `${this.bots[owner].displayName} FRAGGED YOU · ${cause}`);
+      this.hud.message(owner === 'player'
+        ? `SELF-DESTRUCT · ${cause}`
+        : owner === 'drone'
+          ? `HOSTILE DRONE FRAGGED YOU · ${cause}`
+          : `${this.bots[owner].displayName} FRAGGED YOU · ${cause}`);
     }
   }
 
-  private resolveDamageDirection(owner: Owner, hitOrigin?: THREE.Vector3): string {
-    if (owner === 'player') return 'self';
-    const source = hitOrigin ?? this.bots[owner]?.group.position;
-    if (!source) return 'front';
+  private resolveDamageDirection(owner: DamageSource, hitOrigin?: THREE.Vector3): { label: string; bearing: number } {
+    if (owner === 'player') return { label: 'self', bearing: 0 };
+    const source = hitOrigin ?? (typeof owner === 'number' ? this.bots[owner]?.group.position : undefined);
+    if (!source) return { label: 'front', bearing: 0 };
     const incoming = source.clone().sub(this.playerPosition).setY(0);
-    if (incoming.lengthSq() < 0.001) return 'front';
+    if (incoming.lengthSq() < 0.001) return { label: 'front', bearing: 0 };
     incoming.normalize();
     const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     const forwardDot = incoming.dot(forward);
     const rightDot = incoming.dot(right);
-    if (Math.abs(rightDot) > Math.abs(forwardDot)) return rightDot > 0 ? 'right' : 'left';
-    return forwardDot > 0 ? 'front' : 'back';
+    const bearing = Math.atan2(rightDot, forwardDot);
+    if (Math.abs(rightDot) > Math.abs(forwardDot)) return { label: rightDot > 0 ? 'right' : 'left', bearing };
+    return { label: forwardDot > 0 ? 'front' : 'back', bearing };
   }
 
   private updatePickups(delta: number): void {
@@ -2929,14 +4256,79 @@ export class Game {
       : WEAPON_OBSTRUCTION_PROBE_LENGTH;
   }
 
+  private updateThirdPersonWeaponPose(direction: THREE.Vector3): void {
+    const visual = this.thirdPersonWeaponVisual;
+    const visible = this.isThirdPerson()
+      && !this.playerFighter
+      && !this.weaponInspectionMode
+      && !this.screenshotLookTargetActive
+      && Boolean(visual);
+    this.thirdPersonWeaponModel.visible = visible;
+    if (!visible || !visual) return;
+
+    // Seat the receiver between the character's hands and the screen-center
+    // reticle. The camera is on the same (right) shoulder, so the weapon stays
+    // visible without covering the target or floating across the torso.
+    const forward = this.thirdPersonMuzzleForwardScratch
+      .set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    const right = this.thirdPersonMuzzleRightScratch
+      .set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const isShoulderedLongshot = visual.weapon === 'sniper';
+    this.thirdPersonWeaponModel.position.copy(this.playerPosition)
+      .addScaledVector(forward, isShoulderedLongshot ? 0.08 : 0.18)
+      .addScaledVector(right, isShoulderedLongshot ? 0.12 : 0.26);
+    this.thirdPersonWeaponModel.position.y += isShoulderedLongshot ? 1.35 : 1.24;
+    this.thirdPersonWeaponModel.quaternion.setFromUnitVectors(THIRD_PERSON_WEAPON_FORWARD, direction);
+    this.thirdPersonWeaponModel.scale.setScalar(THIRD_PERSON_WEAPON_SCALE[visual.weapon]);
+    this.thirdPersonWeaponModel.updateMatrixWorld(true);
+  }
+
+  private updateFighterCamera(delta: number, fighter: FighterRuntime): void {
+    const forward = this.fighterForwardScratch.set(0, 0, -1).applyQuaternion(fighter.flight.orientation);
+    const up = this.fighterUpScratch.set(0, 1, 0).applyQuaternion(fighter.flight.orientation);
+    // The player occupies the cockpit: never spring-arm or lag this camera
+    // behind the vehicle, because even a few frames of separation exposes the
+    // full craft and turns piloting into a third-person chase view. The seat is
+    // just below the canopy crown and slightly ahead of the mass center.
+    const seat = this.fighterCameraDesiredScratch.copy(fighter.flight.position)
+      .addScaledVector(forward, fighter.visual.dimensions.z * 0.075 * fighter.visual.visibleScaleCorrection)
+      .addScaledVector(up, fighter.visual.dimensions.y * 0.39 * fighter.visual.visibleScaleCorrection);
+    this.camera.position.copy(seat);
+    const look = this.fighterCameraLookScratch.copy(seat)
+      .addScaledVector(this.viewDirection(this.fighterAimScratch), 38);
+    this.camera.up.copy(up);
+    this.camera.lookAt(look);
+    const speed = fighter.flight.velocity.length();
+    const targetFov = THREE.MathUtils.clamp(74 + speed * 0.12 + this.fovPunch, 74, 88);
+    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, 1 - Math.exp(-Math.max(delta, 1 / 120) * 8));
+    this.camera.updateProjectionMatrix();
+    this.weaponModel.visible = false;
+    this.thirdPersonWeaponModel.visible = false;
+    this.playerAvatar.root.visible = false;
+    this.playerJetpack.root.visible = false;
+    this.weaponVfx.updateGrapple(this.camera.position, this.grappleAnchor, false);
+    this.forward.copy(forward);
+    this.fovPunch = Math.max(0, this.fovPunch - delta * 12);
+  }
+
   private updateCamera(delta: number): void {
+    if (this.playerFighter) {
+      this.updateFighterCamera(delta, this.playerFighter);
+      return;
+    }
+    this.camera.up.set(0, 1, 0);
     const direction = this.viewDirection(this.cameraDirectionScratch);
     // Reassert this every frame because weapon rebuilds and deterministic QA
     // state changes may occur after the view toggle. The first-person model
     // must never cover the local avatar in third-person flight.
     this.weaponModel.visible = !this.isThirdPerson() && !this.screenshotLookTargetActive;
+    this.thirdPersonWeaponModel.visible = this.isThirdPerson()
+      && !this.screenshotLookTargetActive
+      && Boolean(this.thirdPersonWeaponVisual);
+    this.playerAvatar.setVisible(this.isThirdPerson() && !this.screenshotLookTargetActive);
     this.playerAvatar.root.position.copy(this.playerPosition);
     this.playerAvatar.setPose(this.yaw, this.moveInput.x);
+    this.updateThirdPersonWeaponPose(direction);
     const eye = this.cameraEyeScratch.copy(this.playerPosition);
     eye.y += PLAYER_EYE;
     this.thirdPersonAnchorScratch.copy(this.playerPosition);
@@ -3054,7 +4446,7 @@ export class Game {
       // Look through the reticle into the arena. The shoulder offset keeps the
       // avatar low-left while the center of the screen stays on the aim line.
       this.thirdPersonAimScratch.copy(this.thirdPersonAnchorScratch)
-        .addScaledVector(direction, 4.8);
+        .addScaledVector(direction, 7.5);
       this.camera.lookAt(this.thirdPersonAimScratch);
     }
 
@@ -3213,6 +4605,15 @@ export class Game {
       this.weaponMuzzleOccluded = false;
     }
     if (this.weaponVisual) updateWeaponViewModel(this.weaponVisual, this.elapsed, this.recoil, this.laserHeat, this.reducedMotion);
+    if (this.thirdPersonWeaponVisual) {
+      updateWeaponViewModel(
+        this.thirdPersonWeaponVisual,
+        this.elapsed,
+        this.recoil,
+        this.laserHeat,
+        this.reducedMotion,
+      );
+    }
     this.forward.copy(direction);
     const grappleOrigin = this.grappleActive
       ? this.isThirdPerson()
@@ -3306,6 +4707,76 @@ export class Game {
         detail: this.weatherSnapshot.label,
       },
     });
+    const activeFighter = this.playerFighter;
+    const fighterForward = activeFighter
+      ? this.fighterForwardScratch.set(0, 0, -1).applyQuaternion(activeFighter.flight.orientation)
+      : null;
+    const fighterFloor = activeFighter
+      ? this.arena.floorHeightAt(
+        activeFighter.flight.position.x,
+        activeFighter.flight.position.z,
+        activeFighter.flight.position.y,
+      )
+      : null;
+    const fighterFlightMode = activeFighter?.flight.overheated
+      ? 'DRIVE OVERHEAT'
+      : activeFighter?.flight.boostActive
+        ? 'VECTOR BOOST'
+        : activeFighter?.flight.afterburnerActive
+          ? 'AFTERBURNER'
+          : activeFighter?.flight.grounded
+            ? 'PAD LOCKED'
+            : activeFighter?.flight.hovering
+              ? 'VTOL HOLD'
+              : 'COMBAT FLIGHT';
+    let promptFighter: FighterRuntime | null = null;
+    let promptDistanceSq = (FIGHTER_BOARD_RANGE + 1.5) ** 2;
+    for (const fighter of this.fighters) {
+      if (fighter.pilot !== null && fighter.pilot !== 'player') continue;
+      const distanceSq = fighter.flight.position.distanceToSquared(this.playerPosition);
+      if (distanceSq >= promptDistanceSq) continue;
+      promptDistanceSq = distanceSq;
+      promptFighter = fighter;
+    }
+    const promptTitle = promptFighter?.destroyed
+      ? 'STAR SPARROW REBUILDING'
+      : promptFighter
+        ? `R // BOARD ${promptFighter.pad.label}`
+        : '';
+    const promptDetail = promptFighter?.destroyed
+      ? `${promptFighter.respawnSeconds.toFixed(1)}s until pad-ready`
+      : promptFighter
+        ? 'Plasma · missiles · afterburner · eject anytime'
+        : '';
+    this.hud.fighter({
+      active: Boolean(activeFighter),
+      prompt: Boolean(promptFighter && !activeFighter),
+      promptTitle,
+      promptDetail,
+      hull: activeFighter?.hull,
+      hullMax: FIGHTER_HULL_MAX,
+      shield: activeFighter?.shield,
+      shieldMax: FIGHTER_SHIELD_MAX,
+      drive: activeFighter?.flight.afterburnerEnergy,
+      heat: activeFighter?.flight.heat,
+      overheated: activeFighter?.flight.overheated,
+      throttle: activeFighter?.flight.controlThrottle,
+      speed: activeFighter ? activeFighter.flight.velocity.length() * 3.6 : 0,
+      altitude: activeFighter
+        ? activeFighter.flight.position.y - (fighterFloor ?? 0)
+        : 0,
+      verticalSpeed: activeFighter?.flight.velocity.y,
+      heading: fighterForward
+        ? THREE.MathUtils.radToDeg(Math.atan2(-fighterForward.x, -fighterForward.z))
+        : 0,
+      pitch: fighterForward ? Math.asin(THREE.MathUtils.clamp(fighterForward.y, -1, 1)) : 0,
+      primaryCooldown: activeFighter?.primaryCooldown,
+      missileCooldown: activeFighter?.missileCooldown,
+      flightMode: fighterFlightMode,
+      locked: false,
+      respawnSeconds: promptFighter?.respawnSeconds,
+    });
+    this.vehicleButton.textContent = activeFighter ? 'EJECT' : 'BOARD';
     this.hud.setRespawn(this.mode === 'respawning' ? this.respawnTimer : 0, this.respawnCause);
   }
 
@@ -3563,14 +5034,15 @@ export class Game {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    // QuickSense's mobile bloom value was intentionally subtle, yet the pass
-    // still paid for its full downsample/blur/composite pyramid. Preserve the
-    // more important ink/grade pass and spend that GPU time on stable frames.
-    if (!(quickSense && this.mobileQuality)) {
+    // QuickSense's bloom was intentionally subtle, yet UnrealBloom still runs
+    // a full downsample/blur/composite pyramid. Its authored emissive materials,
+    // soft smoke, and restrained grade already provide the highlights; keep
+    // those and spend the saved GPU synchronization budget on stable combat.
+    if (!quickSense) {
       composer.addPass(new UnrealBloomPass(
         new THREE.Vector2(1, 1),
-        quickSense ? 0.14 : (this.mobileQuality ? 0.12 : 0.28),
-        quickSense ? 0.24 : 0.34,
+        this.mobileQuality ? 0.12 : 0.28,
+        0.34,
         1.08,
       ));
     }
@@ -4019,6 +5491,7 @@ export class Game {
       this.inspectionWeaponVisual = undefined;
     }
     this.weaponModel.clear();
+    this.thirdPersonWeaponModel.clear();
     const definition = WEAPONS[this.selectedWeapon];
     if (this.weaponInspectionMode) {
       this.weaponVisual = createWeaponViewModel(definition, false, false);
@@ -4040,6 +5513,71 @@ export class Game {
     this.weaponModel.scale.setScalar(1);
     this.weaponModel.position.set(0.3, -0.54, -0.5);
     this.weaponModel.rotation.set(0, 0, 0);
+
+    if (this.weaponInspectionMode) {
+      this.thirdPersonWeaponVisual = undefined;
+      this.thirdPersonWeaponModel.visible = false;
+      return;
+    }
+    this.thirdPersonWeaponVisual = this.thirdPersonWeaponCache.get(definition.id);
+    if (!this.thirdPersonWeaponVisual) {
+      this.thirdPersonWeaponVisual = this.createThirdPersonWeaponClone(this.weaponVisual);
+      this.thirdPersonWeaponCache.set(definition.id, this.thirdPersonWeaponVisual);
+    }
+    this.thirdPersonWeaponModel.add(this.thirdPersonWeaponVisual.root);
+    this.thirdPersonWeaponModel.scale.setScalar(THIRD_PERSON_WEAPON_SCALE[definition.id]);
+    this.thirdPersonWeaponModel.visible = this.isThirdPerson();
+  }
+
+  private createThirdPersonWeaponClone(source: WeaponViewModel): WeaponViewModel {
+    // Clone the already-batched combat frame so third person gets the exact
+    // equipped weapon without rebuilding geometry or duplicating its 256px
+    // wear-texture set. Meshes share immutable GPU resources; transforms and
+    // animation state remain independent.
+    const root = source.root.clone(true);
+    root.name = `${source.weapon}-third-person-world-model`;
+    root.getObjectByName('first-person-armature')?.removeFromParent();
+    const animationNodes = new Map<string, THREE.Object3D>();
+    root.traverse((object) => {
+      if (object.name) animationNodes.set(object.name, object);
+      object.userData.weaponAnimationBase = {
+        position: object.position.clone(),
+        rotation: object.rotation.clone(),
+        scale: object.scale.clone(),
+      };
+    });
+    const muzzleSocket = root.getObjectByName(`${source.weapon}-muzzle-socket`);
+    if (!muzzleSocket) throw new Error(`Missing third-person muzzle socket for ${source.weapon}`);
+    const mapAnimatedNodes = (nodes: THREE.Object3D[]): THREE.Object3D[] => nodes
+      .map((node) => animationNodes.get(node.name))
+      .filter((node): node is THREE.Object3D => Boolean(node));
+    return {
+      root,
+      muzzleSocket,
+      animatedRotors: mapAnimatedNodes(source.animatedRotors),
+      animatedSlides: mapAnimatedNodes(source.animatedSlides),
+      animationNodes,
+      animationState: {
+        lastElapsed: Number.NaN,
+        lastRecoil: 0,
+        shotAge: Number.POSITIVE_INFINITY,
+        shotStrength: 0,
+        rotorAngle: 0,
+        rotorVelocity: 0,
+      },
+      // Materials are shared with the active first-person cache, whose update
+      // already owns emissive pulses. The world clone only needs rigid-node
+      // animation and therefore must not write the shared material twice.
+      pulseMaterials: [],
+      pulseBaseIntensities: [],
+      battleWearMaterialCount: source.battleWearMaterialCount,
+      battleWearTextureCount: source.battleWearTextureCount,
+      assetSource: source.assetSource,
+      meshCount: source.meshCount,
+      renderMeshCount: source.renderMeshCount,
+      triangleCount: source.triangleCount,
+      weapon: source.weapon,
+    };
   }
 
   private spawnBurst(position: THREE.Vector3, color: number, count: number): void {
@@ -4522,6 +6060,46 @@ export class Game {
           this.updateCamera(0);
           this.renderer.shadowMap.autoUpdate = false;
           this.renderer.shadowMap.needsUpdate = false;
+        } else if (name === 'drone-encounter') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.health = 100;
+          this.armor = 50;
+          const spawn = this.arena.spawnPoints[0];
+          this.playerPosition.copy(spawn);
+          const supportY = this.arena.floorHeightAt(spawn.x, spawn.z, spawn.y + 4);
+          if (supportY !== null) this.playerPosition.y = supportY;
+          this.playerVelocity.set(0, 0, 0);
+          const eye = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0));
+          const towardCenter = this.arena.corePosition.clone().sub(eye).setY(0);
+          if (towardCenter.lengthSq() < 0.01) towardCenter.set(0, 0, -1);
+          else towardCenter.normalize();
+          let encounterCenter = eye.clone().addScaledVector(towardCenter, 25).add(new THREE.Vector3(0, 6, 0));
+          for (let attempt = 0; attempt < 8; attempt += 1) {
+            const direction = towardCenter.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), attempt * Math.PI * 0.25);
+            const candidate = eye.clone().addScaledVector(direction, 25).add(new THREE.Vector3(0, 6, 0));
+            if (!this.arena.hasLineOfSight(eye, candidate, 0.3)) continue;
+            encounterCenter = candidate;
+            break;
+          }
+          this.droneSwarm.resetForQa(encounterCenter);
+          const firstDrone = this.droneSwarm.drones[0];
+          const view = firstDrone.position.clone().sub(eye).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.selectedWeapon = WEAPONS.findIndex((weapon) => weapon.id === 'machine');
+          this.weaponCooldown = 0;
+          this.ammo.set('machine', this.weapon('machine').ammo);
+          this.buildWeaponModel();
+          this.bots.forEach((bot, index) => {
+            const position = this.playerPosition.clone().add(new THREE.Vector3((index - 1) * 3, 0, 4 + index * 2));
+            bot.respawn(position, false);
+            bot.movementLocked = false;
+          });
+          const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
+          this.grounded = contact.grounded;
+          this.terrainNormal.copy(contact.contactNormal);
         } else if (name === 'combat') {
           this.mode = 'running';
           this.audio.setPaused(false);
@@ -4628,6 +6206,120 @@ export class Game {
           this.pitch = Math.asin(view.y);
           this.grounded = false;
           this.weaponModel.visible = false;
+        } else if (name === 'quicksense-fighter-pads') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          if (this.playerFighter) this.playerFighter = null;
+          document.body.dataset.pilotingFighter = 'false';
+          this.vehicleButton.textContent = 'BOARD';
+          for (const fighter of this.fighters) resetFighterAtPad(fighter);
+          for (const bot of this.bots) {
+            bot.group.visible = true;
+            bot.movementLocked = true;
+          }
+          this.screenshotCameraFov = 66;
+          this.playerPosition.set(84, 102, -106);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(0, 42, -6);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.weaponModel.visible = false;
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
+        } else if (name === 'quicksense-fighter-active') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          for (const fighter of this.fighters) resetFighterAtPad(fighter);
+          const fighter = this.fighters[2];
+          if (!fighter) throw new Error('QuickSense fighter state is unavailable');
+          const orientation = this.fighterQuaternionScratch.setFromEuler(new THREE.Euler(0, 0, 0));
+          resetFighterFlightState(fighter.flight, new THREE.Vector3(0, 94, 42), orientation);
+          fighter.flight.velocity.set(0, 0, -34);
+          fighter.pilot = 'player';
+          fighter.visual.root.visible = false;
+          this.playerFighter = fighter;
+          this.playerPosition.copy(fighter.flight.position);
+          this.playerVelocity.copy(fighter.flight.velocity);
+          this.yaw = 0;
+          this.pitch = -0.045;
+          this.vehicleButton.textContent = 'EJECT';
+          document.body.dataset.pilotingFighter = 'true';
+          for (const selector of ['#hud', '#crosshair', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.remove('hidden');
+          }
+          document.querySelector<HTMLElement>('#touch-controls')?.classList.toggle('hidden', !this.mobileQuality);
+          this.updateHud();
+        } else if (name.startsWith('quicksense-fighter-proof-')) {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          if (this.playerFighter) this.playerFighter = null;
+          document.body.dataset.pilotingFighter = 'false';
+          for (const fighter of this.fighters) resetFighterAtPad(fighter);
+          const key = name.slice('quicksense-fighter-proof-'.length);
+          const index = ({ nw: 0, ne: 1, sw: 2, se: 3 } as Record<string, number>)[key];
+          const fighter = this.fighters[index];
+          if (!fighter) throw new Error(`QuickSense fighter proof view ${key} is unavailable`);
+          const outward = new THREE.Vector3(fighter.pad.position.x, 0, fighter.pad.position.z).normalize();
+          this.screenshotCameraFov = 48;
+          this.playerPosition.copy(fighter.pad.position)
+            .addScaledVector(outward, 30)
+            .add(new THREE.Vector3(0, 10.5, 0));
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.copy(fighter.pad.position).add(new THREE.Vector3(0, -0.9, 0));
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.weaponModel.visible = false;
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
+        } else if (name === 'quicksense-fighter-pad-close') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          if (this.playerFighter) this.playerFighter = null;
+          document.body.dataset.pilotingFighter = 'false';
+          for (const fighter of this.fighters) resetFighterAtPad(fighter);
+          this.screenshotCameraFov = 54;
+          this.playerPosition.set(54, 61, -72);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(27.32, 43.8, -32.18);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.weaponModel.visible = false;
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
+        } else if (name === 'quicksense-fighter-ai-board') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          for (const fighter of this.fighters) resetFighterAtPad(fighter);
+          const fighter = this.fighters[0];
+          const bot = this.bots[0];
+          if (!fighter || !bot) throw new Error('QuickSense fighter AI state is unavailable');
+          bot.respawn(fighter.flight.position.clone().add(new THREE.Vector3(1.2, 0, 0)), false);
+          bot.movementLocked = false;
+          this.fighterAi.set(bot.id, new FighterAiPilotController(bot.id, 'normal', {
+            enterDistance: 10,
+            enterHoldSeconds: 0.08,
+            reactionSeconds: 0.2,
+          }));
+          this.playerPosition.copy(this.arena.spawnPoints[0]);
+          this.playerVelocity.set(0, 0, 0);
         } else if (name === 'quicksense-overlook') {
           this.mode = 'running';
           this.audio.setPaused(true);
@@ -5015,6 +6707,45 @@ export class Game {
         bot.group.rotation.y = Math.atan2(bot.aimDirection.x, bot.aimDirection.z);
         this.publishDiagnostics();
       },
+      getLongSightline: () => {
+        let best: { player: THREE.Vector3; bot: THREE.Vector3; distance: number } | null = null;
+        for (let playerIndex = 0; playerIndex < this.arena.spawnPoints.length; playerIndex += 1) {
+          for (let botIndex = 0; botIndex < this.arena.spawnPoints.length; botIndex += 1) {
+            if (playerIndex === botIndex) continue;
+            const player = this.arena.spawnPoints[playerIndex];
+            const bot = this.arena.spawnPoints[botIndex];
+            const distance = player.distanceTo(bot);
+            if (distance < 58 || distance > 158 || distance <= (best?.distance ?? 0)) continue;
+            const botEye = bot.clone().add(new THREE.Vector3(0, 1.5, 0));
+            const playerChest = player.clone().add(new THREE.Vector3(0, 0.95, 0));
+            if (!this.arena.hasLineOfSight(botEye, playerChest, 0.3)) continue;
+            best = { player: player.clone(), bot: bot.clone(), distance };
+          }
+        }
+        return best ? {
+          player: { x: best.player.x, y: best.player.y, z: best.player.z },
+          bot: { x: best.bot.x, y: best.bot.y, z: best.bot.z },
+          distance: best.distance,
+        } : null;
+      },
+      fireBotWeapon: (botIndex: number, weapon: WeaponId) => {
+        const bot = this.bots[botIndex];
+        if (!bot) throw new RangeError(`Unknown bot index ${botIndex}.`);
+        bot.weapon = weapon;
+        bot.targetOwner = 'player';
+        this.botFire(bot, 'player');
+        this.publishDiagnostics();
+      },
+      fireBotAtDrone: (botIndex: number, droneId: string, weapon: WeaponId) => {
+        const bot = this.bots[botIndex];
+        const drone = this.droneSwarm.drones.find((candidate) => candidate.id === droneId);
+        if (!bot) throw new RangeError(`Unknown bot index ${botIndex}.`);
+        if (!drone) throw new RangeError(`Unknown drone id ${droneId}.`);
+        bot.weapon = weapon;
+        bot.aimDirection.copy(drone.position).sub(bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0))).normalize();
+        this.botFireDrone(bot, drone);
+        this.publishDiagnostics();
+      },
       fireWeapon: () => {
         this.weaponCooldown = 0;
         this.tryFirePlayerWeapon();
@@ -5024,6 +6755,45 @@ export class Game {
         this.weaponCooldown = 0;
         this.trySecondaryFire();
         this.publishDiagnostics();
+      },
+      boardFighter: (id?: string) => {
+        if (this.playerFighter) return true;
+        const fighter = id
+          ? this.fighters.find((candidate) => candidate.id === id) ?? null
+          : nearestBoardableFighter(this.fighters, this.playerPosition, Number.POSITIVE_INFINITY);
+        if (!fighter || fighter.destroyed || fighter.pilot !== null) return false;
+        this.mode = 'running';
+        this.hud.hideStart();
+        this.playerPosition.copy(fighter.flight.position).add(new THREE.Vector3(2.2, 0, 0));
+        this.togglePlayerFighter();
+        this.updateCamera(0);
+        this.updateHud();
+        this.publishDiagnostics();
+        return this.playerFighter === fighter;
+      },
+      fireActiveFighterWeapon: (missile = false) => {
+        if (!this.playerFighter) return false;
+        if (missile) this.playerFighter.missileCooldown = 0;
+        else this.playerFighter.primaryCooldown = 0;
+        this.fireFighterWeapon(this.playerFighter, missile);
+        this.publishDiagnostics();
+        return true;
+      },
+      damageFighter: (id: string, amount: number) => {
+        const fighter = this.fighters.find((candidate) => candidate.id === id);
+        if (!fighter) return false;
+        this.damageFighter(fighter, Math.max(0, amount), 'player', 'QA DAMAGE');
+        this.updateHud();
+        this.publishDiagnostics();
+        return true;
+      },
+      damageDrone: (id: string, amount: number) => {
+        const drone = this.droneSwarm.drones.find((candidate) => candidate.id === id);
+        if (!drone) return false;
+        this.applyDamageToDrone(drone, Math.max(0, amount), 'player', 'QA DAMAGE');
+        this.updateHud();
+        this.publishDiagnostics();
+        return true;
       },
       throwGrenade: () => {
         this.tryThrowGrenade();
@@ -5082,14 +6852,38 @@ export class Game {
         this.reducedMotion = enabled;
       },
       stepSimulation: (seconds: number) => {
-        if (this.input.consumeJump()) this.jumpBuffer = MOVEMENT.jumpBuffer;
-        if (this.input.consumeDash()) this.dashBuffer = 0.12;
+        if (this.input.consumeInteract()) this.togglePlayerFighter();
+        if (this.input.consumeJump() && !this.playerFighter) this.jumpBuffer = MOVEMENT.jumpBuffer;
+        if (this.input.consumeDash()) {
+          if (this.playerFighter) this.fighterBoostQueued = true;
+          else this.dashBuffer = 0.12;
+        }
         if (this.input.consumeGrapple()) this.toggleGrapple();
-        if (this.input.consumeGrenade()) this.tryThrowGrenade();
+        if (this.input.consumeGrenade()) {
+          if (this.playerFighter) this.fighterMissileQueued = true;
+          else this.tryThrowGrenade();
+        }
         const steps = THREE.MathUtils.clamp(Math.ceil(seconds / MOVEMENT.fixedStep), 1, 3_600);
         for (let index = 0; index < steps; index += 1) this.fixedUpdate(MOVEMENT.fixedStep);
         this.updateCamera(0);
         this.updateSpeedEffects(0, this.elapsed, true);
+        this.publishDiagnostics();
+      },
+      stepDrones: (seconds: number) => {
+        const targetActivity = this.droneTargetSnapshots.map((target) => target.alive);
+        for (const target of this.droneTargetSnapshots) target.alive = false;
+        const steps = THREE.MathUtils.clamp(Math.ceil(seconds / MOVEMENT.fixedStep), 1, 3_600);
+        for (let index = 0; index < steps; index += 1) {
+          this.droneSwarm.update(MOVEMENT.fixedStep, this.elapsed, this.droneTargetSnapshots, () => undefined);
+        }
+        this.droneTargetSnapshots.forEach((target, index) => { target.alive = targetActivity[index]; });
+        this.publishDiagnostics();
+      },
+      stepVisualEffects: (seconds: number) => {
+        const safeSeconds = THREE.MathUtils.clamp(seconds, 0, 0.5);
+        const steps = Math.max(1, Math.ceil(safeSeconds / MOVEMENT.fixedStep));
+        for (let index = 0; index < steps; index += 1) this.weaponVfx.update(safeSeconds / steps);
+        this.updateCamera(0);
         this.publishDiagnostics();
       },
       setPlayerKinematics: (position, velocity) => {
@@ -5115,6 +6909,24 @@ export class Game {
         this.updateCamera(0);
         this.updateSpeedEffects(0, this.elapsed, true);
         this.publishDiagnostics();
+      },
+      setFighterKinematics: (id, position, velocity, yaw = 0) => {
+        const fighter = this.fighters.find((candidate) => candidate.id === id);
+        if (!fighter) return false;
+        if (this.playerFighter === fighter) this.playerFighter = null;
+        resetFighterAtPad(fighter);
+        const orientation = this.fighterQuaternionScratch.setFromEuler(new THREE.Euler(0, yaw, 0));
+        resetFighterFlightState(
+          fighter.flight,
+          new THREE.Vector3(position.x, position.y, position.z),
+          orientation,
+        );
+        fighter.flight.velocity.set(velocity.x, velocity.y, velocity.z);
+        fighter.pilot = null;
+        fighter.visual.root.position.copy(fighter.flight.position);
+        fighter.visual.root.quaternion.copy(fighter.flight.orientation);
+        this.publishDiagnostics();
+        return true;
       },
       setSpeedCapture: (speedKmh: number) => {
         const speed = Math.max(0, speedKmh) / 3.6;
@@ -5194,6 +7006,45 @@ export class Game {
       getOutpostTowerPieceAudit: () => (
         this.arena.group.userData.outpostTowerPieces as QuickSenseOutpostTowerPieceAudit[] | undefined
       ) ?? [],
+      getArenaRenderAudit: () => {
+        const rows = new Map<string, {
+          material: string;
+          draws: number;
+          shadowDraws: number;
+          triangles: number;
+          instances: number;
+        }>();
+        this.arena.group.traverse((object) => {
+          const mesh = object as THREE.Mesh;
+          if (!mesh.isMesh || !mesh.visible) return;
+          const geometry = mesh.geometry;
+          const positions = geometry.getAttribute('position');
+          if (!positions) return;
+          const triangles = (geometry.getIndex()?.count ?? positions.count) / 3;
+          const instances = (mesh as THREE.InstancedMesh).isInstancedMesh
+            ? (mesh as THREE.InstancedMesh).count
+            : 1;
+          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const material of materials) {
+            const key = material.name || material.type;
+            const row = rows.get(key) ?? {
+              material: key,
+              draws: 0,
+              shadowDraws: 0,
+              triangles: 0,
+              instances: 0,
+            };
+            row.draws += 1;
+            row.shadowDraws += Number(mesh.castShadow);
+            row.triangles += Math.round(triangles * instances);
+            row.instances += instances;
+            rows.set(key, row);
+          }
+        });
+        return [...rows.values()].sort((left, right) => (
+          right.draws + right.shadowDraws - left.draws - left.shadowDraws
+        ));
+      },
       hideDebugUi: () => undefined,
     };
   }
@@ -5251,6 +7102,13 @@ export class Game {
         bunnyHops: bot.bunnyHops,
         jetpackActive: bot.jetpackActive,
         jetpackBursts: bot.jetpackBursts,
+        jetpackCharge: bot.jetpackCharge,
+        jetpackLocked: bot.jetpackLocked,
+        dashCooldown: bot.dashCooldown,
+        dashesUsed: bot.dashesUsed,
+        aimErrorDegrees: bot.aimErrorDegrees,
+        aimTracking: bot.aimTracking,
+        reactionRemaining: bot.reactionRemaining,
         grenadesThrown: bot.grenadesThrown,
         grapplesUsed: bot.grapplesUsed,
         grenadesRemaining: bot.grenadesRemaining,
@@ -5261,8 +7119,95 @@ export class Game {
         ceilingContacts: bot.ceilingContacts,
         position: { x: bot.group.position.x, y: bot.group.position.y, z: bot.group.position.z },
       })),
+      fighters: this.fighters.map((fighter) => {
+        const ai = typeof fighter.pilot === 'number'
+          ? this.fighterAi.get(fighter.pilot)?.snapshot() ?? null
+          : null;
+        return {
+          id: fighter.id,
+          pad: fighter.pad.label,
+          pilot: fighter.pilot,
+          reservedBy: fighter.reservedBy,
+          destroyed: fighter.destroyed,
+          hull: fighter.hull,
+          shield: fighter.shield,
+          respawnSeconds: fighter.respawnSeconds,
+          speed: fighter.flight.velocity.length(),
+          grounded: fighter.flight.grounded,
+          landingReady: fighter.flight.landingReady,
+          afterburnerEnergy: fighter.flight.afterburnerEnergy,
+          heat: fighter.flight.heat,
+          modelReady: fighter.visual.isReady,
+          visible: fighter.visual.root.visible,
+          loadError: fighter.visual.loadError?.message ?? null,
+          position: {
+            x: fighter.flight.position.x,
+            y: fighter.flight.position.y,
+            z: fighter.flight.position.z,
+          },
+          velocity: {
+            x: fighter.flight.velocity.x,
+            y: fighter.flight.velocity.y,
+            z: fighter.flight.velocity.z,
+          },
+          physics: {
+            steps: fighter.flight.diagnostics.steps,
+            collisionQueries: fighter.flight.diagnostics.collisionQueries,
+            collisionHits: fighter.flight.diagnostics.collisionHits,
+            impacts: fighter.flight.diagnostics.impacts,
+            boundsContacts: fighter.flight.diagnostics.boundsContacts,
+            invalidCollisionHits: fighter.flight.diagnostics.invalidCollisionHits,
+          },
+          ai: ai ? {
+            state: ai.state,
+            transitionReason: ai.transitionReason,
+            targetId: ai.targetId,
+          } : null,
+        };
+      }),
+      drones: this.droneSwarm.drones.map((drone) => ({
+        id: drone.id,
+        alive: drone.alive,
+        health: drone.health,
+        maxHealth: DRONE_TUNING.maxHealth,
+        state: drone.state,
+        targetOwner: drone.targetOwner,
+        respawnSeconds: drone.respawnSeconds,
+        shotsFired: drone.shotsFired,
+        beamActive: drone.beamActive,
+        beamVisible: drone.visual.continuousBeamVisible,
+        beamUptimeSeconds: drone.beamUptimeSeconds,
+        beamDamageTicks: drone.beamDamageTicks,
+        explosions: drone.explosions,
+        respawns: drone.respawns,
+        collisionRadius: drone.collisionRadius,
+        collisionHits: drone.collisionHits,
+        modelReady: drone.visual.isReady,
+        modelMeshCount: drone.visual.modelMeshCount,
+        modelWidth: drone.visual.modelWidth,
+        modelHeight: drone.visual.modelHeight,
+        modelDepth: drone.visual.modelDepth,
+        loadError: drone.visual.loadError?.message ?? null,
+        targetedByBots: [...this.botDroneTargets.values()].filter((id) => id === drone.id).length,
+        position: { x: drone.position.x, y: drone.position.y, z: drone.position.z },
+        velocity: { x: drone.velocity.x, y: drone.velocity.y, z: drone.velocity.z },
+      })),
       projectiles: this.projectiles.length,
       grenades: this.grenades.length,
+      grenadeStates: this.grenades.map((grenade) => ({
+        position: {
+          x: grenade.root.position.x,
+          y: grenade.root.position.y,
+          z: grenade.root.position.z,
+        },
+        velocity: {
+          x: grenade.velocity.x,
+          y: grenade.velocity.y,
+          z: grenade.velocity.z,
+        },
+        bounces: grenade.bounces,
+        modelName: grenade.root.getObjectByName('a-star-wars-grenade')?.name ?? 'missing',
+      })),
       grapple: {
         active: this.grappleActive,
         anchor: { x: this.grappleAnchor.x, y: this.grappleAnchor.y, z: this.grappleAnchor.z },
@@ -5342,6 +7287,9 @@ export class Game {
         modelDepth: this.playerAvatar.modelDepth,
         avatarVisible: this.playerAvatar.root.visible,
         firstPersonWeaponVisible: this.weaponModel.visible,
+        thirdPersonWeaponVisible: this.thirdPersonWeaponModel.visible,
+        thirdPersonWeapon: this.thirdPersonWeaponVisual?.weapon ?? null,
+        thirdPersonWeaponMeshes: this.thirdPersonWeaponVisual?.renderMeshCount ?? 0,
       },
       camera: {
         distance: this.camera.position.distanceTo(this.playerPosition),
@@ -5369,9 +7317,9 @@ export class Game {
       physics: {
         engine: 'fixed-step-capsule-heightfield-bvh',
         timestep: MOVEMENT.fixedStep,
-        bodies: 1 + this.bots.length + this.projectiles.length + this.grenades.length,
-        colliders: this.arena.collisionTriangles + this.bots.length + this.projectiles.length + this.grenades.length,
-        ccdBodies: 1 + this.projectiles.length + this.grenades.length,
+        bodies: 1 + this.bots.length + this.fighters.length + this.projectiles.length + this.grenades.length,
+        colliders: this.arena.collisionTriangles + this.bots.length + this.fighters.length * 6 + this.projectiles.length + this.grenades.length,
+        ccdBodies: 1 + this.fighters.length + this.projectiles.length + this.grenades.length,
         sensors: this.pickups.filter((pickup) => pickup.active).length + (this.coreActive ? 1 : 0),
         contacts: this.lastPhysicsContacts,
         groundNormal: { x: this.terrainNormal.x, y: this.terrainNormal.y, z: this.terrainNormal.z },
@@ -5402,6 +7350,9 @@ export class Game {
         activeWeaponVfx: this.weaponVfx.activeEffects,
         activeSurfaceMarks: this.weaponVfx.activeMarks,
         activeTracers: this.weaponVfx.activeTracers,
+        activeSoftSmoke: this.weaponVfx.activeSoftSmoke,
+        smokeTextureSource: this.weaponVfx.smokeTextureSource,
+        tracerTextureSource: this.weaponVfx.tracerTextureSource,
         weaponWearMaterials: this.weaponVisual?.battleWearMaterialCount ?? 0,
         weaponWearTextures: this.weaponVisual?.battleWearTextureCount ?? 0,
         weaponAssetSource: this.weaponVisual?.assetSource ?? 'procedural',
@@ -5429,6 +7380,8 @@ export class Game {
         ) ?? 0,
       },
       combat: {
+        lastDamageDirection: this.lastDamageDirection,
+        lastDamageBearing: this.lastDamageBearing,
         secondaryAbility: WEAPONS[this.selectedWeapon].secondary,
         altFireHeld: this.input.isAltFireHeld(),
         continuousLaserActive: this.weaponVfx.continuousLaserActive,
@@ -5511,6 +7464,7 @@ export class Game {
       if (mesh.geometry && !mesh.geometry.userData.sharedWeaponVfx) mesh.geometry.dispose();
       const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
       for (const material of materials) {
+        if (material.userData.sharedWeaponVfx) continue;
         for (const value of Object.values(material)) {
           if (value instanceof THREE.Texture && value.userData.disposeWithMaterial) ownedTextures.add(value);
         }
