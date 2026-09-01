@@ -298,6 +298,12 @@ interface ThreeGameDiagnostics {
       drawCalls: 1;
     };
   };
+  fog: {
+    type: 'linear';
+    color: string;
+    near: number;
+    far: number;
+  } | null;
   player: {
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };

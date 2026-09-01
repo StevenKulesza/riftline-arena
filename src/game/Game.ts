@@ -205,7 +205,20 @@ const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
 const BASE_GAME_FOV = 80;
 const THIRD_PERSON_FOV = 62;
 const MAX_SPEED_FOV = 98;
-const QUICKSENSE_FOG_DENSITY = 0.00074;
+const MAP_FOG_PROFILES = Object.freeze({
+  quicksense: Object.freeze({
+    // Warm, pale mineral dust ties the road network into QuickSense's
+    // sandstone mountains without tinting nearby combat silhouettes.
+    color: 0xc9b99d,
+    near: 105,
+    far: 560,
+  }),
+  monsoon: Object.freeze({
+    color: 0x86a2aa,
+    near: 130,
+    far: 650,
+  }),
+});
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
 const WEAPON_VIEW_CLEARANCE = 0.1;
 const WEAPON_OBSTRUCTION_PROBE_LENGTH = 3.35;
@@ -1735,10 +1748,7 @@ export class Game {
       else if (this.weatherSnapshot.phase === 'monsoon') this.hud.message('MONSOON ACTIVE · TRACTION SHIFT');
       else if (this.weatherSnapshot.phase === 'recovery') this.hud.message('WEATHER CLEARING');
     }
-    if (this.scene.fog instanceof THREE.FogExp2) {
-      const baseline = this.arena.mapInfo.name === 'QuickSense' ? QUICKSENSE_FOG_DENSITY : 0.00146;
-      this.scene.fog.density = baseline / Math.max(0.82, this.weatherSnapshot.multipliers.visibilityMultiplier);
-    }
+    this.updateMapFog(this.weatherSnapshot.multipliers.visibilityMultiplier);
 
     this.updateFighters(delta);
     if (!this.playerFighter) this.updatePlayerMovement(delta);
@@ -4993,9 +5003,7 @@ export class Game {
     this.recentPlayerKills.length = 0;
     this.weatherSnapshot = this.weatherSystem.reset();
     this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
-    if (this.scene.fog instanceof THREE.FogExp2) {
-      this.scene.fog.density = this.arena.mapInfo.name === 'QuickSense' ? QUICKSENSE_FOG_DENSITY : 0.00146;
-    }
+    this.updateMapFog(this.weatherSnapshot.multipliers.visibilityMultiplier);
     for (const pickup of this.pickups) {
       pickup.active = true;
       pickup.cooldown = 0;
@@ -5084,6 +5092,7 @@ export class Game {
 
   private createScene(): void {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
+    const fogProfile = quickSense ? MAP_FOG_PROFILES.quicksense : MAP_FOG_PROFILES.monsoon;
     this.scene.background = quickSense
       ? this.arena.skyTexture ?? new THREE.Color(0x75b6df)
       : this.arena.skyTexture ?? new THREE.Color(0x8fcddd);
@@ -5091,7 +5100,7 @@ export class Game {
       ? (this.arena.skyTexture ? 0.84 : 0.96)
       : 0.78;
     this.scene.backgroundBlurriness = this.arena.skyTexture ? 0.02 : 0.035;
-    this.scene.fog = new THREE.FogExp2(quickSense ? 0x6f899a : 0x7293a0, quickSense ? QUICKSENSE_FOG_DENSITY : 0.00146);
+    this.scene.fog = new THREE.Fog(fogProfile.color, fogProfile.near, fogProfile.far);
     const environmentGenerator = new THREE.PMREMGenerator(this.renderer);
     // A compact neutral IBL keeps dark metal and clearcoat readable in every
     // lane. The authored panorama still owns the visible sky, while the map
@@ -5114,6 +5123,16 @@ export class Game {
     this.coreLight.intensity = 0;
     this.scene.add(this.coreLight);
     this.scene.add(this.arena.group);
+  }
+
+  private updateMapFog(visibilityMultiplier: number): void {
+    if (!(this.scene.fog instanceof THREE.Fog)) return;
+    const profile = this.arena.mapInfo.name === 'QuickSense'
+      ? MAP_FOG_PROFILES.quicksense
+      : MAP_FOG_PROFILES.monsoon;
+    const visibility = THREE.MathUtils.clamp(visibilityMultiplier, 0.82, 1);
+    this.scene.fog.near = profile.near;
+    this.scene.fog.far = profile.near + (profile.far - profile.near) * visibility;
   }
 
   private createPostProcessing(): EffectComposer {
@@ -7482,6 +7501,14 @@ export class Game {
       },
       map: this.arena.mapInfo,
       lighting: this.mapLighting.diagnostics(this.scene),
+      fog: this.scene.fog instanceof THREE.Fog
+        ? {
+          type: 'linear',
+          color: `#${this.scene.fog.color.getHexString()}`,
+          near: this.scene.fog.near,
+          far: this.scene.fog.far,
+        }
+        : null,
       player: {
         position: { x: this.playerPosition.x, y: this.playerPosition.y, z: this.playerPosition.z },
         velocity: { x: this.playerVelocity.x, y: this.playerVelocity.y, z: this.playerVelocity.z },
