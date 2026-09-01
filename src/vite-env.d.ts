@@ -16,6 +16,22 @@ interface ThreeGameDiagnostics {
   };
   health: number;
   armor: number;
+  worldHealthBars: {
+    targetCount: number;
+    visibleCount: number;
+    drawCalls: number;
+    categories: {
+      person: number;
+      drone: number;
+      craft: number;
+    };
+    entries: ReadonlyArray<{
+      id: string;
+      kind: 'person' | 'drone' | 'craft';
+      ratio: number;
+      rendered: boolean;
+    }>;
+  };
   weapon: string;
   botsAlive: number;
   bots: Array<{

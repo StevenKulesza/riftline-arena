@@ -45,6 +45,7 @@ import {
 } from '../systems/SpeedTrailSystem';
 import { WeatherGameplaySystem, type WeatherGameplaySnapshot } from '../systems/WeatherGameplaySystem';
 import { WeaponVfxSystem } from '../systems/WeaponVfxSystem';
+import { WorldHealthBarSystem } from '../systems/WorldHealthBarSystem';
 import { FighterArenaCollisionAdapter } from '../systems/FighterArenaCollisionAdapter';
 import {
   FIGHTER_BOARD_RANGE,
@@ -288,6 +289,7 @@ export class Game {
   private readonly audio = new AudioSystem();
   private readonly hud = new Hud();
   private readonly weaponVfx: WeaponVfxSystem;
+  private readonly worldHealthBars: WorldHealthBarSystem;
   private mapLighting!: MapLightingRig;
   private readonly jetpackEnergy = new JetpackEnergy({
     burnSeconds: MOVEMENT.jetpackBurnSeconds,
@@ -709,6 +711,8 @@ export class Game {
     this.scene.add(this.thirdPersonWeaponModel);
     this.composer = this.createPostProcessing();
     this.createBots();
+    this.worldHealthBars = new WorldHealthBarSystem(this.scene);
+    this.registerWorldHealthBars();
     this.installGroundingShadows();
     this.droneTargetSnapshots.push({
       owner: 'player',
@@ -898,6 +902,7 @@ export class Game {
     this.speedTrails.dispose();
     this.playerJetpack.dispose();
     this.playerAvatar.dispose();
+    this.worldHealthBars.dispose();
     this.mapLighting.dispose();
     this.arena.dispose();
     for (const bot of this.bots) bot.dispose();
@@ -1151,6 +1156,10 @@ export class Game {
     this.mapLighting.updateGroundingShadows(this.arena);
     this.updateMobilePresentationDetail();
     this.updateCamera(delta);
+    this.worldHealthBars.update(
+      this.camera,
+      this.mode === 'countdown' || this.mode === 'running' || this.mode === 'respawning' || this.mode === 'paused',
+    );
     this.updateSpeedEffects(this.pausedForScreenshot ? 0 : delta, elapsed);
     this.audio.updateListener(this.camera.position, this.viewDirection(this.audioDirectionScratch));
     if (elapsed >= this.nextHudUpdateAt) {
@@ -5313,6 +5322,47 @@ export class Game {
     }
   }
 
+  private registerWorldHealthBars(): void {
+    for (const bot of this.bots) {
+      this.worldHealthBars.register({
+        id: `bot-${bot.id}`,
+        kind: 'person',
+        position: bot.group.position,
+        // Armor is part of the character's visible survivability envelope, so
+        // incoming damage always changes the compact meter immediately.
+        value: () => bot.health + bot.armor,
+        maximum: () => 150,
+        visible: () => bot.alive && bot.group.visible && !this.fighterForPilot(bot.id),
+        anchorHeight: () => Math.max(2.2, bot.modelCenterY + bot.modelHeight * 0.5 + 0.34),
+      });
+    }
+    for (const drone of this.droneSwarm.combatDrones) {
+      this.worldHealthBars.register({
+        id: drone.id,
+        kind: 'drone',
+        position: drone.position,
+        value: () => drone.health,
+        maximum: () => drone.maxHealth,
+        visible: () => drone.alive && drone.visual.root.visible,
+        anchorHeight: () => Math.max(
+          drone.collisionRadius + 0.7,
+          drone.visual.modelHeight * 0.5 + 0.48,
+        ),
+      });
+    }
+    for (const fighter of this.fighters) {
+      this.worldHealthBars.register({
+        id: fighter.id,
+        kind: 'craft',
+        position: fighter.flight.position,
+        value: () => fighter.hull + fighter.shield,
+        maximum: () => FIGHTER_HULL_MAX + FIGHTER_SHIELD_MAX,
+        visible: () => !fighter.destroyed && fighter !== this.playerFighter && fighter.visual.root.visible,
+        anchorHeight: () => Math.max(4.2, fighter.visual.collisionHalfExtents.y + 1.15),
+      });
+    }
+  }
+
   private createPickups(): void {
     const definitions: Array<[PickupKind, string, number, offset?: readonly [number, number]]> = [
       ['health', 'health-a', 20],
@@ -7238,6 +7288,7 @@ export class Game {
       },
       health: this.health,
       armor: this.armor,
+      worldHealthBars: this.worldHealthBars.snapshot(),
       weapon: WEAPONS[this.selectedWeapon].id,
       botsAlive: this.bots.filter((bot) => bot.alive).length,
       bots: this.bots.map((bot) => ({
