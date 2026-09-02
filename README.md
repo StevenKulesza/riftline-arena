@@ -37,11 +37,17 @@ The `.env` file is ignored by version control. It is used only by the local gene
 - Move: `WASD`
 - Aim: mouse after clicking the canvas
 - Fire: left mouse or `F`
-- Jump/bunny hop: `Space`
+- Jump: `Space`. Hold `Space` on the ground to bunny hop (frictionless landings; a
+  ramp or stair launch stacks a second jump on top of the rise).
+- Jetpack: while airborne, press `Space` again and hold to jet. Holding `Space`
+  through a ground jump never thrusts; only a fresh press in the air arms the pack.
+- Wall jump: press `Space` in the air with a wall in reach. One per airtime,
+  1.3 s cooldown; it clears the dash cooldown and locks air control until the rise ends.
+- Dash: `E` or `CapsLock` on the ground. Sets run speed to 1.4× along your input
+  with a short hop; 1 s cooldown that any jump or wall jump resets.
 - Ski: hold `Shift`
-- Grapple: hold `G` or `E`; release to detach (`E` also dashes)
+- Grapple: hold `G` or `E`; release to detach
 - Grenade: `Q`
-- Bunny hop: hold `Space`; press `Space` against a wall to wall-jump
 - Zoom sniper/rail: `C` or `Ctrl`
 - Weapons: `1`–`8` or mouse wheel
 - Pause/resume: `P` or `Esc`

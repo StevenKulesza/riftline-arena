@@ -905,6 +905,7 @@ export class QuickSenseArena implements ArenaRuntime {
       penetrations: this.supportPenetrations,
     };
     if (outpostTower) this.createOutpostTower(outpostTower, panelTexture, panelNormal, panelRoughness);
+    this.createTacticalCover(structureMaterial, whiteMaterial, cyanMaterial);
     this.createStaticWorldShotCollision();
     this.createStaticWorldFloorCollision();
 
@@ -931,14 +932,14 @@ export class QuickSenseArena implements ArenaRuntime {
 
     this.corePosition = this.localToWorld(this.outpostTowerCoreLocal ?? new THREE.Vector3(0, 19.6, 0));
     this.spawnPoints = [
-      this.pointOnFloor(0, -66),
-      this.pointOnFloor(42, 47),
-      this.pointOnFloor(-69, 0),
-      this.pointOnFloor(69, 0),
-      this.pointOnFloor(-42, 48),
-      this.pointOnFloor(42, -48),
-      this.pointOnFloor(-42, -47),
-      this.pointOnFloor(0, 66),
+      this.pointOnFloor(-2.5, -69),
+      this.pointOnFloor(44.5, 49.5),
+      this.pointOnFloor(-72, 2.5),
+      this.pointOnFloor(72, -2.5),
+      this.pointOnFloor(-44.5, 50.5),
+      this.pointOnFloor(44.5, -50.5),
+      this.pointOnFloor(-44.5, -49.5),
+      this.pointOnFloor(2.5, 69),
     ];
     this.itemPoints = {
       'health-a': this.pointOnFloor(-61, -21, 0.8),
@@ -2050,6 +2051,8 @@ export class QuickSenseArena implements ArenaRuntime {
         })),
       },
     };
+    this.createOutpostTowerMidLandingCubby(model, shellMaterial, trimMaterial, cyanMaterial);
+
     this.group.userData.outpostTowerPieces = pieceAudit.map((piece) => ({
       name: piece.name,
       role: piece.role,
@@ -2067,6 +2070,32 @@ export class QuickSenseArena implements ArenaRuntime {
       'amber',
       new THREE.Vector3(towerX, towerBaseY + size.y * 0.5, towerZ),
     );
+  }
+
+  private createOutpostTowerMidLandingCubby(
+    model: THREE.Group,
+    material: THREE.MeshStandardMaterial,
+    trimMaterial: THREE.MeshStandardMaterial,
+    signalMaterial: THREE.MeshStandardMaterial,
+  ): void {
+    model.updateMatrixWorld(false);
+    // East deck landing sits at source (11.25, 10.13, -5.08). Offset off the
+    // smooth stair route onto the flat interior wall so the cubby is usable
+    // cover without snagging the authored climb.
+    const center = new THREE.Vector3(14.15, 10.82, -8.05).applyMatrix4(model.matrix);
+    const size = new THREE.Vector3(
+      2.15 * OUTPOST_TOWER_MODEL_SCALE_XZ,
+      1.38 * OUTPOST_TOWER_MODEL_SCALE_Y,
+      0.52 * OUTPOST_TOWER_MODEL_SCALE_XZ,
+    );
+    this.box(
+      'QuickSense outpost mid-landing cubby',
+      center,
+      size,
+      material,
+      true,
+    );
+    this.dressCoverBunker('outpost mid-landing cubby', center, size, trimMaterial, signalMaterial);
   }
 
   private batchOutpostTowerRenderMeshes(model: THREE.Group): {
@@ -6450,6 +6479,139 @@ export class QuickSenseArena implements ArenaRuntime {
     }
   }
 
+  private recordSpawnCubbyBunker(name: string, hulls: number, trims: number, signals: number): void {
+    const current = this.group.userData.spawnCubbyBunkers as {
+      count: number;
+      hullInstances: number;
+      trimInstances: number;
+      signalInstances: number;
+      names: string[];
+    } | undefined;
+    this.group.userData.spawnCubbyBunkers = {
+      count: (current?.count ?? 0) + 1,
+      hullInstances: (current?.hullInstances ?? 0) + hulls,
+      trimInstances: (current?.trimInstances ?? 0) + trims,
+      signalInstances: (current?.signalInstances ?? 0) + signals,
+      names: [...(current?.names ?? []), name],
+    };
+  }
+
+  private dressCoverBunker(
+    name: string,
+    center: THREE.Vector3,
+    size: THREE.Vector3,
+    trimMaterial: THREE.MeshStandardMaterial,
+    signalMaterial: THREE.MeshStandardMaterial,
+  ): void {
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const trims: InstanceTransform[] = [];
+    const signals: InstanceTransform[] = [];
+    const topY = center.y + size.y * 0.5;
+    const bottomY = center.y - size.y * 0.5;
+    trims.push({
+      position: new THREE.Vector3(center.x, topY + 0.14, center.z),
+      scale: new THREE.Vector3(size.x + 0.38, 0.28, size.z + 0.38),
+    });
+    trims.push({
+      position: new THREE.Vector3(center.x, bottomY + 0.16, center.z),
+      scale: new THREE.Vector3(size.x + 0.24, 0.32, size.z + 0.24),
+    });
+    for (const sideX of [-1, 1]) {
+      for (const sideZ of [-1, 1]) {
+        trims.push({
+          position: new THREE.Vector3(
+            center.x + sideX * (size.x * 0.5 - 0.18),
+            center.y,
+            center.z + sideZ * (size.z * 0.5 - 0.18),
+          ),
+          scale: new THREE.Vector3(0.44, size.y * 0.94, 0.44),
+        });
+      }
+    }
+    const fasciaZ = center.z + size.z * 0.5 + 0.06;
+    signals.push({
+      position: new THREE.Vector3(center.x, topY - 0.22, fasciaZ),
+      scale: new THREE.Vector3(size.x * 0.62, 0.1, 0.08),
+    });
+    trims.push({
+      position: new THREE.Vector3(center.x, center.y - size.y * 0.08, fasciaZ),
+      scale: new THREE.Vector3(Math.min(1.15, size.x * 0.55), size.y * 0.42, 0.12),
+    });
+    signals.push({
+      position: new THREE.Vector3(center.x, center.y - size.y * 0.08, fasciaZ + 0.04),
+      scale: new THREE.Vector3(Math.min(0.72, size.x * 0.32), size.y * 0.18, 0.06),
+    });
+    trims.push({
+      position: new THREE.Vector3(center.x + size.x * 0.18, topY + 0.82, center.z - size.z * 0.12),
+      scale: new THREE.Vector3(0.1, 1.36, 0.1),
+    });
+    signals.push({
+      position: new THREE.Vector3(center.x + size.x * 0.18, topY + 1.52, center.z - size.z * 0.12),
+      scale: new THREE.Vector3(0.22, 0.12, 0.22),
+    });
+    for (const side of [-1, 1]) {
+      trims.push({
+        position: new THREE.Vector3(center.x, center.y + size.y * 0.12, center.z + side * (size.z * 0.5 + 0.03)),
+        scale: new THREE.Vector3(size.x * 0.78, 0.08, 0.07),
+      });
+    }
+    this.addInstancedMeshes(`QuickSense ${name} bunker trims`, unitBox, trimMaterial, trims);
+    this.addInstancedMeshes(`QuickSense ${name} bunker signals`, unitBox, signalMaterial, signals, false);
+    this.recordSpawnCubbyBunker(name, 1, trims.length, signals.length);
+  }
+
+  private createTacticalCover(
+    material: THREE.MeshStandardMaterial,
+    trimMaterial: THREE.MeshStandardMaterial,
+    signalMaterial: THREE.MeshStandardMaterial,
+  ): void {
+    const height = 0.84;
+    const width = 1.65;
+    const depth = 0.36;
+    const barricades: ReadonlyArray<{ name: string; x: number; z: number; yaw: number }> = [
+      { name: 'north rail barricade', x: 9.4, z: 62.2, yaw: 0.08 },
+      { name: 'south sniper barricade', x: -9.4, z: -62.2, yaw: -0.08 },
+      { name: 'west rocket barricade', x: -40.2, z: 7.2, yaw: 0.18 },
+      { name: 'west spawn barricade', x: -66.8, z: 8.4, yaw: 1.22 },
+      { name: 'east spawn barricade', x: 66.8, z: -8.4, yaw: 1.22 },
+      { name: 'northeast spawn barricade', x: 46.8, z: 44.2, yaw: 0.42 },
+    ];
+    for (const spec of barricades) {
+      const floor = this.playableSurfaceHeight(spec.x, spec.z);
+      this.box(
+        `QuickSense ${spec.name}`,
+        new THREE.Vector3(spec.x, floor + height * 0.5, spec.z),
+        new THREE.Vector3(width, height, depth),
+        material,
+        true,
+        spec.yaw,
+      );
+    }
+    // Deck-17 cubby on the west pad. SPAWN world (−144, 5) → (89, −101) is a
+    // 256 m rail over 0.84 m plates. 8 m world along that chord is local
+    // (−68.4, 0.8). Pad-height lid, not 0.84. Do not raise the off-axis
+    // plates. Do not wall the basin.
+    {
+      const cubbyX = -68.4;
+      const cubbyZ = 0.8;
+      const padFloor = this.playableSurfaceHeight(-72, 2.5);
+      const localFloor = this.playableSurfaceHeight(cubbyX, cubbyZ);
+      const lid = padFloor + 5.8 / QUICK_VERTICAL_SCALE;
+      const base = Math.min(localFloor, padFloor);
+      const cubbyHeight = lid - base;
+      const center = new THREE.Vector3(cubbyX, base + cubbyHeight * 0.5, cubbyZ);
+      const size = new THREE.Vector3(4.6 / QUICK_HORIZONTAL_SCALE, cubbyHeight, 3.2 / QUICK_HORIZONTAL_SCALE);
+      this.box(
+        'QuickSense west spawn cubby',
+        center,
+        size,
+        material,
+        true,
+      );
+      this.dressCoverBunker('west spawn cubby', center, size, trimMaterial, signalMaterial);
+    }
+  }
+
   private createBoundaryArchitecture(sideMaterial: THREE.MeshStandardMaterial, accent: THREE.MeshStandardMaterial): void {
     const walls = [
       { center: new THREE.Vector3(-50, 4.2, -79.1), size: new THREE.Vector3(72, 8.4, 2.2) },
@@ -6724,8 +6886,20 @@ export class QuickSenseArena implements ArenaRuntime {
     return this.localToWorld(this.localPointOnFloor(x, z, lift));
   }
 
+  /**
+   * Highest surface that is still on the street / ramp / plaza layer.
+   * Sampling from +Infinity parks spawns and pickups on floating-station
+   * roofs (Amber Command Ark, Needle Dock) sixty metres above the basin.
+   */
+  private playableSurfaceHeight(x: number, z: number): number {
+    const terrain = this.terrainHeightAt(x, z);
+    const base = Number.isFinite(terrain) ? terrain : 0;
+    const fromY = base + 12;
+    return this.floorSurfaceAt(x, z, fromY)?.height ?? base;
+  }
+
   private localPointOnFloor(x: number, z: number, lift = 0.04): THREE.Vector3 {
-    const floor = this.floorSurfaceAt(x, z, Number.POSITIVE_INFINITY)?.height ?? 0;
+    const floor = this.playableSurfaceHeight(x, z);
     return new THREE.Vector3(x, floor + lift / QUICK_VERTICAL_SCALE, z);
   }
 

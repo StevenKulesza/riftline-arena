@@ -1,7 +1,8 @@
 import * as THREE from 'three';
+import { METERS_PER_SECOND_PER_MPH, PLAYER_MAX_SPEED_MPH } from '../game/config';
 
 export const SPEED_EFFECT_START_KMH = 70;
-export const SPEED_EFFECT_FULL_KMH = 132;
+export const SPEED_EFFECT_FULL_KMH = PLAYER_MAX_SPEED_MPH * METERS_PER_SECOND_PER_MPH * 3.6;
 
 const TRAILS_PER_SOURCE = 4;
 const VERTICES_PER_TRAIL = 6;

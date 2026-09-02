@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Riftline Arena — Gauntlet Progress</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b0e13; --panel: #131821; --line: #1f2733; --text: #d7dee8; --muted: #7f8c9d;
+    --win: #48f4d1; --lose: #ff6b55; --run: #ffc45b; --idle: #4a5568;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { padding: 20px 28px 12px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 18px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .meta { color: var(--muted); font-size: 12px; }
+  main { padding: 20px 28px 60px; display: grid; gap: 20px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+  .bar { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; }
+  .bar h2 { margin: 0 0 6px; font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .bar p { margin: 0; }
+  .piece { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+  .piece header { padding: 0; border: 0; }
+  .piece h3 { margin: 0; font-size: 15px; }
+  .status { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .status.won { color: var(--win); }
+  .status.losing { color: var(--lose); }
+  .status.running { color: var(--run); }
+  .status.pending { color: var(--idle); }
+  .rounds { display: flex; gap: 4px; flex-wrap: wrap; }
+  .round { width: 18px; height: 18px; border-radius: 3px; background: var(--idle); display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: #000; }
+  .round.ours { background: var(--win); }
+  .round.bar { background: var(--lose); }
+  .gap { color: var(--muted); font-size: 13px; }
+  .gap b { color: var(--text); }
+  .log { margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); max-height: 220px; overflow: auto; border-top: 1px dashed var(--line); padding-top: 8px; }
+  .log li { margin: 0 0 4px; }
+  .log li .who { color: var(--text); }
+  .summary { grid-column: 1 / -1; display: flex; gap: 24px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+  .summary b { color: var(--text); font-size: 16px; }
+  .tests { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; font-size: 12px; }
+  .tests span { margin-right: 18px; }
+  .ok { color: var(--win); } .bad { color: var(--lose); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Riftline Arena · Gauntlet</h1>
+  <div class="meta" id="meta">loading…</div>
+</header>
+<main id="main"></main>
+<script>
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function render(data) {
+    document.getElementById('meta').textContent =
+      `updated ${new Date(data.updatedAt).toLocaleTimeString()} · phase: ${data.phase}`;
+    const pieces = data.pieces || [];
+    const won = pieces.filter((p) => p.status === 'won').length;
+    const rounds = pieces.reduce((n, p) => n + (p.rounds?.length || 0), 0);
+    const t = data.tests || {};
+    const html = [];
+    html.push(`<div class="bar"><h2>The bar</h2><p>${esc(data.bar)}</p></div>`);
+    html.push(`<div class="summary">
+      <div><b>${won}/${pieces.length}</b> pieces won blind</div>
+      <div><b>${rounds}</b> critic rounds</div>
+      <div><b>${esc(data.commits ?? 0)}</b> edits landed</div>
+    </div>`);
+    html.push(`<div class="tests">
+      <span>typecheck: <b class="${t.typecheck === 'pass' ? 'ok' : t.typecheck === 'fail' ? 'bad' : ''}">${esc(t.typecheck ?? '—')}</b></span>
+      <span>playwright: <b class="${t.playwright === 'pass' ? 'ok' : t.playwright === 'fail' ? 'bad' : ''}">${esc(t.playwright ?? '—')}</b></span>
+      <span>${esc(t.note ?? '')}</span>
+    </div>`);
+    for (const p of pieces) {
+      const rs = (p.rounds || []).map((r, i) =>
+        `<span class="round ${r.verdict === 'ours' ? 'ours' : r.verdict === 'bar' ? 'bar' : ''}" title="${esc(r.gap)}">${i + 1}</span>`).join('');
+      const log = (p.log || []).slice(-8).reverse().map((l) =>
+        `<li><span class="who">${esc(l.who)}</span> · ${esc(l.text)}</li>`).join('');
+      html.push(`<section class="piece">
+        <header><h3>${esc(p.name)}</h3><span class="status ${esc(p.status)}">${esc(p.status)}</span></header>
+        <div class="rounds">${rs || '<span class="gap">no rounds yet</span>'}</div>
+        <div class="gap">biggest gap: <b>${esc(p.gap || '—')}</b></div>
+        <ul class="log">${log}</ul>
+      </section>`);
+    }
+    document.getElementById('main').innerHTML = html.join('');
+  }
+  async function poll() {
+    try {
+      const res = await fetch('progress.json?t=' + Date.now(), { cache: 'no-store' });
+      render(await res.json());
+    } catch (err) {
+      document.getElementById('meta').textContent = 'waiting for progress.json… ' + err;
+    }
+  }
+  poll();
+  setInterval(poll, 2500);
+</script>
+</body>
+</html>

@@ -455,6 +455,40 @@ body[data-view-mode="third-person"] #scope-overlay {
   background: var(--amber);
 }
 
+#crosshair.hit.hit-light .reticle-arm,
+#crosshair.hit.hit-light .hit-tick {
+  transform: scale(0.82);
+}
+
+#crosshair.hit.hit-medium .reticle-arm,
+#crosshair.hit.hit-medium .hit-tick {
+  transform: scale(1);
+}
+
+#crosshair.hit.hit-heavy .reticle-arm,
+#crosshair.hit.hit-heavy .hit-tick {
+  transform: scale(1.28);
+  box-shadow: 0 0 10px rgba(255, 196, 91, 0.95);
+}
+
+#elim-feed {
+  position: absolute;
+  top: max(84px, calc(env(safe-area-inset-top) + 72px));
+  left: max(22px, env(safe-area-inset-left));
+  width: min(280px, 34vw);
+  pointer-events: none;
+  z-index: 8;
+  font-family: var(--font-display);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+
+#elim-feed > div {
+  padding: 4px 10px 4px 0;
+  color: #ffe7b0;
+  text-shadow: 0 0 8px rgba(255, 79, 80, 0.55);
+}
+
 #crosshair.kill span {
   background: var(--magenta);
 }

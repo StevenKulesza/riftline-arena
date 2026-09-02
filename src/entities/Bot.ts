@@ -1,21 +1,51 @@
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { loadCharacterAsset } from '../assets/CharacterAsset';
+import { SupportArmIk } from '../assets/SupportArmIk';
 import { JetpackRig } from '../assets/JetpackRig';
 import type { ArenaRuntime } from '../game/Arena';
-import { GRAPPLE, MOVEMENT, POWERUP, type WeaponId } from '../game/config';
+import { GRAPPLE, GRENADE, MOVEMENT, POWERUP, WEAPONS, type WeaponId } from '../game/config';
 import { JetpackEnergy } from '../game/JetpackEnergy';
+import {
+  BotNavigationGrid,
+  NAV_LINK_JUMP,
+  NAV_LINK_PAD,
+  NAV_LINK_WALK,
+  NavPath,
+  navLinkName,
+  type NavLinkKind,
+  type NavLinkName,
+} from '../systems/BotNavigation';
+import {
+  BotThreatMemory,
+  SeededStream,
+  solveBallisticLaunch,
+  type BotDamageSource,
+  type BotThreatPoint,
+} from '../systems/BotThreat';
 import {
   botArchetypeForId,
   botObjectiveUtility,
   botPickupUtility,
+  botSkillProfile,
   botWeaponUtility,
   type BotArchetypeId,
   type BotArchetypeTuning,
   type BotObjectiveKind,
   type BotPickupKind,
+  type BotSkillProfile,
   type BotVisualIdentity,
 } from './BotArchetypes';
+import { BOT_WEAPON_RANGE, botWeaponBandForDistance } from './BotWeapons';
+import {
+  aimWfacMetres,
+  applyAimWfacOffset,
+  botMayPullTrigger,
+  directionFromYawPitch,
+  stepAimChangeAngle,
+  yawPitchFromDirection,
+  type AimAngleRates,
+} from './BotAim';
 
 // The authored SWAT mesh measures roughly 1.84 x 0.88 world units. It needs a
 // dedicated capsule; the smaller qfusion player hull lets shoulders and the
@@ -23,6 +53,9 @@ import {
 const BOT_COLLIDER_HEIGHT = 1.82;
 const BOT_COLLIDER_RADIUS = 0.43;
 const BOT_EYE_HEIGHT = 1.5;
+// Aim/LOS origin. Game fires from the weapon muzzle socket (~1.37-1.5 m), so
+// computing the aim vector from the feet would put every level shot high.
+const BOT_AIM_HEIGHT = 1.42;
 const STEP_PROBE_OFFSETS = [
   0,
   BOT_COLLIDER_RADIUS * 0.34,
@@ -43,21 +76,70 @@ const TRAVERSAL_FALLBACK = {
   positive: { sine: Math.sin(1.45), cosine: Math.cos(1.45) },
   negative: { sine: Math.sin(-1.45), cosine: Math.cos(-1.45) },
 } as const;
-const CLOSE_WEAPONS = ['shotgun', 'plasma', 'machine'] as const;
-const SHORT_WEAPONS = ['plasma', 'disc', 'laser', 'shotgun', 'machine'] as const;
-const MID_WEAPONS = ['disc', 'rocket', 'laser', 'plasma', 'machine'] as const;
-const FAR_WEAPONS = ['sniper', 'rail', 'machine'] as const;
-const EXTREME_WEAPONS = ['rail', 'sniper', 'machine'] as const;
-const BLIND_WEAPONS = ['rocket', 'machine'] as const;
+const INFINITE_AMMO_WEAPONS: ReadonlySet<WeaponId> = new Set<WeaponId>(['machine', 'shotgun']);
+
+const WEAPON_PROJECTILE_SPEED: Readonly<Record<WeaponId, number>> = {
+  machine: 0,
+  shotgun: 0,
+  rocket: 40,
+  plasma: 48,
+  laser: 0,
+  sniper: 0,
+  rail: 0,
+  disc: 76,
+};
+const WEAPON_AMMO_MAX: Readonly<Record<WeaponId, number>> = Object.fromEntries(
+  WEAPONS.map((definition) => [definition.id, definition.id === 'rail' ? 3 : definition.ammo]),
+) as Record<WeaponId, number>;
+
+const EMPTY_THREATS: readonly BotThreatPoint[] = [];
+const PATH_REPLAN_INTERVAL = 1.5;
+const PATH_GOAL_DRIFT = 4;
+const COMBAT_RANGE = 48;
+const STUCK_RELOCATE_SECONDS = 6;
+const NAVIGATION_STALL_RELOCATE_SECONDS = 9;
+const PAD_LAUNCH_COOLDOWN = 0.7;
+
+export type BotPathState = 'none' | 'following' | 'direct' | 'blocked';
+
+/** Per-tick world context supplied by Game. */
+export type BotUpdateContext = {
+  navigation: BotNavigationGrid | null;
+  /** Predicted impact points of hostile projectiles; entries with `active=false` are ignored. */
+  threats: readonly BotThreatPoint[];
+  /** False when the target vector is a placeholder (no live opponent). */
+  hasTarget: boolean;
+  targetGrounded: boolean;
+  /** Height of the supplied target point above the target's feet. */
+  targetCenterOffset: number;
+  /** Game has routed the bot to a recovery pickup: follow the path even while fighting. */
+  retreat: boolean;
+};
+
+const DEFAULT_CONTEXT: BotUpdateContext = {
+  navigation: null,
+  threats: EMPTY_THREATS,
+  hasTarget: true,
+  targetGrounded: true,
+  targetCenterOffset: 1.05,
+  retreat: false,
+};
+
 export class Bot {
   readonly group = new THREE.Group();
   readonly velocity = new THREE.Vector3();
   readonly aimDirection = new THREE.Vector3(0, 0, -1);
+  readonly weaponGripSocket = new THREE.Object3D();
+  readonly supportGripSocket = new THREE.Object3D();
   readonly archetype: BotArchetypeId;
   readonly displayName: string;
   readonly visualIdentity: BotVisualIdentity;
   readonly archetypeTuning: BotArchetypeTuning;
+  readonly skillProfile: BotSkillProfile;
+  readonly threat = new BotThreatMemory();
   readonly ready: Promise<void>;
+  /** Launch velocity solved for the current grenade request. */
+  readonly grenadeLaunchVelocity = new THREE.Vector3();
   health = 100;
   armor = 50;
   alive = true;
@@ -69,7 +151,10 @@ export class Bot {
   navigationTarget = new THREE.Vector3();
   stepSuccesses = 0;
   shotsFired = 0;
+  shotsHit = 0;
   movementLocked = false;
+  /** Test hook: pin the equipped weapon so accuracy can be measured per weapon. */
+  weaponLocked = false;
   modelReady = false;
   modelHeight = 0;
   modelCenterY = 0;
@@ -79,6 +164,12 @@ export class Bot {
   modelCenterZ = 0;
   modelMeshCount = 0;
   renderedMeshCount = 0;
+  runtimeBoneCount = 0;
+  runtimeAnimationCount = 0;
+  sourceTriangleCount = 0;
+  sourceTextureCount = 0;
+  roleHardwareMeshCount = 0;
+  roleHardwareProfile: BotVisualIdentity['roleLabel'] = 'HUNTER';
   score = 0;
   weapon: WeaponId;
   wantsToThrowGrenade = false;
@@ -90,6 +181,13 @@ export class Bot {
   grenadesThrown = 0;
   grapplesUsed = 0;
   collisionRecoveries = 0;
+  relocations = 0;
+  padLaunches = 0;
+  combatMoves = 0;
+  dodges = 0;
+  pathReplans = 0;
+  pathState: BotPathState = 'none';
+  retreating = false;
   wallContacts = 0;
   ceilingContacts = 0;
   targetOwner: 'player' | number | null = null;
@@ -102,28 +200,48 @@ export class Bot {
   jetpackLocked = false;
   dashCooldown = 0;
   dashesUsed = 0;
+  jumpPadCooldown = 0;
   aimErrorDegrees = 0;
   aimTracking = 0;
   reactionRemaining = 0;
+  knockbackLockout = 0;
+  private hitFlashRemaining = 0;
 
   private tacticalTimer = 0;
   private fireCooldown = 0;
-  private reactionTimer: number;
+  private readonly reactionTimer: number;
   private targetVisibleFor = 0;
   private readonly wishDirection = new THREE.Vector3(0, 0, -1);
-  private avoidTimer = 0;
-  private jumpCooldown = 0;
+  private blockedTimer = 0;
+  private jumpRequested = false;
+  private dashRequested = false;
+  private climbRequested = false;
   private grenadeAmmo = 3;
   private grenadeCooldown = 0;
   private grappleCooldown = 0;
   private stuckTimer = 0;
   private jetpackTimer = 0;
-  private strafeIntent = 0;
   private recoveryRequested = false;
   private readonly availableWeapons = new Set<WeaponId>(['machine', 'shotgun']);
+  private readonly ammo = new Map<WeaponId, number>();
   private readonly progressAnchor = new THREE.Vector3();
   private navigationStallTimer = 0;
-  // Fixed-step bot simulation runs at 120 Hz. Keep mutable scratch state on
+  private weaponLockout = 0;
+  private combatMoveTimer = 0;
+  private combatStrafe = 0;
+  private combatAdvance = 0;
+  private combatStrafing = false;
+  private dodgeCooldown = 0;
+  private lastSeenTargetAt = Number.NEGATIVE_INFINITY;
+  private readonly lastSeenTargetPosition = new THREE.Vector3();
+  private readonly path = new NavPath();
+  private pathBlocked = false;
+  private currentLinkKind: NavLinkKind = NAV_LINK_WALK;
+  private readonly steerPoint = new THREE.Vector3();
+  private lives = 0;
+  private seedBase: number;
+  private readonly random: SeededStream;
+  // Fixed-step bot simulation runs at 60 Hz. Keep mutable scratch state on
   // each bot so movement, collision, and navigation do not fill the young
   // generation with short-lived Vector3 instances when actor count rises.
   private readonly floorNormal = new THREE.Vector3(0, 1, 0);
@@ -134,7 +252,7 @@ export class Bot {
   private readonly scratchSegmentEnd = new THREE.Vector3();
   private readonly scratchDesired = new THREE.Vector3();
   private readonly scratchAimDesired = new THREE.Vector3();
-  private readonly scratchAimRight = new THREE.Vector3();
+  private readonly scratchAimPoint = new THREE.Vector3();
   private readonly scratchFrameStart = new THREE.Vector3();
   private readonly scratchEscapeNormal = new THREE.Vector3();
   private readonly scratchStartPosition = new THREE.Vector3();
@@ -145,17 +263,22 @@ export class Bot {
   private readonly scratchStepDirection = new THREE.Vector3();
   private readonly scratchTraversalDirection = new THREE.Vector3();
   private readonly scratchTraversalProbe = new THREE.Vector3();
+  private readonly scratchPathNode = new THREE.Vector3();
+  private readonly scratchLookahead = new THREE.Vector3();
+  private readonly scratchForward = new THREE.Vector3();
+  private readonly scratchRight = new THREE.Vector3();
+  private readonly scratchProbe = new THREE.Vector3();
   private readonly awarenessDot: number;
-  private readonly grappleMinDistance: number;
   private readonly grenadeCooldownDuration: number;
   private readonly strafeScale: number;
   private readonly wishSpeedBase: number;
-  private readonly chaseDistance: number;
-  private readonly jumpSpeedThreshold: number;
-  private readonly jumpCooldownDuration: number;
   private readonly jetpackBurstDuration: number;
   private readonly grappleCooldownDuration: number;
-  private readonly aimErrorRadians: number;
+  private readonly yawSpeedRadians: number;
+  private readonly yawAccelRadians: number;
+  private readonly aimRates: AimAngleRates = { speedYaw: 0, speedPitch: 0 };
+  private readonly scratchAimAngles = { yaw: 0, pitch: 0 };
+  private readonly scratchIdealAngles = { yaw: 0, pitch: 0 };
   private readonly jetpackEnergy = new JetpackEnergy({
     burnSeconds: MOVEMENT.jetpackBurnSeconds,
     rechargeDelaySeconds: MOVEMENT.jetpackRechargeDelaySeconds,
@@ -170,48 +293,69 @@ export class Bot {
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly renderedMeshes = new Set<string>();
   private readonly bindPoseDebug = new URLSearchParams(window.location.search).has('bindPose');
+  private readonly primaryArmIk = new SupportArmIk();
+  private readonly supportArmIk = new SupportArmIk();
   private readonly jetpackRig: JetpackRig;
 
   constructor(readonly id: number, color: number, spawn: THREE.Vector3, private readonly arena: ArenaRuntime) {
+    this.group.name = `rift-bot-${id}`;
     this.archetypeTuning = botArchetypeForId(id);
     this.archetype = this.archetypeTuning.id;
     this.displayName = this.archetypeTuning.callsign;
     this.visualIdentity = this.archetypeTuning.visual;
+    this.skillProfile = botSkillProfile(this.archetypeTuning);
+    this.seedBase = Bot.hashSeed(arena.seed, id);
+    this.random = new SeededStream(this.seedBase);
     const movementTuning = this.archetypeTuning.movement;
     this.awarenessDot = THREE.MathUtils.lerp(0.02, -0.26, this.archetypeTuning.aggression);
-    this.grappleMinDistance = THREE.MathUtils.lerp(19, 9, movementTuning.grappleTendency);
     this.grenadeCooldownDuration = THREE.MathUtils.lerp(5.4, 4.35, this.archetypeTuning.aggression);
     this.strafeScale = THREE.MathUtils.lerp(0.72, 1.24, movementTuning.strafeTendency);
     // Archetypes differ in route choice and commitment, not in superhuman
     // top speed. A speed pickup is the only way a bot exceeds player wish speed.
     this.wishSpeedBase = MOVEMENT.wishSpeed;
-    this.chaseDistance = THREE.MathUtils.clamp(
-      24 * botObjectiveUtility(this.archetypeTuning, 'player')
-        / Math.max(0.35, botObjectiveUtility(this.archetypeTuning, 'core')),
-      15,
-      34,
-    );
-    this.jumpSpeedThreshold = THREE.MathUtils.lerp(8.2, 5.6, movementTuning.jumpTendency);
-    this.jumpCooldownDuration = THREE.MathUtils.lerp(0.24, 0.12, movementTuning.jumpTendency);
     this.jetpackBurstDuration = THREE.MathUtils.lerp(0.46, 0.72, movementTuning.jetpackTendency);
     this.grappleCooldownDuration = THREE.MathUtils.lerp(1.55, 0.95, movementTuning.grappleTendency);
-    this.aimErrorRadians = THREE.MathUtils.degToRad(
-      THREE.MathUtils.lerp(1.65, 0.65, this.archetypeTuning.aggression),
+    // Warfork yaw_speed 600–950 °/s minus 20*(1-S); yaw_accel 85–115.
+    this.yawSpeedRadians = THREE.MathUtils.degToRad(
+      THREE.MathUtils.lerp(620, 920, this.skillProfile.skill)
+      - 20 * (1 - this.skillProfile.skill),
+    );
+    this.yawAccelRadians = THREE.MathUtils.degToRad(
+      THREE.MathUtils.lerp(85, 115, this.skillProfile.skill),
     );
     this.weapon = (['machine', 'rocket', 'plasma'] as WeaponId[])[id % 3];
     this.availableWeapons.add(this.weapon);
     if (id === 0) this.availableWeapons.add('sniper');
     if (id === 2) this.availableWeapons.add('laser');
-    this.reactionTimer = this.archetypeTuning.reactionSeconds;
+    for (const owned of this.availableWeapons) this.ammo.set(owned, WEAPON_AMMO_MAX[owned]);
+    this.reactionTimer = this.skillProfile.reactionSeconds;
     this.group.userData.archetype = this.archetype;
     this.group.userData.displayName = this.displayName;
     this.group.userData.visualIdentity = this.visualIdentity;
     this.group.userData.floorNormal = this.floorNormal;
+    this.weaponGripSocket.name = `bot-${id}-trigger-hand-socket`;
+    this.supportGripSocket.name = `bot-${id}-support-hand-socket`;
+    this.weaponGripSocket.position.set(-0.22, 1.28, 0.34);
+    this.supportGripSocket.position.set(0.22, 1.3, 0.48);
+    this.group.add(this.weaponGripSocket, this.supportGripSocket);
     this.createModel(color);
-    this.jetpackRig = new JetpackRig({ color });
+    this.jetpackRig = new JetpackRig({ color, vfxOnly: true });
     this.group.add(this.jetpackRig.root);
     this.ready = this.installAuthoredModel(color);
     this.respawn(spawn);
+  }
+
+  private static hashSeed(gameSeed: number, id: number): number {
+    let hash = (gameSeed ^ 0x9e3779b9) >>> 0;
+    hash = Math.imul(hash ^ (id + 1) * 0x85ebca6b, 0xc2b2ae35) >>> 0;
+    hash ^= hash >>> 13;
+    return hash >>> 0;
+  }
+
+  /** Re-seed this bot's private random stream (all bot randomness flows through it). */
+  reseed(gameSeed: number): void {
+    this.seedBase = Bot.hashSeed(gameSeed, this.id);
+    this.random.reseed(this.seedBase);
   }
 
   update(
@@ -221,154 +365,124 @@ export class Bot {
     targetVelocity: THREE.Vector3,
     objective: THREE.Vector3,
     hasTargetLineOfSight: boolean,
+    context: BotUpdateContext = DEFAULT_CONTEXT,
   ): void {
     this.wantsToFire = false;
     this.wantsToThrowGrenade = false;
+    this.knockbackLockout = Math.max(0, this.knockbackLockout - delta);
+    this.updateHitFlash(delta);
     if (!this.alive) {
       this.jetpackActive = false;
       this.jetpackRig.update(false, delta, elapsed, false);
       this.respawnTimer -= delta;
       this.group.rotation.z += delta * 2.5;
+      this.updateAnimation(delta, 0);
       return;
     }
 
     this.fireCooldown = Math.max(0, this.fireCooldown - delta);
-    this.jumpCooldown = Math.max(0, this.jumpCooldown - delta);
     this.grenadeCooldown = Math.max(0, this.grenadeCooldown - delta);
     this.grappleCooldown = Math.max(0, this.grappleCooldown - delta);
     this.jetpackTimer = Math.max(0, this.jetpackTimer - delta);
     this.dashCooldown = Math.max(0, this.dashCooldown - delta);
     this.damageBoost = Math.max(0, this.damageBoost - delta);
     this.speedBoost = Math.max(0, this.speedBoost - delta);
+    this.weaponLockout = Math.max(0, this.weaponLockout - delta);
+    this.dodgeCooldown = Math.max(0, this.dodgeCooldown - delta);
+    this.jumpPadCooldown = Math.max(0, this.jumpPadCooldown - delta);
+    this.blockedTimer = Math.max(0, this.blockedTimer - delta);
+    this.combatMoveTimer -= delta;
     this.tacticalTimer -= delta;
-    const toTarget = this.scratchToTarget.subVectors(target, this.group.position);
+    this.threat.decay(delta);
+
+    const eye = this.scratchBotEye.copy(this.group.position);
+    eye.y += BOT_AIM_HEIGHT;
+    const toTarget = this.scratchToTarget.subVectors(target, eye);
     const targetDistanceSq = toTarget.lengthSq();
     const distance = Math.sqrt(targetDistanceSq);
-    const targetFlatLengthSq = toTarget.x * toTarget.x + toTarget.z * toTarget.z;
-    const facingFlatLengthSq = this.aimDirection.x * this.aimDirection.x
-      + this.aimDirection.z * this.aimDirection.z;
-    const targetFlatScale = targetFlatLengthSq > 0.001 ? 1 / Math.sqrt(targetFlatLengthSq) : 1;
-    const facingFlatScale = facingFlatLengthSq > 0.001 ? 1 / Math.sqrt(facingFlatLengthSq) : 1;
-    this.facingDot = (this.aimDirection.x * facingFlatScale) * (toTarget.x * targetFlatScale)
-      + (this.aimDirection.z * facingFlatScale) * (toTarget.z * targetFlatScale);
+
+    // A hit from outside the awareness cone snaps attention toward the damage
+    // bearing and widens the cone for a moment, like a player turning to a hit.
+    const alerted = this.threat.isAlerted(elapsed);
+    if (alerted && this.threat.hasBearing && !this.targetVisible) {
+      const snap = 1 - Math.exp(-delta * 14);
+      this.aimDirection.lerp(this.threat.damageBearing, snap).normalize();
+    }
+    this.facingDot = this.flatFacingDot(toTarget);
+    const awarenessThreshold = alerted ? -0.98 : this.awarenessDot;
     // A clear BSP trace is necessary but not sufficient: bots only acquire a
-    // target inside their forward 142-degree awareness cone.
-    const visible = distance < 155 && hasTargetLineOfSight && this.facingDot > this.awarenessDot;
+    // target inside their forward awareness cone unless they were just hit.
+    const visible = context.hasTarget && distance < 155 && hasTargetLineOfSight && this.facingDot > awarenessThreshold;
     this.targetVisible = visible;
     this.targetVisibleFor = visible ? this.targetVisibleFor + delta : 0;
     this.reactionRemaining = visible ? Math.max(0, this.reactionTimer - this.targetVisibleFor) : this.reactionTimer;
+    if (visible) {
+      this.lastSeenTargetPosition.copy(target);
+      this.lastSeenTargetAt = elapsed;
+    }
+    const recentlySeen = context.hasTarget && elapsed - this.lastSeenTargetAt <= 2;
     this.navigationTarget.copy(objective);
-    this.avoidTimer = Math.max(0, this.avoidTimer - delta);
+    this.retreating = context.retreat;
     this.chooseWeapon(distance, visible);
 
     if (this.movementLocked) {
       this.jetpackActive = false;
       this.jetpackRig.update(false, delta, elapsed, false);
-      this.velocity.set(0, 0, 0);
+      if (this.knockbackLockout <= 0) this.velocity.set(0, 0, 0);
       if (visible && targetDistanceSq > 0.001) {
-        this.updateAim(delta, elapsed, toTarget, targetVelocity, distance);
-        this.group.rotation.y = Math.atan2(this.aimDirection.x, this.aimDirection.z);
+        this.updateAim(delta, elapsed, eye, target, targetVelocity, distance, context);
       }
-      if (visible && this.targetVisibleFor >= this.reactionTimer && this.fireCooldown <= 0) {
-        this.wantsToFire = true;
-        this.shotsFired += 1;
-        this.fireCooldown = this.weaponCooldownForCurrentWeapon();
-      }
+      this.group.rotation.y = Math.atan2(this.aimDirection.x, this.aimDirection.z);
+      this.tryFire(visible, distance);
       this.group.userData.speed = 0;
       this.updateAnimation(delta, 0);
       return;
     }
 
-    if (distance > this.grappleMinDistance && !this.grappleActive && this.grappleCooldown <= 0) {
-      const botEye = this.scratchBotEye.copy(this.group.position);
-      botEye.y += BOT_EYE_HEIGHT;
-      let grappleHit: ReturnType<ArenaRuntime['segmentHitDetails']> = null;
-      for (let hookIndex = 0; hookIndex < 3; hookIndex += 1) {
-        const hookDirection = this.scratchDirectionA;
-        if (hookIndex === 0) {
-          hookDirection.copy(toTarget).normalize();
-          hookDirection.y += 0.42;
-          hookDirection.normalize();
-        } else if (hookIndex === 1) {
-          hookDirection.set(0, 1, 0);
-        } else {
-          hookDirection.copy(this.wishDirection);
-          hookDirection.y += 0.32;
-          hookDirection.normalize();
-        }
-        this.scratchSegmentEnd.copy(botEye).addScaledVector(hookDirection, GRAPPLE.maxLength);
-        const hit = this.arena.segmentHitDetails(botEye, this.scratchSegmentEnd);
-        if (!hit || hit.distance <= GRAPPLE.minLength) continue;
-        grappleHit = hit;
-        break;
-      }
-      if (grappleHit) {
-        this.grappleActive = true;
-        this.grappleAnchor.copy(grappleHit.point).addScaledVector(grappleHit.normal, 0.035);
-        this.grappleLength = grappleHit.distance;
-        this.grapplesUsed += 1;
-      }
-    }
-    if (this.grenadeAmmo > 0 && this.grenadeCooldown <= 0 && distance > 7 && distance < 28
-      && (visible || distance < 18)) {
-      this.wantsToThrowGrenade = true;
-      this.grenadeAmmo -= 1;
-      this.grenadeCooldown = this.grenadeCooldownDuration;
-      this.grenadesThrown += 1;
-    }
-
     const horizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    const inCombat = visible && distance < COMBAT_RANGE && !context.retreat;
+    const navigation = context.navigation;
+
     if (this.tacticalTimer <= 0) {
-      // A slightly irregular decision cadence prevents the metronomic
-      // left/right switching that reads as scripted movement.
-      this.tacticalTimer = 0.085 + (Math.sin(elapsed * 0.71 + this.id * 1.83) * 0.5 + 0.5) * 0.095;
-      const chaseTarget = visible && distance < this.chaseDistance ? target : objective;
-      const desired = this.scratchDesired.subVectors(chaseTarget, this.group.position).setY(0);
-      if (desired.lengthSq() > 0.001) desired.normalize();
-      const strafeAmount = (visible ? 0.68 : 0.23) * this.strafeScale;
-      this.strafeIntent = THREE.MathUtils.lerp(
-        this.strafeIntent,
-        Math.sin(elapsed * (0.47 + this.id * 0.035) + this.id * 2.1),
-        0.38,
-      );
-      const strafe = this.strafeIntent * strafeAmount;
-      const desiredX = desired.x;
-      const desiredZ = desired.z;
-      desired.x -= desiredZ * strafe;
-      desired.z += desiredX * strafe;
-      desired.normalize();
-      if (this.avoidTimer > 0) {
-        desired.applyAxisAngle(THREE.Object3D.DEFAULT_UP, (this.id % 2 ? -1 : 1) * 0.82);
+      // A slightly irregular decision cadence prevents metronomic switching.
+      this.tacticalTimer = 0.085 + this.random.next() * 0.05;
+      this.planPathIfNeeded(objective, elapsed, navigation);
+      const desired = this.steerAlongPath(objective, navigation);
+      this.combatStrafing = false;
+      if (inCombat && distance < 40 && this.currentLinkKind !== NAV_LINK_PAD) {
+        this.applyCombatMovement(desired, toTarget, distance, navigation);
       }
-      this.selectTraversableHeading(desired);
+      if (this.blockedTimer > 0 && desired.lengthSq() > 0.001) this.selectTraversableHeading(desired);
       this.wishDirection.copy(desired);
-      const wishSpeed = this.wishSpeedBase * (this.speedBoost > 0 ? 1.28 : 1);
-      const currentAlong = this.velocity.x * desired.x + this.velocity.z * desired.z;
-      const acceleration = this.grounded ? MOVEMENT.groundAcceleration : MOVEMENT.airAcceleration;
-      const add = Math.min(acceleration * this.tacticalTimer * wishSpeed, wishSpeed - currentAlong);
-      if (add > 0) {
-        this.velocity.x += desired.x * add;
-        this.velocity.z += desired.z * add;
-      }
-      if (this.grounded && this.jumpCooldown <= 0 && (visible || horizontalSpeed > this.jumpSpeedThreshold)) {
-        this.velocity.y = MOVEMENT.jumpImpulse;
-        this.grounded = false;
-        this.jumpCooldown = this.jumpCooldownDuration;
-        this.bunnyHops += 1;
-      }
-      const dashWindow = Math.sin(elapsed * 0.93 + this.id * 2.47) > 0.72;
-      if (this.grounded && this.dashCooldown <= 0 && horizontalSpeed > 4.5
-        && (this.avoidTimer > 0.25 || (visible && distance > 9 && distance < 32 && dashWindow))) {
-        this.velocity.addScaledVector(desired, MOVEMENT.dashImpulse);
-        this.dashCooldown = MOVEMENT.dashCooldown;
-        this.dashesUsed += 1;
+      this.planTraversalActions(horizontalSpeed, objective, navigation);
+      this.considerGrapple(eye, inCombat, objective);
+    }
+    this.processThreats(context);
+    this.considerGrenade(eye, target, distance, visible, recentlySeen);
+
+    // ---- Locomotion physics, every tick (Quake friction + Q3 acceleration) ----
+    const jumpedThisTick = this.tryJump();
+    this.tryDash();
+    if (this.grounded && !jumpedThisTick && horizontalSpeed > 0 && this.knockbackLockout <= 0) {
+      const skiing = this.floorNormal.y < 0.965 && horizontalSpeed > 8;
+      if (skiing) {
+        const friction = Math.max(0, 1 - MOVEMENT.skiFriction * delta);
+        this.velocity.x *= friction;
+        this.velocity.z *= friction;
+      } else {
+        const control = Math.max(MOVEMENT.stopSpeed, horizontalSpeed);
+        const nextSpeed = Math.max(0, horizontalSpeed - control * MOVEMENT.groundFriction * delta);
+        const scale = nextSpeed / horizontalSpeed;
+        this.velocity.x *= scale;
+        this.velocity.z *= scale;
       }
     }
+    this.accelerate(delta);
 
     if (this.grappleActive) {
-      const botEye = this.scratchBotEye.copy(this.group.position);
-      botEye.y += BOT_EYE_HEIGHT;
-      const toAnchor = this.scratchDirectionA.subVectors(this.grappleAnchor, botEye);
+      const anchorEye = this.scratchDirectionB.copy(this.group.position);
+      anchorEye.y += BOT_EYE_HEIGHT;
+      const toAnchor = this.scratchDirectionA.subVectors(this.grappleAnchor, anchorEye);
       const anchorDistance = toAnchor.length();
       if (anchorDistance < 0.75 || anchorDistance > GRAPPLE.maxLength * 1.35) {
         this.grappleActive = false;
@@ -388,14 +502,11 @@ export class Bot {
       }
     }
 
-    // Bots spend short, readable fuel bursts to recover altitude, pursue an
-    // elevated objective, or arrest a dangerous fall. Their thrust uses the
-    // same acceleration and rise-speed cap as the player jetpack.
-    const needsVerticalRecovery = objective.y > this.group.position.y + 1.25
-      || target.y > this.group.position.y + 2.4
-      || this.velocity.y < -4.2
-      || (this.avoidTimer > 0.2 && !this.grounded);
-    if (!this.grounded && this.jetpackTimer <= 0 && needsVerticalRecovery && !this.jetpackEnergy.snapshot().locked) {
+    // Jetpack: only for climbs the path cannot walk or jump, or to arrest a
+    // fall toward the kill plane. Same thrust/cap as the player jetpack.
+    const fallDanger = this.velocity.y < -7 && this.fallingTowardKillPlane();
+    if (!this.grounded && this.jetpackTimer <= 0 && (this.climbRequested || fallDanger)
+      && !this.jetpackEnergy.snapshot().locked) {
       this.jetpackTimer = this.jetpackBurstDuration;
       this.jetpackBursts += 1;
     }
@@ -410,16 +521,10 @@ export class Bot {
       );
     }
 
-    if (this.grounded && horizontalSpeed > 0) {
-      const floorNormal = this.group.userData.floorNormal as THREE.Vector3 | undefined;
-      const skiing = floorNormal ? floorNormal.y < 0.965 && horizontalSpeed > 8 : false;
-      const friction = Math.max(0, 1 - (skiing ? MOVEMENT.skiFriction : MOVEMENT.groundFriction) * delta);
-      this.velocity.x *= friction;
-      this.velocity.z *= friction;
-    }
     this.velocity.y -= MOVEMENT.gravity * delta;
     const speed = this.velocity.length();
-    if (speed > GRAPPLE.maxSpeed) this.velocity.multiplyScalar(GRAPPLE.maxSpeed / speed);
+    const cap = this.grappleActive ? GRAPPLE.maxSpeed : MOVEMENT.maxSpeed;
+    if (speed > cap) this.velocity.multiplyScalar(cap / speed);
 
     // Grappling can accelerate a bot well beyond its ordinary run speed. Use
     // the same distance-bounded movement substeps as the player so a capsule
@@ -454,7 +559,7 @@ export class Bot {
       if (wasGrounded && (contact.wallContact || blocked)) {
         const stepped = this.tryStepMove(startPosition, startVelocity, blockedPosition, subDelta);
         if (stepped) contact = stepped;
-        else this.avoidTimer = Math.max(this.avoidTimer, 0.48);
+        else this.blockedTimer = Math.max(this.blockedTimer, 0.48);
       }
       this.grounded = contact.grounded;
       this.floorNormal.copy(contact.contactNormal);
@@ -471,17 +576,17 @@ export class Bot {
 
       // Once the capsule reaches the grapple surface, continuing to reel in
       // only pins the AI against that wall/ceiling. Release and preserve a
-      // small outward impulse so its existing strafe plan can carry it away.
+      // small outward impulse so its existing movement plan can carry it away.
       if (this.grappleActive && (contact.wallContact || ceilingContact)) {
-        const eye = this.scratchBotEye.copy(this.group.position);
-        eye.y += BOT_EYE_HEIGHT;
-        const ropeDirection = this.scratchDirectionA.subVectors(this.grappleAnchor, eye).normalize();
+        const ropeEye = this.scratchDirectionB.copy(this.group.position);
+        ropeEye.y += BOT_EYE_HEIGHT;
+        const ropeDirection = this.scratchDirectionA.subVectors(this.grappleAnchor, ropeEye).normalize();
         const surfaceNormal = ceilingContact ? contact.contactNormal : contact.wallNormal;
         if (surfaceNormal.lengthSq() > 0.5 && ropeDirection.dot(surfaceNormal) < -0.22) {
           this.grappleActive = false;
           this.grappleLength = 0;
           this.grappleCooldown = this.grappleRecoveryCooldown();
-          this.avoidTimer = Math.max(this.avoidTimer, 0.7);
+          this.blockedTimer = Math.max(this.blockedTimer, 0.7);
           this.velocity.addScaledVector(surfaceNormal, ceilingContact ? 1.6 : 2.8);
           if (!ceilingContact) this.velocity.y = Math.max(this.velocity.y, 2.2);
         }
@@ -499,40 +604,16 @@ export class Bot {
     if (lowProgress) this.stuckTimer += delta;
     else this.stuckTimer = Math.max(0, this.stuckTimer - delta * 2.5);
     this.stalledFor = this.stuckTimer;
-
-    if (this.stuckTimer >= 0.42 && escapeNormal.lengthSq() > 0.25) {
-      escapeNormal.normalize();
-      this.grappleActive = false;
-      this.grappleLength = 0;
-      this.grappleCooldown = Math.max(this.grappleCooldown, this.grappleRecoveryCooldown());
-      this.group.position.addScaledVector(escapeNormal, BOT_COLLIDER_RADIUS * 0.3);
-      this.velocity.addScaledVector(escapeNormal, frameCeilingContact ? 3.2 : 4.4);
-      if (!frameCeilingContact) this.velocity.y = Math.max(this.velocity.y, 3.4);
-      this.arena.resolveCapsule(this.group.position, this.velocity, BOT_COLLIDER_RADIUS, BOT_COLLIDER_HEIGHT);
-      this.avoidTimer = Math.max(this.avoidTimer, 0.9);
-      this.stuckTimer = 0;
-      this.collisionRecoveries += 1;
-    }
-
-    if (this.stuckTimer >= 2.4 || this.group.position.y < this.arena.killY) {
-      this.recoveryRequested = true;
-      this.stuckTimer = 0;
-      this.stalledFor = 0;
-    }
+    this.resolveStuck(escapeNormal, frameCeilingContact);
 
     if (visible && targetDistanceSq > 0.001) {
-      this.updateAim(delta, elapsed, toTarget, targetVelocity, distance);
+      this.updateAim(delta, elapsed, eye, target, targetVelocity, distance, context);
     } else if (this.wishDirection.lengthSq() > 0.001) {
       const turn = 1 - Math.exp(-delta * 5.2);
       this.aimDirection.lerp(this.wishDirection, turn).normalize();
     }
     this.group.rotation.y = Math.atan2(this.aimDirection.x, this.aimDirection.z);
-
-    if (visible && this.targetVisibleFor >= this.reactionTimer && this.fireCooldown <= 0) {
-      this.wantsToFire = true;
-      this.shotsFired += 1;
-      this.fireCooldown = this.weaponCooldownForCurrentWeapon();
-    }
+    this.tryFire(visible, distance);
 
     const resolvedHorizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
     this.group.userData.speed = resolvedHorizontalSpeed;
@@ -543,7 +624,12 @@ export class Bot {
     } else {
       this.navigationStallTimer += delta;
     }
-    if (this.navigationStallTimer >= 4.25) {
+    if (this.navigationStallTimer >= 4.25 && !this.pathBlocked) {
+      // No progress toward the objective: re-plan before anything drastic.
+      this.pathBlocked = true;
+      this.blockedTimer = Math.max(this.blockedTimer, 0.6);
+    }
+    if (this.navigationStallTimer >= NAVIGATION_STALL_RELOCATE_SECONDS) {
       this.recoveryRequested = true;
       this.navigationStallTimer = 0;
       this.progressAnchor.copy(this.group.position);
@@ -551,6 +637,425 @@ export class Bot {
     if (this.grounded) this.jetpackActive = false;
     this.jetpackRig.update(this.jetpackActive, delta, elapsed, false);
     this.updateAnimation(delta, resolvedHorizontalSpeed);
+  }
+
+  private flatFacingDot(toTarget: THREE.Vector3): number {
+    const targetFlatLengthSq = toTarget.x * toTarget.x + toTarget.z * toTarget.z;
+    const facingFlatLengthSq = this.aimDirection.x * this.aimDirection.x
+      + this.aimDirection.z * this.aimDirection.z;
+    const targetFlatScale = targetFlatLengthSq > 0.001 ? 1 / Math.sqrt(targetFlatLengthSq) : 1;
+    const facingFlatScale = facingFlatLengthSq > 0.001 ? 1 / Math.sqrt(facingFlatLengthSq) : 1;
+    return (this.aimDirection.x * facingFlatScale) * (toTarget.x * targetFlatScale)
+      + (this.aimDirection.z * facingFlatScale) * (toTarget.z * targetFlatScale);
+  }
+
+  private planPathIfNeeded(goal: THREE.Vector3, elapsed: number, navigation: BotNavigationGrid | null): void {
+    if (!navigation) {
+      this.path.valid = false;
+      return;
+    }
+    const needsPlan = !this.path.valid
+      || this.pathBlocked
+      || elapsed - this.path.plannedAt > PATH_REPLAN_INTERVAL
+      || goal.distanceToSquared(this.path.goal) > PATH_GOAL_DRIFT * PATH_GOAL_DRIFT;
+    if (!needsPlan) return;
+    this.pathBlocked = false;
+    this.pathReplans += 1;
+    navigation.planPath(this.group.position, goal, this.path);
+    this.path.plannedAt = elapsed;
+  }
+
+  /** Two-node lookahead path following; falls back to a direct heading. */
+  private steerAlongPath(goal: THREE.Vector3, navigation: BotNavigationGrid | null): THREE.Vector3 {
+    const desired = this.scratchDesired;
+    const position = this.group.position;
+    if (!navigation || !this.path.valid || this.path.length < 2) {
+      desired.subVectors(goal, position).setY(0);
+      if (desired.lengthSq() > 0.001) desired.normalize();
+      this.currentLinkKind = NAV_LINK_WALK;
+      this.steerPoint.copy(goal);
+      this.pathState = navigation && !this.path.valid ? 'blocked' : 'direct';
+      // Without a path the seven-probe heading search is the only avoidance.
+      this.selectTraversableHeading(desired);
+      return desired;
+    }
+    const path = this.path;
+    while (path.cursor < path.length - 1) {
+      path.point(path.cursor, this.scratchPathNode);
+      const reach = path.kind(path.cursor) === NAV_LINK_PAD ? 0.9 : 1.4;
+      const flat = Math.hypot(this.scratchPathNode.x - position.x, this.scratchPathNode.z - position.z);
+      if (flat > reach) break;
+      path.cursor += 1;
+    }
+    const steer = path.point(path.cursor, this.scratchPathNode);
+    const kind = path.kind(path.cursor);
+    this.currentLinkKind = kind;
+    if (kind !== NAV_LINK_PAD && path.cursor + 1 < path.length) {
+      const nextKind = path.kind(path.cursor + 1);
+      if (nextKind === NAV_LINK_WALK) {
+        const lookahead = path.point(path.cursor + 1, this.scratchLookahead);
+        if (navigation.segmentWalkable(position, lookahead)) steer.copy(lookahead);
+      }
+    }
+    this.steerPoint.copy(steer);
+    desired.subVectors(steer, position).setY(0);
+    if (desired.lengthSq() > 0.001) desired.normalize();
+    this.pathState = 'following';
+    return desired;
+  }
+
+  private applyCombatMovement(
+    desired: THREE.Vector3,
+    toTarget: THREE.Vector3,
+    distance: number,
+    navigation: BotNavigationGrid | null,
+  ): void {
+    const forward = this.scratchForward.set(toTarget.x, 0, toTarget.z);
+    if (forward.lengthSq() < 0.001) return;
+    forward.normalize();
+    const right = this.scratchRight.set(-forward.z, 0, forward.x);
+    if (this.combatMoveTimer <= 0) this.rerollCombatMove(distance);
+    if (this.combatStrafe !== 0 && !this.footingAhead(right, this.combatStrafe, forward, this.combatAdvance, navigation)) {
+      this.combatStrafe = -this.combatStrafe;
+      if (!this.footingAhead(right, this.combatStrafe, forward, this.combatAdvance, navigation)) this.combatStrafe = 0;
+    }
+    if (this.combatAdvance !== 0 && this.combatStrafe === 0
+      && !this.footingAhead(right, 0, forward, this.combatAdvance, navigation)) {
+      this.combatAdvance = 0;
+    }
+    desired.set(0, 0, 0)
+      .addScaledVector(right, this.combatStrafe * this.strafeScale)
+      .addScaledVector(forward, this.combatAdvance);
+    if (desired.lengthSq() > 0.001) desired.normalize();
+    this.combatStrafing = this.combatStrafe !== 0;
+  }
+
+  /** Warfork-style stepwise random side-step held for `combatmove_timeout`. */
+  private rerollCombatMove(distance: number): void {
+    const roll = this.random.next();
+    if (distance < 8) {
+      this.combatStrafe = roll < 0.5 ? -1 : 1;
+      this.combatAdvance = this.weapon === 'shotgun' ? 1 : (this.random.next() < 0.3 ? -1 : 0);
+    } else if (distance < 20) {
+      this.combatStrafe = roll < 0.5 ? -1 : 1;
+      this.combatAdvance = this.random.next() < 0.3 ? 1 : 0;
+    } else if (distance < 36) {
+      this.combatStrafe = roll < 0.5 ? -1 : 1;
+      this.combatAdvance = 0;
+    } else if (roll < 0.75) {
+      this.combatStrafe = this.random.next() < 0.5 ? -1 : 1;
+      this.combatAdvance = this.archetypeTuning.aggression > 0.7 ? 1 : 0;
+    } else {
+      this.combatStrafe = 0;
+      this.combatAdvance = 1;
+    }
+    this.combatMoveTimer = this.random.range(0.2, 1.3);
+    this.combatMoves += 1;
+  }
+
+  /** Never strafe off a ledge: the destination cell must be walkable near our height. */
+  private footingAhead(
+    right: THREE.Vector3,
+    strafe: number,
+    forward: THREE.Vector3,
+    advance: number,
+    navigation: BotNavigationGrid | null,
+  ): boolean {
+    const probe = this.scratchProbe.set(0, 0, 0)
+      .addScaledVector(right, strafe)
+      .addScaledVector(forward, advance * 0.5);
+    if (probe.lengthSq() < 0.001) return true;
+    probe.normalize().multiplyScalar(2.2).add(this.group.position);
+    if (navigation) return navigation.isWalkablePoint(probe, 1.6);
+    return this.arena.isTraversablePoint(probe, this.group.position.y + 3.5);
+  }
+
+  private planTraversalActions(
+    horizontalSpeed: number,
+    objective: THREE.Vector3,
+    navigation: BotNavigationGrid | null,
+  ): void {
+    this.climbRequested = false;
+    const position = this.group.position;
+    const flatToSteer = Math.hypot(this.steerPoint.x - position.x, this.steerPoint.z - position.z);
+    if (this.grounded) {
+      if (this.currentLinkKind === NAV_LINK_JUMP && flatToSteer <= 2.8) {
+        this.jumpRequested = true;
+      } else if (horizontalSpeed > 3 && flatToSteer > 1.5 && this.ledgeGapAhead()) {
+        this.jumpRequested = true;
+      } else if (this.skillProfile.bunnyHops && !this.combatStrafing && horizontalSpeed >= this.wishSpeedBase * 0.9
+        && flatToSteer > 6 && this.pathStraightAhead(horizontalSpeed)) {
+        this.jumpRequested = true;
+      }
+    }
+    // A climb the grid cannot express (no path, goal well above us) is the one
+    // case where fuel is spent: jump first, then burst once airborne.
+    if (navigation && !this.path.valid && objective.y > position.y + 2.5
+      && Math.hypot(objective.x - position.x, objective.z - position.z) < 14) {
+      this.climbRequested = true;
+      if (this.grounded) this.jumpRequested = true;
+    } else if (this.currentLinkKind === NAV_LINK_JUMP && this.steerPoint.y > position.y + 1.2 && !this.grounded) {
+      this.climbRequested = true;
+    }
+  }
+
+  private ledgeGapAhead(): boolean {
+    const position = this.group.position;
+    const probe = this.scratchProbe.copy(position).addScaledVector(this.wishDirection, 1.4);
+    const floor = this.arena.floorHeightAt(probe.x, probe.z, position.y + 0.6);
+    const gap = floor === null || floor < position.y - 2.4;
+    return gap && this.steerPoint.y >= position.y - 1.2;
+  }
+
+  private pathStraightAhead(horizontalSpeed: number): boolean {
+    const along = (this.velocity.x * this.wishDirection.x + this.velocity.z * this.wishDirection.z) / horizontalSpeed;
+    if (along < 0.94) return false;
+    if (!this.path.valid || this.path.cursor + 1 >= this.path.length) return true;
+    const next = this.path.point(this.path.cursor + 1, this.scratchLookahead);
+    const dx = next.x - this.group.position.x;
+    const dz = next.z - this.group.position.z;
+    const length = Math.hypot(dx, dz);
+    if (length < 0.5) return true;
+    return (dx * this.wishDirection.x + dz * this.wishDirection.z) / length > 0.9;
+  }
+
+  private fallingTowardKillPlane(): boolean {
+    const position = this.group.position;
+    const floor = this.arena.floorHeightAt(position.x, position.z, position.y + 0.5);
+    return floor === null || floor < this.arena.killY + 2;
+  }
+
+  /** Event-driven dodges: being hit, or a hostile projectile predicted to land nearby. */
+  private processThreats(context: BotUpdateContext): void {
+    if (!this.skillProfile.dodgesProjectiles) {
+      this.threat.consumeDodgeRequest();
+      return;
+    }
+    const right = this.scratchRight.set(-this.aimDirection.z, 0, this.aimDirection.x);
+    if (this.threat.consumeDodgeRequest() && this.dodgeCooldown <= 0) {
+      let side = this.random.next() < 0.5 ? -1 : 1;
+      if (this.threat.hasBearing) {
+        const lateral = this.threat.damageBearing.x * right.x + this.threat.damageBearing.z * right.z;
+        if (Math.abs(lateral) > 0.3) side = lateral > 0 ? -1 : 1;
+      }
+      this.dodge(side);
+    }
+    if (this.dodgeCooldown > 0) return;
+    const threats = context.threats;
+    const position = this.group.position;
+    for (let index = 0; index < threats.length; index += 1) {
+      const threat = threats[index];
+      if (!threat.active || threat.owner === this.id) continue;
+      const dx = threat.position.x - position.x;
+      const dy = threat.position.y - position.y;
+      const dz = threat.position.z - position.z;
+      const reach = 5 + threat.radius;
+      if (dx * dx + dy * dy * 0.35 + dz * dz > reach * reach) continue;
+      const lateral = dx * right.x + dz * right.z;
+      this.dodge(Math.abs(lateral) > 0.2 ? (lateral > 0 ? -1 : 1) : (this.random.next() < 0.5 ? -1 : 1));
+      break;
+    }
+  }
+
+  private dodge(side: number): void {
+    this.combatStrafe = side;
+    this.combatAdvance = 0;
+    this.combatMoveTimer = this.random.range(0.2, 1.0);
+    this.dodgeCooldown = 0.35;
+    this.dodges += 1;
+    const right = this.scratchRight.set(-this.aimDirection.z, 0, this.aimDirection.x);
+    this.wishDirection.copy(right).multiplyScalar(side);
+    this.combatStrafing = true;
+  }
+
+  /** Grapple toward a path node or distant goal, never at the fight target. */
+  private considerGrapple(
+    eye: THREE.Vector3,
+    inCombat: boolean,
+    goal: THREE.Vector3,
+  ): void {
+    if (this.grappleActive || this.grappleCooldown > 0 || this.archetypeTuning.movement.grappleTendency < 0.2) return;
+    const position = this.group.position;
+    const hookDirection = this.scratchDirectionA;
+    let candidates = 0;
+    for (let attempt = 1; attempt < 3 && candidates < 2; attempt += 1) {
+      if (attempt === 1) {
+        if (!this.path.valid) continue;
+        const flat = Math.hypot(this.steerPoint.x - position.x, this.steerPoint.z - position.z);
+        if (flat < 10 && this.steerPoint.y < position.y + 2.5) continue;
+        hookDirection.subVectors(this.steerPoint, eye).normalize();
+        hookDirection.y += 0.35;
+      } else {
+        if (inCombat || !this.grounded) continue;
+        const flatGoal = Math.hypot(goal.x - position.x, goal.z - position.z);
+        if (flatGoal < 24 || this.random.next() > 0.15) continue;
+        hookDirection.copy(this.wishDirection);
+        hookDirection.y += 0.3;
+      }
+      hookDirection.normalize();
+      candidates += 1;
+      if (hookDirection.y > 0.85) continue;
+      this.scratchSegmentEnd.copy(eye).addScaledVector(hookDirection, GRAPPLE.maxLength);
+      const hit = this.arena.segmentHitDetails(eye, this.scratchSegmentEnd);
+      if (!hit || hit.distance <= GRAPPLE.minLength + 1.5 || hit.point.y < eye.y + 0.5) continue;
+      this.grappleActive = true;
+      this.grappleAnchor.copy(hit.point).addScaledVector(hit.normal, 0.035);
+      this.grappleLength = hit.distance;
+      this.grapplesUsed += 1;
+      return;
+    }
+  }
+
+  /** Solve a lob for the visible (or very recently seen) target; never through walls. */
+  private considerGrenade(
+    eye: THREE.Vector3,
+    target: THREE.Vector3,
+    distance: number,
+    visible: boolean,
+    recentlySeen: boolean,
+  ): void {
+    if (this.grenadeAmmo <= 0 || this.grenadeCooldown > 0 || !(visible || recentlySeen)) return;
+    const aimPoint = visible ? target : this.lastSeenTargetPosition;
+    const flat = Math.hypot(aimPoint.x - eye.x, aimPoint.z - eye.z);
+    if (flat < GRENADE.splash + 1.2 || flat > 13 || distance > 16) return;
+    const rise = aimPoint.y - eye.y;
+    if (rise < -7 || rise > 3.5) return;
+    const flightTime = solveBallisticLaunch(eye, aimPoint, GRENADE.throwSpeed, GRENADE.gravity, this.grenadeLaunchVelocity);
+    if (flightTime <= 0 || flightTime > GRENADE.fuse - 0.4) return;
+    const launchDirection = this.scratchDirectionA.copy(this.grenadeLaunchVelocity).normalize();
+    this.scratchSegmentEnd.copy(eye).addScaledVector(launchDirection, 3);
+    if (!this.arena.hasLineOfSight(eye, this.scratchSegmentEnd, 0.2)) return;
+    this.wantsToThrowGrenade = true;
+    this.grenadeAmmo -= 1;
+    this.grenadeCooldown = this.grenadeCooldownDuration;
+    this.grenadesThrown += 1;
+  }
+
+  private tryJump(): boolean {
+    if (!this.jumpRequested) return false;
+    this.jumpRequested = false;
+    if (!this.grounded) return false;
+    const rise = this.velocity.y;
+    if (rise > MOVEMENT.doubleJumpStackThreshold * MOVEMENT.jumpImpulse) {
+      this.velocity.y = rise + MOVEMENT.jumpImpulse;
+    } else {
+      this.velocity.y = Math.max(0, rise) + MOVEMENT.jumpImpulse;
+    }
+    this.grounded = false;
+    this.dashCooldown = 0;
+    this.bunnyHops += 1;
+    return true;
+  }
+
+  private tryDash(): void {
+    if (!this.dashRequested) return;
+    this.dashRequested = false;
+    if (!this.grounded || this.dashCooldown > 0 || this.knockbackLockout > 0) return;
+    const wishLength = Math.hypot(this.wishDirection.x, this.wishDirection.z);
+    const dirX = wishLength > 0.01 ? this.wishDirection.x / wishLength : 0;
+    const dirZ = wishLength > 0.01 ? this.wishDirection.z / wishLength : 0;
+    if (dirX === 0 && dirZ === 0) return;
+    const current = Math.hypot(this.velocity.x, this.velocity.z);
+    const dashSpeed = Math.max(current, MOVEMENT.dashSpeed * (this.speedBoost > 0 ? 1.25 : 1));
+    this.velocity.x = dirX * dashSpeed;
+    this.velocity.z = dirZ * dashSpeed;
+    this.velocity.y = Math.max(this.velocity.y, MOVEMENT.dashUpSpeed);
+    this.dashCooldown = MOVEMENT.dashCooldown;
+    this.grounded = false;
+    this.dashesUsed += 1;
+  }
+
+  /** Q3 acceleration every tick, plus CPM-style air control when airborne. */
+  private accelerate(delta: number): void {
+    const wish = this.wishDirection;
+    const wishLengthSq = wish.x * wish.x + wish.z * wish.z;
+    if (wishLengthSq < 1e-4) return;
+    const wishSpeed = this.wishSpeedBase * (this.speedBoost > 0 ? 1.28 : 1);
+    const currentAlong = this.velocity.x * wish.x + this.velocity.z * wish.z;
+    const acceleration = this.grounded
+      ? MOVEMENT.groundAcceleration
+      : (currentAlong < 0 ? MOVEMENT.airDeceleration : MOVEMENT.airAcceleration);
+    const add = Math.min(acceleration * delta * wishSpeed, wishSpeed - currentAlong);
+    if (add > 0) {
+      this.velocity.x += wish.x * add;
+      this.velocity.z += wish.z * add;
+    }
+    if (this.grounded || this.grappleActive || this.knockbackLockout > 0) return;
+    // PM_Aircontrol: preserve speed, rotate the horizontal heading toward wish.
+    const horizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    if (horizontalSpeed < 0.5) return;
+    const headingX = this.velocity.x / horizontalSpeed;
+    const headingZ = this.velocity.z / horizontalSpeed;
+    const dot = headingX * wish.x + headingZ * wish.z;
+    if (dot <= 0) return;
+    const k = 32 * MOVEMENT.airControl * dot * dot * delta;
+    let nextX = headingX * horizontalSpeed + wish.x * k;
+    let nextZ = headingZ * horizontalSpeed + wish.z * k;
+    const nextLength = Math.hypot(nextX, nextZ);
+    if (nextLength < 1e-5) return;
+    nextX = nextX / nextLength * horizontalSpeed;
+    nextZ = nextZ / nextLength * horizontalSpeed;
+    this.velocity.x = nextX;
+    this.velocity.z = nextZ;
+  }
+
+  /**
+   * Escalating stuck response: nudge off the surface, re-plan, jump, rotate
+   * the heading, and only after six seconds ask Game to relocate the body.
+   */
+  private resolveStuck(escapeNormal: THREE.Vector3, frameCeilingContact: boolean): void {
+    if (this.stuckTimer >= 0.42 && escapeNormal.lengthSq() > 0.25) {
+      escapeNormal.normalize();
+      this.grappleActive = false;
+      this.grappleLength = 0;
+      this.grappleCooldown = Math.max(this.grappleCooldown, this.grappleRecoveryCooldown());
+      this.group.position.addScaledVector(escapeNormal, BOT_COLLIDER_RADIUS * 0.3);
+      this.velocity.addScaledVector(escapeNormal, frameCeilingContact ? 3.2 : 4.4);
+      if (!frameCeilingContact) this.velocity.y = Math.max(this.velocity.y, 3.4);
+      this.arena.resolveCapsule(this.group.position, this.velocity, BOT_COLLIDER_RADIUS, BOT_COLLIDER_HEIGHT);
+      this.blockedTimer = Math.max(this.blockedTimer, 0.9);
+      this.collisionRecoveries += 1;
+      this.pathBlocked = true;
+      this.stuckTimer = Math.max(0, this.stuckTimer - 0.42);
+      return;
+    }
+    if (this.stuckTimer >= 0.9 && !this.pathBlocked) {
+      this.pathBlocked = true;
+      this.blockedTimer = Math.max(this.blockedTimer, 0.6);
+    }
+    if (this.stuckTimer >= 1.6 && this.grounded) this.jumpRequested = true;
+    if (this.stuckTimer >= 2.4 && this.blockedTimer <= 0.05) {
+      const angle = (this.random.next() < 0.5 ? -1 : 1) * (Math.PI * 0.5);
+      this.wishDirection.applyAxisAngle(THREE.Object3D.DEFAULT_UP, angle);
+      this.blockedTimer = 0.8;
+    }
+    if (this.stuckTimer >= STUCK_RELOCATE_SECONDS || this.group.position.y < this.arena.killY) {
+      this.recoveryRequested = true;
+      this.stuckTimer = 0;
+      this.stalledFor = 0;
+    }
+  }
+
+  /** Warfork-style fire decision: in-front + skill delay, along the hunted heading. */
+  private tryFire(visible: boolean, distance: number): void {
+    if (BOT_WEAPON_RANGE[this.weapon] < distance) return;
+    if (!INFINITE_AMMO_WEAPONS.has(this.weapon) && (this.ammo.get(this.weapon) ?? 0) <= 0) {
+      this.weaponLockout = 0;
+      return;
+    }
+    const continuous = this.weapon === 'laser' || this.weapon === 'plasma';
+    if (!botMayPullTrigger({
+      visible,
+      acquired: this.targetVisibleFor >= this.reactionTimer,
+      fireCooldown: this.fireCooldown,
+      continuous,
+      fireProbability: this.skillProfile.fireProbability,
+      unitRandom: continuous ? 0 : this.random.next(),
+    })) return;
+    this.wantsToFire = true;
+    this.shotsFired += 1;
+    if (!INFINITE_AMMO_WEAPONS.has(this.weapon)) this.ammo.set(this.weapon, (this.ammo.get(this.weapon) ?? 1) - 1);
+    this.fireCooldown = this.weaponCooldownForCurrentWeapon();
   }
 
   private tryStepMove(
@@ -616,11 +1121,22 @@ export class Bot {
     if (this.health <= 0) {
       this.health = 0;
       this.alive = false;
-      this.respawnTimer = 1.6;
+      this.respawnTimer = this.skillProfile.respawnDelaySeconds;
       this.velocity.set(0, 5, 0);
       return true;
     }
     return false;
+  }
+
+  /** Remember who hurt us and from where so targeting and awareness can react. */
+  registerDamage(source: BotDamageSource, amount: number, origin: THREE.Vector3 | null, elapsed: number): void {
+    if (!this.alive) return;
+    this.threat.registerDamage(source, amount, origin, this.group.position, this.aimDirection, this.awarenessDot, elapsed);
+  }
+
+  /** Whether this owner is the bot's recent attacker (weighted 1.0 vs 0.3 in target choice). */
+  isRecentAttacker(owner: 'player' | number, elapsed: number): boolean {
+    return this.threat.attackerIsRecent(elapsed) && this.threat.lastAttacker === owner;
   }
 
   readyToRespawn(): boolean {
@@ -632,12 +1148,16 @@ export class Bot {
       ? this.arena.safeSpawnPoint(position, BOT_COLLIDER_RADIUS, BOT_COLLIDER_HEIGHT) ?? position
       : position);
     this.velocity.set(0, 0, 0);
+    this.grounded = true;
+    this.floorNormal.set(0, 1, 0);
     this.health = 100;
     this.armor = 50;
     this.alive = true;
     this.respawnTimer = 0;
     this.group.rotation.set(0, 0, 0);
     this.aimDirection.set(0, 0, -1);
+    this.aimRates.speedYaw = 0;
+    this.aimRates.speedPitch = 0;
     this.wishDirection.set(0, 0, -1);
     this.targetVisible = false;
     this.targetVisibleFor = 0;
@@ -646,13 +1166,17 @@ export class Bot {
     this.grappleCooldown = 0;
     this.jetpackActive = false;
     this.jetpackTimer = 0;
+    this.jetpackRig.update(false, 1, 0, true);
     this.jetpackEnergy.reset();
     this.jetpackCharge = 1;
     this.jetpackLocked = false;
     this.dashCooldown = 0;
     this.grenadeAmmo = 3;
     this.grenadeCooldown = 0;
-    this.jumpCooldown = 0;
+    this.jumpRequested = false;
+    this.dashRequested = false;
+    this.climbRequested = false;
+    this.jumpPadCooldown = 0;
     this.stuckTimer = 0;
     this.stalledFor = 0;
     this.navigationStallTimer = 0;
@@ -662,52 +1186,124 @@ export class Bot {
     this.aimErrorDegrees = 0;
     this.aimTracking = 0;
     this.reactionRemaining = this.reactionTimer;
+    this.combatMoveTimer = 0;
+    this.combatStrafe = 0;
+    this.combatAdvance = 0;
+    this.combatStrafing = false;
+    this.weaponLockout = 0;
+    this.lastSeenTargetAt = Number.NEGATIVE_INFINITY;
+    this.path.clear();
+    this.pathBlocked = false;
+    this.pathState = 'none';
+    this.retreating = false;
+    this.threat.reset();
+    for (const owned of this.availableWeapons) {
+      const current = this.ammo.get(owned) ?? 0;
+      this.ammo.set(owned, Math.max(current, Math.ceil(WEAPON_AMMO_MAX[owned] * 0.5)));
+    }
+    this.lives += 1;
+    this.random.reseed((this.seedBase ^ Math.imul(this.lives, 0x9e3779b9)) >>> 0);
     this.group.visible = true;
+  }
+
+  /** Move the body without touching health, armor, ammo or grenades (last-resort unstick). */
+  relocate(position: THREE.Vector3): void {
+    this.group.position.copy(position);
+    this.velocity.set(0, 0, 0);
+    this.grounded = true;
+    this.floorNormal.set(0, 1, 0);
+    this.grappleActive = false;
+    this.grappleLength = 0;
+    this.grappleCooldown = Math.max(this.grappleCooldown, this.grappleRecoveryCooldown());
+    this.jetpackTimer = 0;
+    this.stuckTimer = 0;
+    this.stalledFor = 0;
+    this.blockedTimer = 0;
+    this.navigationStallTimer = 0;
+    this.progressAnchor.copy(position);
+    this.recoveryRequested = false;
+    this.path.clear();
+    this.pathBlocked = false;
+    this.pathState = 'none';
+    this.relocations += 1;
+  }
+
+  /** Jump-pad launch identical to the player's `checkJumpPads` impulse. */
+  launchFromPad(direction: THREE.Vector3, launchSpeed: number): boolean {
+    if (!this.alive || this.jumpPadCooldown > 0) return false;
+    const preserved = Math.max(18, Math.hypot(this.velocity.x, this.velocity.z));
+    this.velocity.addScaledVector(direction, Math.max(launchSpeed, preserved * 0.68));
+    this.velocity.y = Math.max(this.velocity.y, direction.y * launchSpeed);
+    this.grounded = false;
+    this.jumpPadCooldown = PAD_LAUNCH_COOLDOWN;
+    this.padLaunches += 1;
+    // The pad carried us past the pad node; let the next tactical tick re-plan
+    // from wherever we land rather than steering back to the pad.
+    this.pathBlocked = true;
+    return true;
   }
 
   private updateAim(
     delta: number,
     elapsed: number,
-    toTarget: THREE.Vector3,
+    eye: THREE.Vector3,
+    target: THREE.Vector3,
     targetVelocity: THREE.Vector3,
     distance: number,
+    context: BotUpdateContext,
   ): void {
-    const projectileSpeed = this.weapon === 'rocket' ? 40
-      : this.weapon === 'plasma' ? 48
-        : this.weapon === 'disc' ? 76
-          : 0;
-    const leadSeconds = projectileSpeed > 0
-      ? Math.min(0.72, distance / projectileSpeed) * THREE.MathUtils.lerp(0.64, 0.88, this.archetypeTuning.aggression)
-      : 0;
-    const desired = this.scratchAimDesired.copy(toTarget).addScaledVector(targetVelocity, leadSeconds);
+    const aimPoint = this.scratchAimPoint.copy(target);
+    const projectileSpeed = WEAPON_PROJECTILE_SPEED[this.weapon];
+    if (projectileSpeed > 0 && this.skillProfile.predictsProjectiles) {
+      // Linear lead (Warfork BOT_DMclass_PredictProjectileShot); halve the
+      // lead when the predicted point is not visible from the muzzle.
+      let lead = Math.min(0.9, distance / projectileSpeed);
+      aimPoint.addScaledVector(targetVelocity, lead);
+      if (!this.arena.hasLineOfSight(eye, aimPoint, 0.45)) {
+        lead *= 0.5;
+        aimPoint.copy(target).addScaledVector(targetVelocity, lead);
+        if (!this.arena.hasLineOfSight(eye, aimPoint, 0.45)) aimPoint.copy(target);
+      }
+    }
+    if (this.weapon === 'rocket' && context.targetGrounded) {
+      // Explosive aim style: from above the enemy's feet, aim at the floor by
+      // their feet so the splash lands even when the direct shot would miss.
+      const feetY = target.y - context.targetCenterOffset + 0.1;
+      if (eye.y > feetY) {
+        const feetX = aimPoint.x;
+        const feetZ = aimPoint.z;
+        const feetPoint = this.scratchAimDesired.set(feetX, feetY, feetZ);
+        if (this.arena.hasLineOfSight(eye, feetPoint, 0.35)) aimPoint.copy(feetPoint);
+      }
+    }
+    const desired = this.scratchAimDesired.subVectors(aimPoint, eye);
     if (desired.lengthSq() < 1e-6) return;
     desired.normalize();
     const idealX = desired.x;
     const idealY = desired.y;
     const idealZ = desired.z;
 
-    const weaponErrorScale = this.weapon === 'sniper' ? 0.22
-      : this.weapon === 'rail' ? 0.34
-        : this.weapon === 'shotgun' ? 1.45
-          : this.weapon === 'rocket' ? 0.78
-            : 1;
-    const motionScale = 1 + Math.min(0.7, targetVelocity.length() / 38)
-      + Math.min(0.35, Math.hypot(this.velocity.x, this.velocity.z) / 70);
-    const settledScale = THREE.MathUtils.lerp(1.35, 0.72, THREE.MathUtils.smoothstep(this.targetVisibleFor, 0.05, 0.9));
-    const error = this.aimErrorRadians * weaponErrorScale * motionScale * settledScale;
-    const yawNoise = Math.sin(elapsed * 1.13 + this.id * 2.71) * 0.68
-      + Math.sin(elapsed * 2.37 + this.id * 0.91) * 0.32;
-    const pitchNoise = Math.sin(elapsed * 0.89 + this.id * 1.37) * 0.61
-      + Math.sin(elapsed * 2.11 + this.id * 3.17) * 0.39;
-    desired.applyAxisAngle(THREE.Object3D.DEFAULT_UP, yawNoise * error);
-    const aimRight = this.scratchAimRight.crossVectors(desired, THREE.Object3D.DEFAULT_UP);
-    if (aimRight.lengthSq() > 1e-5) desired.applyAxisAngle(aimRight.normalize(), pitchNoise * error * 0.72);
+    // Warfork wfac: world-XY jitter on the aim point, then AI_ChangeAngle hunts it.
+    const wfac = aimWfacMetres(this.weapon, this.skillProfile.skill, !context.targetGrounded);
+    applyAimWfacOffset(aimPoint, this.weapon, wfac, elapsed, () => this.random.next());
+    desired.subVectors(aimPoint, eye);
+    if (desired.lengthSq() < 1e-6) return;
+    desired.normalize();
 
-    // Bounded angular pursuit produces a visible acquisition/settling phase
-    // instead of instantly assigning the perfect target vector every tick.
-    const trackingRate = THREE.MathUtils.lerp(5.4, 8.2, this.archetypeTuning.aggression);
-    const blend = 1 - Math.exp(-delta * trackingRate);
-    this.aimDirection.lerp(desired, blend).normalize();
+    // AI_ChangeAngle: persistent yaw_accel, 10°/3° damping, no snap-to-ideal.
+    yawPitchFromDirection(this.aimDirection, this.scratchAimAngles);
+    yawPitchFromDirection(desired, this.scratchIdealAngles);
+    const turned = stepAimChangeAngle(
+      this.scratchAimAngles.yaw,
+      this.scratchAimAngles.pitch,
+      this.scratchIdealAngles.yaw,
+      this.scratchIdealAngles.pitch,
+      this.aimRates,
+      this.yawSpeedRadians,
+      this.yawAccelRadians,
+      delta,
+    );
+    directionFromYawPitch(turned.yaw, turned.pitch, this.aimDirection);
     this.aimTracking = THREE.MathUtils.clamp(this.aimDirection.dot(desired), -1, 1);
     const idealDot = THREE.MathUtils.clamp(
       this.aimDirection.x * idealX + this.aimDirection.y * idealY + this.aimDirection.z * idealZ,
@@ -718,36 +1314,78 @@ export class Bot {
   }
 
   private chooseWeapon(distance: number, visible: boolean): void {
-    let next: WeaponId = this.weapon;
-    if (distance < 7.5) next = this.bestAvailableWeapon(CLOSE_WEAPONS);
-    else if (distance < 18) next = this.bestAvailableWeapon(SHORT_WEAPONS);
-    else if (distance < 42) next = this.bestAvailableWeapon(MID_WEAPONS);
-    else if (distance > 78) next = this.bestAvailableWeapon(EXTREME_WEAPONS);
-    else if (distance > 42) next = this.bestAvailableWeapon(FAR_WEAPONS);
-    else if (!visible) next = this.bestAvailableWeapon(BLIND_WEAPONS);
+    if (this.weaponLocked) return;
+    const currentAmmo = INFINITE_AMMO_WEAPONS.has(this.weapon) ? 1 : (this.ammo.get(this.weapon) ?? 0);
+    const currentOutranged = BOT_WEAPON_RANGE[this.weapon] < distance && visible;
+    if (this.weaponLockout > 0 && currentAmmo > 0 && !currentOutranged) return;
+    const next = this.bestAvailableWeapon(botWeaponBandForDistance(distance, visible), distance);
     if (next === this.weapon) return;
     this.weapon = next;
     this.weaponSwitches += 1;
+    this.weaponLockout = this.skillProfile.weaponLockoutSeconds;
     this.fireCooldown = Math.max(this.fireCooldown, 0.18);
   }
 
-  private bestAvailableWeapon(choices: readonly WeaponId[]): WeaponId {
-    let best: WeaponId = 'machine';
+  private bestAvailableWeapon(choices: readonly WeaponId[], distance: number): WeaponId {
+    let best: WeaponId | null = null;
     let bestUtility = Number.NEGATIVE_INFINITY;
+    const jitter = (1 - this.skillProfile.skill) * 0.3;
     for (const choice of choices) {
       if (!this.availableWeapons.has(choice)) continue;
-      const utility = this.getWeaponUtility(choice);
-      // Array.sort is stable, so strict comparison preserves the authored
-      // candidate order when two weapon roles have equal utility.
+      if (BOT_WEAPON_RANGE[choice] < distance) continue;
+      const infinite = INFINITE_AMMO_WEAPONS.has(choice);
+      const ammo = infinite ? 1 : (this.ammo.get(choice) ?? 0);
+      if (ammo <= 0) continue;
+      const ammoWeight = infinite ? 0.9 : 0.55 + 0.45 * Math.min(1, ammo / WEAPON_AMMO_MAX[choice]);
+      const utility = (this.getWeaponUtility(choice) + 0.2) * ammoWeight + this.random.signed() * jitter;
       if (utility <= bestUtility) continue;
       best = choice;
       bestUtility = utility;
+    }
+    if (best) return best;
+    return this.longestRangeOwnedWeapon();
+  }
+
+  private longestRangeOwnedWeapon(): WeaponId {
+    let best: WeaponId = 'machine';
+    let bestRange = -1;
+    for (const owned of this.availableWeapons) {
+      const ammo = INFINITE_AMMO_WEAPONS.has(owned) ? 1 : (this.ammo.get(owned) ?? 0);
+      if (ammo <= 0) continue;
+      const range = BOT_WEAPON_RANGE[owned];
+      if (range < bestRange) continue;
+      best = owned;
+      bestRange = range;
     }
     return best;
   }
 
   get grenadesRemaining(): number {
     return this.grenadeAmmo;
+  }
+
+  get pathNodes(): number {
+    return this.path.valid ? this.path.length : 0;
+  }
+
+  get pathCursor(): number {
+    return this.path.cursor;
+  }
+
+  get pathCost(): number {
+    return this.path.valid ? this.path.totalCost : Number.POSITIVE_INFINITY;
+  }
+
+  get currentLinkName(): NavLinkName {
+    return navLinkName(this.currentLinkKind);
+  }
+
+  get combatMoveLabel(): string {
+    if (!this.combatStrafing && this.combatAdvance === 0) return 'hold';
+    const strafe = this.combatStrafe < 0 ? 'left' : this.combatStrafe > 0 ? 'right' : '';
+    const advance = this.combatAdvance > 0 ? 'forward' : this.combatAdvance < 0 ? 'back' : '';
+    if (strafe && advance) return `${strafe}-${advance}`;
+    return strafe || advance || 'hold';
   }
 
   get preferredWeaponRoles(): BotArchetypeTuning['preferredWeaponRoles'] {
@@ -766,6 +1404,23 @@ export class Bot {
     return botWeaponUtility(this.archetypeTuning, weapon);
   }
 
+  /** Whether the bot already carries this weapon with a healthy ammo reserve. */
+  ownsWeaponWithAmmo(weapon: WeaponId, minimumFraction = 0.4): boolean {
+    if (!this.availableWeapons.has(weapon)) return false;
+    if (INFINITE_AMMO_WEAPONS.has(weapon)) return true;
+    return (this.ammo.get(weapon) ?? 0) >= WEAPON_AMMO_MAX[weapon] * minimumFraction;
+  }
+
+  ammoFraction(weapon: WeaponId): number {
+    if (INFINITE_AMMO_WEAPONS.has(weapon)) return 1;
+    return Math.min(1, (this.ammo.get(weapon) ?? 0) / WEAPON_AMMO_MAX[weapon]);
+  }
+
+  /** Uniform draw from this bot's seeded stream (for Game-side objective jitter). */
+  randomUnit(): number {
+    return this.random.next();
+  }
+
   collectPickup(kind: 'health' | 'armor' | 'damage' | 'speed' | WeaponId): void {
     if (kind === 'health') this.health = Math.min(125, this.health + 50);
     else if (kind === 'armor') this.armor = Math.min(150, this.armor + 100);
@@ -773,7 +1428,10 @@ export class Bot {
     else if (kind === 'speed') this.speedBoost = POWERUP.duration;
     else {
       this.availableWeapons.add(kind);
+      const max = WEAPON_AMMO_MAX[kind];
+      this.ammo.set(kind, Math.min(max, (this.ammo.get(kind) ?? 0) + Math.max(1, Math.ceil(max * 0.45))));
       this.weapon = kind;
+      this.weaponLockout = this.skillProfile.weaponLockoutSeconds;
     }
   }
 
@@ -786,13 +1444,17 @@ export class Bot {
   private weaponCooldownForCurrentWeapon(): number {
     switch (this.weapon) {
       case 'shotgun': return 0.9;
-      case 'rocket': return 0.75;
+      case 'rocket': return 0.95;
       case 'plasma': return 0.125;
       case 'laser': return 0.1;
       case 'sniper': return 1.1;
       case 'rail': return 1.5;
       case 'disc': return 0.72;
-      default: return 0.09;
+      case 'machine': return 0.09;
+      default: {
+        const exhaustive: never = this.weapon;
+        throw new Error(`Unknown weapon ${String(exhaustive)}`);
+      }
     }
   }
 
@@ -867,25 +1529,23 @@ export class Bot {
           const material = source.clone();
           if (material instanceof THREE.MeshStandardMaterial) {
             const materialRole = material.name.toLowerCase();
-            if (materialRole.includes('visor')) {
-              material.color.set(0x8eeeff).lerp(teamColor, 0.22);
-              material.emissive.copy(material.color).multiplyScalar(0.36);
-              material.emissiveIntensity = 1.25;
-            } else if (materialRole.includes('skin')) {
-              material.color.offsetHSL(0, -0.04, 0.07);
-              material.emissive.set(0x000000);
-              material.emissiveIntensity = 0;
-            } else if (materialRole.includes('black')) {
-              material.color.set(0x111820).lerp(teamColor, 0.08);
-              material.emissive.copy(teamColor).multiplyScalar(0.018);
-              material.emissiveIntensity = 0.16;
+            if (materialRole.includes('helmet')) {
+              material.color.multiplyScalar(0.94).lerp(teamColor, 0.08);
+              material.emissive.copy(teamColor).multiplyScalar(0.14);
+              material.emissiveIntensity = 0.78;
+            } else if (materialRole.includes('jumpjet')) {
+              material.color.multiplyScalar(0.88).lerp(teamColor, 0.12);
+              material.emissive.copy(teamColor).multiplyScalar(0.12);
+              material.emissiveIntensity = 0.64;
             } else {
-              material.color.set(0x3d4c57).lerp(teamColor, 0.2);
-              material.emissive.copy(teamColor).multiplyScalar(0.04);
-              material.emissiveIntensity = 0.32;
+              material.color.multiplyScalar(materialRole.includes('pants') ? 0.82 : 0.9)
+                .lerp(teamColor, materialRole.includes('gear') ? 0.09 : 0.045);
+              material.emissive.copy(teamColor).multiplyScalar(0.045);
+              material.emissiveIntensity = 0.28;
             }
-            material.roughness = Math.max(0.28, material.roughness * 0.82);
-            material.metalness = Math.min(0.78, material.metalness + 0.12);
+            material.roughness = Math.max(0.3, material.roughness * 0.9);
+            material.metalness = Math.min(0.72, material.metalness + 0.07);
+            material.envMapIntensity = 0.86;
             material.side = THREE.DoubleSide;
             material.userData.baseEmissiveIntensity = material.emissiveIntensity;
           }
@@ -906,21 +1566,22 @@ export class Bot {
         mesh.frustumCulled = false;
       });
 
-      // The GLB mesh nodes already rotate their Z-up source into Y-up. Its
-      // verified source positions span 0..1.85245 m after the authored x100
-      // node scale, with feet at zero. Skinned Box3 reports pre-skin bounds and
-      // cannot safely drive normalization for this FBX2glTF export.
-      const modelScale = 1.78 / 1.85245;
-      model.scale.setScalar(modelScale);
+      // CharacterAsset normalizes the supplied trooper to gameplay meters
+      // before applying the donor rig, so no second scale belongs here.
+      model.scale.setScalar(1);
       model.position.set(0, 0, 0);
       model.name = `vector-${this.id + 1}-authored-character`;
 
       for (const child of [...this.group.children]) this.group.remove(child);
       this.group.add(model);
+      this.attachGripSocket(model, 'WristR', this.weaponGripSocket);
+      this.attachGripSocket(model, 'WristL', this.supportGripSocket);
+      this.primaryArmIk.attach(model, 'R');
+      this.supportArmIk.attach(model, 'L');
       this.addTeamHardware(color);
       this.group.add(this.jetpackRig.root);
       this.group.updateMatrixWorld(true);
-      const installedBounds = new THREE.Box3().setFromObject(this.group);
+      const installedBounds = new THREE.Box3().setFromObject(model);
       const installedSize = installedBounds.getSize(new THREE.Vector3());
       this.modelHeight = installedSize.y;
       this.modelWidth = installedSize.x;
@@ -929,6 +1590,10 @@ export class Bot {
       this.modelCenterY = installedCenter.y - this.group.position.y;
       this.modelCenterX = installedCenter.x - this.group.position.x;
       this.modelCenterZ = installedCenter.z - this.group.position.z;
+      this.runtimeBoneCount = asset.diagnostics.runtimeBoneCount;
+      this.runtimeAnimationCount = asset.diagnostics.runtimeAnimationCount;
+      this.sourceTriangleCount = asset.diagnostics.triangleCount;
+      this.sourceTextureCount = asset.diagnostics.textureCount;
       this.mixer = new THREE.AnimationMixer(model);
       for (const clip of asset.animations) {
         const action = this.mixer.clipAction(clip);
@@ -948,19 +1613,39 @@ export class Bot {
     }
   }
 
+  solveSupportHand(targetWorld: THREE.Vector3): number {
+    return this.supportArmIk.solve(targetWorld);
+  }
+
+  solvePrimaryHand(targetWorld: THREE.Vector3): number {
+    return this.primaryArmIk.solve(targetWorld);
+  }
+
+  get animationName(): string {
+    return this.activeAnimation;
+  }
+
+  private attachGripSocket(model: THREE.Object3D, boneName: string, socket: THREE.Object3D): void {
+    const bone = model.getObjectByName(boneName);
+    if (!bone) return;
+    bone.add(socket);
+    socket.position.set(0, 0, 0);
+    socket.rotation.set(0, 0, 0);
+    socket.scale.set(1, 1, 1);
+  }
+
   private addTeamHardware(color: number): void {
     const accent = new THREE.MeshStandardMaterial({
       color,
       emissive: color,
-      emissiveIntensity: 2.2,
-      roughness: 0.22,
+      emissiveIntensity: 0.48,
+      roughness: 0.27,
       metalness: 0.58,
     });
     accent.userData.baseEmissiveIntensity = accent.emissiveIntensity;
     this.materials.push(accent);
-    const beaconGeometry = new THREE.OctahedronGeometry(0.075, 1);
-    const ringGeometry = new THREE.TorusGeometry(0.42, 0.018, 6, 28);
-    this.geometries.push(beaconGeometry, ringGeometry);
+    const beaconGeometry = new THREE.OctahedronGeometry(0.045, 1);
+    this.geometries.push(beaconGeometry);
     const beacons = new THREE.InstancedMesh(beaconGeometry, accent, 2);
     beacons.name = 'team-beacons';
     const beaconMatrix = new THREE.Matrix4();
@@ -969,11 +1654,11 @@ export class Bot {
       beacons.setMatrixAt(index, beaconMatrix);
     }
     beacons.instanceMatrix.needsUpdate = true;
+    beacons.castShadow = true;
+    beacons.receiveShadow = true;
     this.group.add(beacons);
-    const identityRing = new THREE.Mesh(ringGeometry, accent);
-    identityRing.position.set(0, 1.82, 0);
-    identityRing.rotation.x = Math.PI / 2;
-    this.group.add(identityRing);
+    this.roleHardwareMeshCount = 0;
+    this.roleHardwareProfile = this.visualIdentity.roleLabel;
   }
 
   private updateAnimation(delta: number, speed: number): void {
@@ -984,12 +1669,13 @@ export class Bot {
         ? 'shoot'
         : !this.grounded
           ? 'jump'
-          : speed > 6
-            ? 'run'
-            : speed > 0.8
-              ? 'walk'
-              : 'idle';
+          : speed > 0.8
+            ? 'run_shoot'
+            : 'idle_gun_pointing';
     this.playAnimation(animation, 0.13);
+    for (const [key, action] of this.actions) {
+      if (key.includes('run_shoot')) action.timeScale = THREE.MathUtils.clamp(speed / 6.8, 0.58, 1.34);
+    }
     this.mixer.update(delta);
   }
 
@@ -1065,13 +1751,22 @@ export class Bot {
   }
 
   private flash(): void {
+    this.hitFlashRemaining = 0.08;
     for (const material of this.materials) {
       if (!(material instanceof THREE.MeshToonMaterial || material instanceof THREE.MeshStandardMaterial)) continue;
       const base = Number(material.userData.baseEmissiveIntensity ?? material.emissiveIntensity);
+      material.userData.baseEmissiveIntensity = base;
       material.emissiveIntensity = Math.max(base, 1.8);
-      window.setTimeout(() => {
-        material.emissiveIntensity = base;
-      }, 80);
+    }
+  }
+
+  private updateHitFlash(delta: number): void {
+    if (this.hitFlashRemaining <= 0) return;
+    this.hitFlashRemaining = Math.max(0, this.hitFlashRemaining - delta);
+    if (this.hitFlashRemaining > 0) return;
+    for (const material of this.materials) {
+      if (!(material instanceof THREE.MeshToonMaterial || material instanceof THREE.MeshStandardMaterial)) continue;
+      material.emissiveIntensity = Number(material.userData.baseEmissiveIntensity ?? material.emissiveIntensity);
     }
   }
 }

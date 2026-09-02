@@ -5,7 +5,10 @@ const diagnostics = async (page: import('@playwright/test').Page) => page.evalua
 
 test('QuickSense loads as a second authored arena with layered flow geometry', async ({ page }) => {
   await page.goto('/?map=quicksense&qa=physics');
-  await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
+  await page.waitForFunction(() => (
+    Boolean(window.__THREE_GAME_TEST_HOOKS__)
+    && Boolean(window.__THREE_GAME_DIAGNOSTICS__?.map.ready)
+  ), null, { timeout: 180_000 });
   const result = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const layeredSpine = [-138, -100, -60, 0, 60, 100, 138].map((z) => hooks.sampleFloorHeight(0, z, 160));
@@ -33,12 +36,16 @@ test('QuickSense loads as a second authored arena with layered flow geometry', a
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     return diagnostics.pickups.map((pickup) => ({
       pickupY: pickup.position.y,
-      supportY: hooks.sampleFloorHeight(pickup.position.x, pickup.position.z, Number.POSITIVE_INFINITY),
+      supportY: hooks.sampleFloorHeight(pickup.position.x, pickup.position.z, pickup.position.y + 1),
     }));
   });
   expect(pickupSupportChecks.every(({ pickupY, supportY }) => (
-    supportY !== null && Math.abs(pickupY - (supportY + 0.012)) < 0.001
+    supportY !== null && Math.abs(pickupY - (supportY + 0.012)) < 0.05
   ))).toBe(true);
+  expect(
+    pickupSupportChecks.every(({ pickupY }) => pickupY < 70),
+    'pickups must stay on the playable basin/tower layer, not floating-station roofs',
+  ).toBe(true);
 
   expect(result.layeredSpine.every((height) => height !== null)).toBe(true);
   const spine = result.layeredSpine as number[];

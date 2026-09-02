@@ -3,6 +3,7 @@ import { cloneScifiDroneScene, loadScifiDroneAsset } from '../assets/ScifiDroneA
 import { BusterDroneVisual, type BusterVisualFlightState } from '../entities/BusterDroneVisual';
 import type { ArenaRuntime } from '../game/Arena';
 import { DroneSentinelBeamVfx } from './DroneSentinelBeamVfx';
+import { droneCanAcquire, SENTINEL_AWARENESS, BUSTER_AWARENESS } from './DroneAwareness';
 
 export const DRONE_TUNING = Object.freeze({
   count: 3,
@@ -12,8 +13,8 @@ export const DRONE_TUNING = Object.freeze({
   combatSpeed: 21,
   acceleration: 24,
   minimumClearance: 6.2,
-  acquireRange: 118,
-  fireRange: 104,
+  ...SENTINEL_AWARENESS,
+  fireRange: 36,
   laserDps: 18,
   laserDamageTickSeconds: 0.1,
   targetRadiusPlayer: 0.58,
@@ -37,8 +38,8 @@ export const BUSTER_DRONE_TUNING = Object.freeze({
   attackRunSpeed: 29,
   breakawaySpeed: 34,
   acceleration: 18,
-  acquireRange: 138,
-  fireRange: 96,
+  ...BUSTER_AWARENESS,
+  fireRange: 42,
   gazeDegrees: 8,
   shardSpeed: 68,
   shardHomingResponsiveness: 5.5,
@@ -425,6 +426,8 @@ export class DroneSwarmSystem {
   private readonly shardImpact = new THREE.Vector3();
   private readonly shardHeading = new THREE.Vector3();
   private readonly shardDesiredHeading = new THREE.Vector3();
+  private readonly awarenessFacing = new THREE.Vector3();
+  private readonly awarenessToTarget = new THREE.Vector3();
   private readonly shardRoot = new THREE.Group();
   private readonly shardGeometry = new THREE.OctahedronGeometry(0.15, 0);
   private readonly shardCoreMaterial = new THREE.MeshBasicMaterial({
@@ -592,11 +595,14 @@ export class DroneSwarmSystem {
     return destroyed;
   }
 
-  resetForQa(center: THREE.Vector3): void {
+  resetForQa(center: THREE.Vector3, lookAt?: THREE.Vector3): void {
+    const facePoint = lookAt ?? center;
     for (const drone of this.drones) {
       const angle = drone.index / this.drones.length * Math.PI * 2;
       drone.position.copy(center).add(new THREE.Vector3(Math.cos(angle) * 8, 5.5 + drone.index, Math.sin(angle) * 8));
-      drone.velocity.set(-Math.sin(angle) * 2, 0, Math.cos(angle) * 2);
+      drone.velocity.copy(facePoint).sub(drone.position).setY(0);
+      if (drone.velocity.lengthSq() < 0.01) drone.velocity.set(0, 0, 4);
+      else drone.velocity.normalize().multiplyScalar(4);
       drone.health = DRONE_TUNING.maxHealth;
       drone.alive = true;
       drone.respawnSeconds = 0;
@@ -612,6 +618,7 @@ export class DroneSwarmSystem {
       drone.state = 'patrol';
       drone.visual.root.visible = true;
       drone.visual.root.position.copy(drone.position);
+      drone.visual.face(drone.velocity, 8);
       drone.visual.stopContinuousBeam();
     }
   }
@@ -776,15 +783,44 @@ export class DroneSwarmSystem {
     drone: CombatDroneRuntime,
     targets: readonly DroneTargetSnapshot[],
   ): DroneTargetSnapshot | null {
+    const tuning = drone.kind === 'buster' ? BUSTER_DRONE_TUNING : DRONE_TUNING;
+    switch (drone.kind) {
+      case 'buster':
+        (drone.visual as BusterDroneVisual).forwardWorld(this.awarenessFacing);
+        break;
+      case 'sentinel':
+        if (drone.velocity.lengthSq() > 0.04) this.awarenessFacing.copy(drone.velocity);
+        else this.awarenessFacing.set(0, 0, 1).applyQuaternion(drone.visual.root.quaternion);
+        break;
+      default: {
+        const _exhaustive: never = drone.kind;
+        return _exhaustive;
+      }
+    }
+    this.awarenessFacing.y = 0;
+    if (this.awarenessFacing.lengthSq() > 0.01) this.awarenessFacing.normalize();
+    else this.awarenessFacing.set(0, 0, 1);
     let best: DroneTargetSnapshot | null = null;
-    let bestScore: number = drone.kind === 'buster'
-      ? BUSTER_DRONE_TUNING.acquireRange
-      : DRONE_TUNING.acquireRange;
+    let bestScore = Number.POSITIVE_INFINITY;
     for (const target of targets) {
       if (!target.alive) continue;
       const distance = drone.position.distanceTo(target.position);
-      if (distance >= (drone.kind === 'buster' ? BUSTER_DRONE_TUNING.acquireRange : DRONE_TUNING.acquireRange)) continue;
-      if (!this.arena.hasLineOfSight(drone.position, target.position, 0.35)) continue;
+      this.awarenessToTarget.subVectors(target.position, drone.position);
+      const horizontal = Math.hypot(this.awarenessToTarget.x, this.awarenessToTarget.z);
+      const facingDot = horizontal > 0.001
+        ? (this.awarenessFacing.x * this.awarenessToTarget.x + this.awarenessFacing.z * this.awarenessToTarget.z)
+          / (Math.hypot(this.awarenessFacing.x, this.awarenessFacing.z) * horizontal)
+        : 1;
+      if (!droneCanAcquire({
+        distance,
+        acquireRange: tuning.acquireRange,
+        retainRange: tuning.retainRange,
+        proximityRange: tuning.proximityRange,
+        alreadyTargeting: drone.targetOwner === target.owner,
+        facingDot,
+        acquireDot: tuning.acquireDot,
+        hasLos: this.arena.hasLineOfSight(drone.position, target.position, 0.35),
+      })) continue;
       const playerBias = target.owner === 'player' ? -5 : 0;
       const retainedBias = target.owner === drone.targetOwner ? -10 : 0;
       const score = distance + playerBias + retainedBias;

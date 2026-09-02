@@ -10,6 +10,7 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5190,
     strictPort: true,
+    hmr: process.env.PLAYWRIGHT_DISABLE_HMR === '1' ? false : undefined,
     watch: {
       ignored: ['**/artifacts/**', '**/test-results/**', '**/dist/**'],
     },

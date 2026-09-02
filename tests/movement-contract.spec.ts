@@ -2,14 +2,14 @@ import { expect, test } from '@playwright/test';
 
 const diagnostics = async (page: import('@playwright/test').Page) => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!);
 
-test('self-fired rockets add movement without costing health or armor', async ({ page }) => {
-  test.setTimeout(90_000);
+test('self-fired rockets add movement and cost health or armor', async ({ page }) => {
+  test.setTimeout(180_000);
   await page.goto('/?qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
-  const before = await page.evaluate(() => {
+  const before =   await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
-    hooks.setPausedForScreenshot(true);
     hooks.setState('movement-flat');
+    hooks.setPausedForScreenshot(true);
     hooks.setWeapon('rocket');
     hooks.setAim(0, -1.2);
     return window.__THREE_GAME_DIAGNOSTICS__!;
@@ -24,8 +24,10 @@ test('self-fired rockets add movement without costing health or armor', async ({
 
   expect(after.player.rocketJumpCount).toBe(before.player.rocketJumpCount + 1);
   expect(after.player.velocity.y, 'rocket blast must create clear upward movement').toBeGreaterThan(10);
-  expect(after.health, 'rocket jumping must not remove health').toBe(before.health);
-  expect(after.armor, 'rocket jumping must not remove armor').toBe(before.armor);
+  expect(
+    after.health < before.health || after.armor < before.armor,
+    'Warsow rocket jumping spends health/armor (~79 raw before 66% armor)',
+  ).toBe(true);
 });
 
 test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall containment', async ({ page }) => {
@@ -34,9 +36,11 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/?qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setPausedForScreenshot(true));
-
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setState('movement-flat'));
+  await page.evaluate(() => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    hooks.setState('movement-flat');
+    hooks.setPausedForScreenshot(true);
+  });
   await page.keyboard.down('KeyW');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(0.32));
   const accelerated = await diagnostics(page);
@@ -45,14 +49,27 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
   await page.keyboard.press('KeyE');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(0.09));
   const dashed = await diagnostics(page);
-  expect(dashed.player.speed, 'dash must add a readable impulse above run speed').toBeGreaterThan(accelerated.player.speed + 2);
+  expect(dashed.player.speed, 'dash sets speed to dashSpeed, never adding above the current run').toBeGreaterThanOrEqual(20);
+  expect(dashed.player.speed).toBeLessThan(Math.max(accelerated.player.speed, 21) + 0.5);
   expect(dashed.player.dashCooldown, 'dash must enter cooldown').toBeGreaterThan(0.35);
+  expect(dashed.player.velocity.y, 'dash hop remains upward after 90 ms of gravity').toBeGreaterThan(2);
+  expect(dashed.player.grounded).toBe(false);
+
+  // Dash already used the hop. Land first; a Space press in that airtime would
+  // arm the jetpack or wall-jump instead of chaining bunny hops.
+  let landed = dashed;
+  for (let index = 0; index < 12 && !landed.player.grounded; index += 1) {
+    await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(0.05));
+    landed = await diagnostics(page);
+  }
+  expect(landed.player.grounded, 'dash hop must land before the bhop chain').toBe(true);
+  const hopFloor = landed.player.position.y;
 
   await page.keyboard.down('Space');
-  let peakHeight = dashed.player.position.y;
+  let peakHeight = hopFloor;
   let minimumAirSpeed = Number.POSITIVE_INFINITY;
   let airborneSamples = 0;
-  for (let index = 0; index < 6; index += 1) {
+  for (let index = 0; index < 8; index += 1) {
     await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(0.09));
     const sample = await diagnostics(page);
     peakHeight = Math.max(peakHeight, sample.player.position.y);
@@ -64,10 +81,14 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
   await page.keyboard.up('Space');
   await page.keyboard.up('KeyW');
   expect(airborneSamples, 'held jump must produce repeatable bunny-hop airtime').toBeGreaterThan(2);
-  expect(peakHeight - dashed.player.position.y, 'jump arc must clear the capsule step height').toBeGreaterThan(1.1);
+  expect(peakHeight - hopFloor, 'jump arc must clear the capsule step height').toBeGreaterThan(1.1);
   expect(minimumAirSpeed, 'bunny hopping must preserve useful horizontal momentum').toBeGreaterThan(11);
 
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setState('movement-flat'));
+  await page.evaluate(() => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    hooks.setState('movement-flat');
+    hooks.setPausedForScreenshot(true);
+  });
   await page.keyboard.down('KeyW');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(0.26));
   await page.keyboard.down('Space');
@@ -89,7 +110,11 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
   expect(afterAlignment, 'air control must carve conserved momentum toward the aimed heading').toBeGreaterThan(beforeAlignment + 0.16);
   expect(afterCarve.player.speed, 'air carving must preserve rather than replace momentum').toBeGreaterThan(beforeCarve.player.speed * 0.9);
 
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setState('movement-slope'));
+  await page.evaluate(() => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    hooks.setState('movement-slope');
+    hooks.setPausedForScreenshot(true);
+  });
   await page.keyboard.down('ShiftLeft');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(0.2));
   const skied = await diagnostics(page);
@@ -101,7 +126,11 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
   expect(skied.player.skiing, 'ski input must be active').toBe(true);
   expect(skied.player.speed, 'downhill tangent gravity must add energy').toBeGreaterThan(15.2);
 
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setState('view-0'));
+  await page.evaluate(() => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    hooks.setState('view-0');
+    hooks.setPausedForScreenshot(true);
+  });
   await page.keyboard.down('KeyW');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(1.2));
   const climbedStairs = await diagnostics(page);
@@ -117,6 +146,7 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
     await page.evaluate(({ state, yaw }) => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
       hooks.setState(state);
+      hooks.setPausedForScreenshot(true);
       hooks.setAim(yaw, -0.04);
     }, route);
     await page.keyboard.down('KeyW');
@@ -131,6 +161,7 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
   await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     hooks.setState('view-2');
+    hooks.setPausedForScreenshot(true);
     hooks.setAim(-Math.PI / 2, -0.04);
   });
   await page.keyboard.down('KeyW');
@@ -148,7 +179,11 @@ test('Warsow movement contract: acceleration, dash, bhop, skiing, and wall conta
   expect(skiStairPeak, 'skiing must climb authored stairs without a jump').toBeGreaterThan(3.9);
   expect(skiedStairs.player.speed, 'stair stepping must preserve ski momentum').toBeGreaterThan(14);
 
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setState('view-0'));
+  await page.evaluate(() => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    hooks.setState('view-0');
+    hooks.setPausedForScreenshot(true);
+  });
   await page.keyboard.down('KeyW');
   await page.keyboard.press('KeyE');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(1.05));

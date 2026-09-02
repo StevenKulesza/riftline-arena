@@ -13,8 +13,10 @@ import { PlayerAvatar } from '../assets/PlayerAvatar';
 import { InputController } from '../core/InputController';
 import { Loop } from '../core/Loop';
 import { createRenderer, getRenderDpr, resizeRenderer } from '../core/Renderer';
-import { Bot } from '../entities/Bot';
+import { Bot, type BotUpdateContext } from '../entities/Bot';
 import { AudioSystem } from '../systems/AudioSystem';
+import { BotNavigationGrid } from '../systems/BotNavigation';
+import { createThreatPoint, type BotThreatPoint } from '../systems/BotThreat';
 import { AdaptiveQualitySystem } from '../systems/AdaptiveQualitySystem';
 import {
   BUSTER_DRONE_TUNING,
@@ -48,6 +50,12 @@ import { WeaponVfxSystem } from '../systems/WeaponVfxSystem';
 import { WorldHealthBarSystem } from '../systems/WorldHealthBarSystem';
 import { FighterArenaCollisionAdapter } from '../systems/FighterArenaCollisionAdapter';
 import {
+  FlamethrowerDroneSystem,
+  type FlamethrowerDroneRuntime,
+  type FlamethrowerDroneRayHit,
+  type FlamethrowerGrenadeEvent,
+} from '../systems/FlamethrowerDroneSystem';
+import {
   FIGHTER_BOARD_RANGE,
   FIGHTER_HULL_MAX,
   FIGHTER_MISSILE_COOLDOWN,
@@ -62,7 +70,7 @@ import {
 } from '../systems/FighterSquadronSystem';
 import { createSeededRandom } from '../utils/random';
 import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact, type SurfaceHit } from './Arena';
-import { GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
+import { COMBAT, GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
 import { JetpackEnergy } from './JetpackEnergy';
 import {
   FIGHTER_FIXED_STEP,
@@ -72,12 +80,14 @@ import {
   type FighterCollisionHit,
   type FighterCollisionQuery,
 } from './FighterFlightPhysics';
-import { skiMomentumCurve, type SkiMomentumCurve } from './SkiMomentum';
+import { skiCarveBlend, skiMomentumCurve, type SkiMomentumCurve } from './SkiMomentum';
 
 type GameMode = 'ready' | 'countdown' | 'running' | 'respawning' | 'paused' | 'complete';
 type ViewMode = 'first-person' | 'third-person';
 type Owner = 'player' | number;
 type DamageSource = Owner | 'drone';
+type HostileDroneRuntime = CombatDroneRuntime | FlamethrowerDroneRuntime;
+type HostileDroneRayHit = DroneRayHit | FlamethrowerDroneRayHit;
 type PickupKind = 'health' | 'armor' | 'damage' | 'speed' | WeaponId;
 type CountdownCue = 'READY' | '3' | '2' | '1';
 export type GameLoadProgress = {
@@ -177,7 +187,7 @@ type ProjectileOptions = {
 type GrenadeEntity = {
   root: THREE.Group;
   velocity: THREE.Vector3;
-  owner: Owner;
+  owner: DamageSource;
   fuse: number;
   trailDistance: number;
   bounces: number;
@@ -191,7 +201,22 @@ type PickupState = {
   respawn: number;
 };
 
+type BotObjectiveKind = 'health' | 'armor' | 'weapon' | 'core' | 'route' | 'retreat';
+
+type BotObjectiveCommitment = {
+  position: THREE.Vector3;
+  kind: BotObjectiveKind;
+  pickup: PickupState | null;
+  committedAt: number;
+  retreat: boolean;
+};
+
 const BOT_COLORS = [0xff5f73, 0x9d72ff, 0x50e692];
+const BOT_THREAT_CAPACITY = 16;
+const BOT_THREAT_HORIZON = 2;
+const BOT_OBJECTIVE_COMMIT_SECONDS = 2.5;
+const BOT_OBJECTIVE_REACH_RADIUS = 3;
+const BOT_RETREAT_HEALTH = 35;
 const MATCH_COUNTDOWN_DURATION = 4;
 const MATCH_COUNTDOWN_CUES: readonly CountdownCue[] = ['READY', '3', '2', '1'];
 // qfusion's standing view is origin + 30; origin sits 24 units above ground.
@@ -276,6 +301,16 @@ const THIRD_PERSON_WEAPON_SCALE: Record<WeaponId, number> = {
   rail: 0.59,
   disc: 0.51,
 };
+const THIRD_PERSON_SUPPORT_GRIP_Z: Record<WeaponId, number> = {
+  machine: -0.25,
+  shotgun: -0.29,
+  rocket: -0.24,
+  plasma: -0.27,
+  laser: -0.31,
+  sniper: -0.34,
+  rail: -0.31,
+  disc: -0.21,
+};
 
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
@@ -310,6 +345,7 @@ export class Game {
   private readonly visualCapture: boolean;
   private readonly bots: Bot[] = [];
   private readonly droneSwarm: DroneSwarmSystem;
+  private readonly flamethrowerDrones: FlamethrowerDroneSystem;
   private readonly droneTargetSnapshots: DroneTargetSnapshot[] = [];
   private readonly botDroneTargets = new Map<number, string>();
   private readonly fighters: FighterRuntime[];
@@ -317,6 +353,10 @@ export class Game {
   private readonly fighterAi = new Map<number, FighterAiPilotController>();
   private readonly projectiles: Projectile[] = [];
   private readonly grenades: GrenadeEntity[] = [];
+  private hostileGrenadeExplosions = 0;
+  private hostileGrenadeBotHits = 0;
+  private lastHostileGrenadeBotHit: number | null = null;
+  private readonly lastHostileGrenadeExplosionPosition = new THREE.Vector3();
   private readonly grenadeSweepOffsets = [
     new THREE.Vector3(),
     new THREE.Vector3(GRENADE.radius, 0, 0),
@@ -338,6 +378,19 @@ export class Game {
   };
   private readonly pickups: PickupState[] = [];
   private readonly botTargets = new Map<number, Owner>();
+  private readonly botObjectives = new Map<number, BotObjectiveCommitment>();
+  private botNavigation: BotNavigationGrid | null = null;
+  private readonly botThreatPoints: BotThreatPoint[] = Array.from({ length: BOT_THREAT_CAPACITY }, createThreatPoint);
+  private readonly botUpdateContext: BotUpdateContext = {
+    navigation: null,
+    threats: this.botThreatPoints,
+    hasTarget: false,
+    targetGrounded: true,
+    targetCenterOffset: 1.05,
+    retreat: false,
+  };
+  private readonly botEyeScratch = new THREE.Vector3();
+  private readonly botThreatEndScratch = new THREE.Vector3();
   private readonly recentSpawnIndices: number[] = [];
   private readonly playerPosition = new THREE.Vector3();
   private readonly playerVelocity = new THREE.Vector3();
@@ -358,6 +411,8 @@ export class Game {
   private inspectionWeaponVisual?: WeaponViewModel;
   private readonly weaponVisualCache = new Map<WeaponId, WeaponViewModel>();
   private readonly thirdPersonWeaponCache = new Map<WeaponId, WeaponViewModel>();
+  private readonly botWeaponVisualCache = new Map<string, WeaponViewModel>();
+  private readonly botWeaponPresentations = new Map<number, WeaponViewModel>();
   private muzzleSocket = new THREE.Object3D();
   private readonly coreGroup = new THREE.Group();
   private readonly coreLight = new THREE.PointLight(0x3ee8ff, 6, 26, 2);
@@ -415,7 +470,19 @@ export class Game {
   private jumpPadCooldown = 0;
   private dashBuffer = 0;
   private dashCooldown = 0;
+  /** Opening window of a dash during which a wall jump is refused (PMF_DASHING). */
   private dashMomentumTimer = 0;
+  /** Fresh Space press waiting for an airborne consumer (wall jump / jetpack arm). */
+  private jumpPressBuffer = 0;
+  private jetpackArmed = false;
+  /** PM_STAT_KNOCKBACK: no ground friction, dash, strafe accel, or air control while > 0. */
+  private knockbackLockout = 0;
+  private wallJumpCooldown = 0;
+  private wallJumpedThisAirtime = false;
+  /** PMF_WALLJUMPING: air accel and air control are off until the rise ends. */
+  private wallJumpAirLockout = false;
+  private wallJumpCount = 0;
+  private doubleJumpCount = 0;
   private wallContactTimer = 0;
   private ceilingContactTimer = 0;
   private yaw = 0;
@@ -423,6 +490,10 @@ export class Game {
   private trauma = 0;
   private fovPunch = 0;
   private recoil = 0;
+  private recoilPitchOffset = 0;
+  private viewKickPitch = 0;
+  private viewKickYaw = 0;
+  private lastHitDamage = 0;
   private speedBlurIntensity = 0;
   private fps = 60;
   private damageBoost = 0;
@@ -467,11 +538,9 @@ export class Game {
   private scopeBlend = 0;
   private scopeRange = 190;
   private skiMomentumResistance = 0;
-  private skiGravityDriveScale = 1;
   private skiDragAcceleration = 0;
   private readonly skiMomentumScratch: SkiMomentumCurve = {
     resistance: 0,
-    gravityDriveScale: 1,
     dragAcceleration: 0,
   };
   private weaponBobPhase = 0;
@@ -504,6 +573,12 @@ export class Game {
   private readonly weaponMuzzleScratch = new THREE.Vector3();
   private readonly thirdPersonMuzzleForwardScratch = new THREE.Vector3();
   private readonly thirdPersonMuzzleRightScratch = new THREE.Vector3();
+  private readonly characterGripWorldScratch = new THREE.Vector3();
+  private readonly weaponGripWorldScratch = new THREE.Vector3();
+  private readonly supportGripWorldScratch = new THREE.Vector3();
+  private readonly supportHandWorldScratch = new THREE.Vector3();
+  private readonly botWeaponRightScratch = new THREE.Vector3();
+  private readonly botWeaponPrimaryTargetScratch = new THREE.Vector3();
   private readonly grappleOriginScratch = new THREE.Vector3();
   private readonly movementStartScratch = new THREE.Vector3();
   private readonly tangentGravityScratch = new THREE.Vector3();
@@ -513,6 +588,9 @@ export class Game {
   private readonly substepBlockedPosition = new THREE.Vector3();
   private readonly movementVectorScratchA = new THREE.Vector3();
   private readonly movementVectorScratchB = new THREE.Vector3();
+  private readonly wallJumpProbeStart = new THREE.Vector3();
+  private readonly wallJumpProbeEnd = new THREE.Vector3();
+  private readonly wallJumpBestNormal = new THREE.Vector3();
   private readonly sweepDisplacement = new THREE.Vector3();
   private readonly sweepHorizontal = new THREE.Vector3();
   private readonly sweepSide = new THREE.Vector3();
@@ -592,7 +670,9 @@ export class Game {
     // Keep the completed loading state visible for one short beat after the
     // synchronous GPU upload. Besides making progress legible, this gives the
     // browser a free main-thread window before input and simulation begin.
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 350));
+    if (!game.physicsQaMode) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 350));
+    }
     return game;
   }
 
@@ -602,6 +682,13 @@ export class Game {
     grenadeAsset: THREE.Group,
   ) {
     this.arena = arena;
+    this.botNavigation = new BotNavigationGrid(arena, {
+      cellSize: 2,
+      capsuleRadius: MOVEMENT.playerRadius,
+      capsuleHeight: MOVEMENT.playerHeight,
+    });
+    this.botNavigation.build();
+    this.botUpdateContext.navigation = this.botNavigation;
     const nexusName = arena.mapInfo.name === 'QuickSense' ? 'QUICKSENSE // RIFT NEXUS' : 'RIFT NEXUS';
     this.coreAnchors = Object.freeze([
       { name: nexusName, position: arena.corePosition.clone() },
@@ -702,6 +789,7 @@ export class Game {
     );
     this.createScene();
     this.droneSwarm = new DroneSwarmSystem(this.scene, this.arena);
+    this.flamethrowerDrones = new FlamethrowerDroneSystem(this.scene, this.arena);
     this.fighterCollision = new FighterArenaCollisionAdapter(this.arena);
     this.fighters = this.arena.mapInfo.name === 'QuickSense'
       ? createQuickSenseFighters(this.scene)
@@ -764,6 +852,8 @@ export class Game {
     this.resizePostProcessing();
     this.updateCamera(0);
     this.updateViewModeUi();
+    this.installTestHooks();
+    this.publishDiagnostics();
   }
 
   start(): void {
@@ -843,22 +933,25 @@ export class Game {
     // live loop can observe them. Installing all four characters from promise
     // callbacks during play previously turned one frame into several seconds
     // of main-thread work and left their first shader uploads to later frames.
-    await Promise.all([
+    const visualReady = Promise.all([
       this.playerAvatar.ready,
       ...this.bots.map((bot) => bot.ready),
       ...this.fighters.map((fighter) => fighter.visual.ready),
       this.droneSwarm.ready,
-    ]);
-    this.mapLighting.excludeDynamicShadowCasters([
-      this.playerAvatar.root,
-      ...this.bots.map((bot) => bot.group),
-      ...this.fighters.map((fighter) => fighter.visual.root),
-      ...this.droneSwarm.combatDrones.map((drone) => drone.visual.root),
-    ]);
+      this.flamethrowerDrones.ready,
+    ]).catch(() => undefined);
+    // Physics QA only needs collision + the combat sim. Do not block hooks on
+    // character/drone GLBs that can stall (failed blob textures never settle).
+    if (!this.physicsQaMode) {
+      await Promise.race([
+        visualReady,
+        new Promise<void>((resolve) => window.setTimeout(resolve, 12_000)),
+      ]);
+    }
     // Build every weapon exactly once behind the deployment screen. Their
     // authored geometry and battle-wear textures stay cached for the match,
     // eliminating the multi-frame model construction/upload hitch on switch.
-    if (!this.softwareRenderer) {
+    if (!this.softwareRenderer && !this.physicsQaMode) {
       for (let index = 0; index < WEAPONS.length; index += 1) {
         const definition = WEAPONS[index];
         reportProgress({
@@ -876,16 +969,27 @@ export class Game {
           );
         }
       }
+      for (const bot of this.bots) this.updateBotWeaponPresentation(bot);
     }
+    this.mapLighting.excludeDynamicShadowCasters([
+      this.playerAvatar.root,
+      ...this.bots.map((bot) => bot.group),
+      ...Array.from(this.botWeaponVisualCache.values(), (visual) => visual.root),
+      ...this.fighters.map((fighter) => fighter.visual.root),
+      ...this.droneSwarm.combatDrones.map((drone) => drone.visual.root),
+      ...this.flamethrowerDrones.drones.map((drone) => drone.visual.root),
+    ]);
     reportProgress({ fraction: 0.8, label: 'Warming combat effects' });
     await yieldDuringLoad();
-    this.weaponVfx.prewarm(this.renderer);
-    reportProgress({ fraction: 0.9, label: 'Uploading arena shaders' });
-    // Let the loading status paint before the intentionally synchronous GPU
-    // warmup. The ready state is not exposed until every live shader path has
-    // completed once.
-    await yieldDuringLoad();
-    this.prewarmSceneResources();
+    if (!this.physicsQaMode) {
+      this.weaponVfx.prewarm(this.renderer);
+      reportProgress({ fraction: 0.9, label: 'Uploading arena shaders' });
+      // Let the loading status paint before the intentionally synchronous GPU
+      // warmup. The ready state is not exposed until every live shader path has
+      // completed once.
+      await yieldDuringLoad();
+      this.prewarmSceneResources();
+    }
     reportProgress({ fraction: 0.98, label: 'Finalizing deployment' });
     await yieldDuringLoad();
     this.installTestHooks();
@@ -904,6 +1008,7 @@ export class Game {
     this.playerAvatar.dispose();
     this.worldHealthBars.dispose();
     this.mapLighting.dispose();
+    this.flamethrowerDrones.dispose();
     this.arena.dispose();
     for (const bot of this.bots) bot.dispose();
     this.droneSwarm.dispose();
@@ -917,6 +1022,9 @@ export class Game {
     // are released exactly once.
     this.thirdPersonWeaponModel.clear();
     this.thirdPersonWeaponCache.clear();
+    for (const visual of this.botWeaponVisualCache.values()) visual.root.removeFromParent();
+    this.botWeaponVisualCache.clear();
+    this.botWeaponPresentations.clear();
     // The active cached frame is already traversed through weaponModel. Dispose
     // detached cached frames separately and exactly once.
     this.disposeObject(this.weaponModel);
@@ -1085,10 +1193,15 @@ export class Game {
     this.yaw -= this.lookInput.x * 0.0018;
     this.pitch = THREE.MathUtils.clamp(this.pitch - this.lookInput.y * 0.0016, -1.28, 1.22);
     if (this.input.consumeInteract()) this.togglePlayerFighter();
-    if (this.input.consumeJump() && !this.playerFighter) this.jumpBuffer = MOVEMENT.jumpBuffer;
-    if (this.input.consumeDash()) {
-      if (this.playerFighter) this.fighterBoostQueued = true;
-      else this.dashBuffer = 0.12;
+    // Screenshot/QA pause still pumps rAF for rendering. Leave jump/dash
+    // queued so stepSimulation is the only consumer and a live frame cannot
+    // spend a press (or extra physics ticks) between Playwright commands.
+    if (!this.pausedForScreenshot) {
+      if (this.input.consumeJump() && !this.playerFighter) this.queueJumpPress();
+      if (this.input.consumeDash()) {
+        if (this.playerFighter) this.fighterBoostQueued = true;
+        else this.dashBuffer = 0.12;
+      }
     }
     if (this.input.consumeGrapple() && !this.playerFighter) this.toggleGrapple();
     if (this.input.consumeGrenade()) {
@@ -1666,15 +1779,174 @@ export class Game {
     this.hud.message(`STAR SPARROW DESTROYED · REBUILD ${FIGHTER_RESPAWN_SECONDS}s`);
   }
 
+  /**
+   * A fresh Space press feeds two buffers: the ground jump buffer (which a held
+   * key also keeps alive for bunny hopping) and the press buffer that only an
+   * airborne consumer — wall jump or jetpack arming — may spend.
+   */
+  private queueJumpPress(): void {
+    this.jumpBuffer = MOVEMENT.jumpBuffer;
+    this.jumpPressBuffer = MOVEMENT.jumpBuffer;
+  }
+
+  /**
+   * Warsow-style knockback (G_KnockBackPush + PM_STAT_KNOCKBACK): adds the
+   * impulse and disables friction, dash, strafe accel, and air control for the
+   * lockout so the shove is not immediately absorbed by ground friction.
+   */
+  applyPlayerKnockback(impulse: THREE.Vector3, lockoutSeconds: number): void {
+    if (!Number.isFinite(impulse.x + impulse.y + impulse.z)) return;
+    this.playerVelocity.add(impulse);
+    if (impulse.y > 0) {
+      this.grounded = false;
+      this.coyote = 0;
+    }
+    this.knockbackLockout = Math.max(this.knockbackLockout, Math.max(0, lockoutSeconds));
+  }
+
+  /**
+   * Universal combat knockback. `knockbackUnits` is already m/s (Warsow 5*kb
+   * scaled so rocket 100 kb = 23 m/s at wishSpeed 15).
+   */
+  private applyCombatKnockback(
+    target: 'player' | Bot,
+    dir: THREE.Vector3,
+    knockbackUnits: number,
+    lockoutSeconds?: number,
+  ): void {
+    if (!(knockbackUnits > 0) || !Number.isFinite(knockbackUnits)) return;
+    const pushDir = dir.clone();
+    if (pushDir.lengthSq() < 1e-8) pushDir.set(0, 1, 0);
+    else pushDir.normalize();
+    const impulse = pushDir.multiplyScalar(knockbackUnits);
+    const lockout = lockoutSeconds ?? THREE.MathUtils.clamp((3 * knockbackUnits) / 100, 0.1, 0.25);
+    if (target === 'player') {
+      this.applyPlayerKnockback(impulse, lockout);
+      return;
+    }
+    target.velocity.add(impulse);
+    target.grounded = false;
+    target.knockbackLockout = Math.max(target.knockbackLockout, lockout);
+  }
+
+  private weaponKnockback(id: WeaponId): number {
+    const authored = this.weapon(id).knockback;
+    if (authored !== undefined) return authored;
+    switch (id) {
+      case 'machine': return 2.3;
+      case 'shotgun': return 1.5;
+      case 'rocket': return 23;
+      case 'plasma': return 4.7;
+      case 'laser': return 3.3;
+      case 'sniper': return 16;
+      case 'rail': return 19;
+      case 'disc': return 20;
+      default: {
+        const _never: never = id;
+        void _never;
+        return 0;
+      }
+    }
+  }
+
+  private combatHitRadius(): number {
+    return MOVEMENT.playerRadius + COMBAT.hitRadiusForgiveness;
+  }
+
+  private combatHitHeight(): number {
+    return MOVEMENT.playerHeight + COMBAT.hitRadiusForgiveness;
+  }
+
+  private sampleSplash(
+    explosion: THREE.Vector3,
+    feet: THREE.Vector3,
+    innerRadius: number,
+    height: number,
+    splashRadius: number,
+    maxDamage: number,
+    minDamage: number,
+    maxKnockback: number,
+    minKnockback: number,
+  ): { damage: number; knockback: number; direction: THREE.Vector3 } | null {
+    const radius = Math.max(splashRadius, innerRadius + 0.01);
+    const capsuleStart = feet.clone().add(new THREE.Vector3(0, innerRadius, 0));
+    const capsuleEnd = feet.clone().add(new THREE.Vector3(0, Math.max(innerRadius, height - innerRadius), 0));
+    const closest = new THREE.Vector3();
+    new THREE.Line3(capsuleStart, capsuleEnd).closestPointToPoint(explosion, true, closest);
+    const d = explosion.distanceTo(closest) - innerRadius;
+    const range = radius - innerRadius;
+    const f = THREE.MathUtils.clamp((range - d) / range, 0, 1);
+    if (f <= 0) return null;
+    const damageFrac = Math.sin(COMBAT.splashAngle * f);
+    const kickFrac = f * f;
+    const center = feet.clone().add(new THREE.Vector3(0, height * 0.5, 0));
+    const top = feet.clone().add(new THREE.Vector3(0, height, 0));
+    const raised = center.addScaledVector(top.sub(center), COMBAT.splashHeadBias);
+    const direction = raised.sub(explosion);
+    if (direction.lengthSq() < 1e-8) direction.set(0, 1, 0);
+    else direction.normalize();
+    return {
+      damage: minDamage + (maxDamage - minDamage) * damageFrac,
+      knockback: minKnockback + (maxKnockback - minKnockback) * kickFrac,
+      direction,
+    };
+  }
+
+  private sunflowerPelletDirection(
+    direction: THREE.Vector3,
+    pellet: number,
+    pellets: number,
+    spread: number,
+    jitter = 0,
+  ): THREE.Vector3 {
+    const spreadRight = direction.clone().cross(new THREE.Vector3(0, 1, 0));
+    if (spreadRight.lengthSq() < 0.01) spreadRight.set(1, 0, 0);
+    else spreadRight.normalize();
+    const spreadUp = spreadRight.clone().cross(direction).normalize();
+    const normalizedRadius = pellet === 0 ? 0 : Math.sqrt((pellet + 0.35) / pellets);
+    const angle = pellet * 2.399963 + jitter;
+    const radius = normalizedRadius * spread;
+    return direction.clone()
+      .addScaledVector(spreadRight, Math.cos(angle) * radius)
+      .addScaledVector(spreadUp, Math.sin(angle) * radius)
+      .normalize();
+  }
+
+  private resolveShotOrigin(muzzle: THREE.Vector3): THREE.Vector3 {
+    const eye = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0));
+    return this.arena.segmentHitDetails(eye, muzzle) ? eye : muzzle.clone();
+  }
+
+  private prestepAlong(origin: THREE.Vector3, direction: THREE.Vector3, distance = COMBAT.projectilePrestep): THREE.Vector3 {
+    const end = origin.clone().addScaledVector(direction, distance);
+    const hit = this.arena.segmentHitDetails(origin, end);
+    if (!hit) return end;
+    return hit.point.clone().addScaledVector(hit.normal, 0.03);
+  }
+
+  private applyViewKick(hitOrigin: THREE.Vector3, strength: number): void {
+    const incoming = this.playerPosition.clone().sub(hitOrigin);
+    if (incoming.lengthSq() < 1e-6) return;
+    incoming.normalize();
+    const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const amount = COMBAT.viewKickRadians * THREE.MathUtils.clamp(strength, 0.35, 1);
+    this.viewKickYaw += right.dot(incoming) * amount;
+    this.viewKickPitch += THREE.MathUtils.clamp(-incoming.y - forward.dot(incoming) * 0.35, -1, 1) * amount;
+  }
+
   private fixedUpdate(delta: number): void {
     this.jumpBuffer = Math.max(0, this.jumpBuffer - delta);
     if (this.input.isJumpHeld()) this.jumpBuffer = Math.max(this.jumpBuffer, MOVEMENT.fixedStep * 1.5);
+    this.jumpPressBuffer = Math.max(0, this.jumpPressBuffer - delta);
     this.dashBuffer = Math.max(0, this.dashBuffer - delta);
     this.dashCooldown = Math.max(0, this.dashCooldown - delta);
     this.dashMomentumTimer = Math.max(0, this.dashMomentumTimer - delta);
+    this.wallJumpCooldown = Math.max(0, this.wallJumpCooldown - delta);
     this.wallContactTimer = Math.max(0, this.wallContactTimer - delta);
     this.ceilingContactTimer = Math.max(0, this.ceilingContactTimer - delta);
-    this.weaponCooldown = Math.max(0, this.weaponCooldown - delta);
+    this.weaponCooldown -= delta;
+    if (this.weaponCooldown < -0.25) this.weaponCooldown = -0.25;
     this.grenadeCooldown = Math.max(0, this.grenadeCooldown - delta);
     this.jumpPadCooldown = Math.max(0, this.jumpPadCooldown - delta);
     this.damageBoost = Math.max(0, this.damageBoost - delta);
@@ -1760,7 +2032,10 @@ export class Game {
     this.updateMapFog(this.weatherSnapshot.multipliers.visibilityMultiplier);
 
     this.updateFighters(delta);
-    if (!this.playerFighter) this.updatePlayerMovement(delta);
+    if (!this.playerFighter) {
+      this.updatePlayerMovement(delta);
+      this.resolveCharacterAgainstFlamethrowerDrones(this.playerPosition, this.playerVelocity, MOVEMENT.playerRadius);
+    }
     else {
       this.jetpackActive = false;
       this.jetpackEnergy.update(0, false, false);
@@ -1804,36 +2079,87 @@ export class Game {
       .addScaledVector(this.right, this.moveInput.x)
       .addScaledVector(this.forward, this.moveInput.y);
     if (this.wishDirection.lengthSq() > 1) this.wishDirection.normalize();
+    this.knockbackLockout = Math.max(0, this.knockbackLockout - delta);
 
-    if (this.dashBuffer > 0 && this.dashCooldown <= 0) {
-      const dashDirection = this.wishDirection.lengthSq() > 0.01 ? this.wishDirection : this.forward;
-      const along = this.playerVelocity.x * dashDirection.x + this.playerVelocity.z * dashDirection.z;
-      const impulse = Math.max(0, MOVEMENT.dashImpulse - Math.max(0, along) * 0.18);
-      this.playerVelocity.addScaledVector(dashDirection, impulse);
+    if (this.grounded) {
+      // Touching ground ends the airtime: the wall-jump-per-airtime flag, the
+      // post-wall-jump control lockout, and a jetpack armed in the air all reset.
+      this.wallJumpedThisAirtime = false;
+      this.wallJumpAirLockout = false;
+      this.wallJumpCooldown = 0;
+      this.jetpackArmed = false;
+    } else if (this.wallJumpAirLockout && this.playerVelocity.y < 0) {
+      this.wallJumpAirLockout = false;
+    }
+
+    // Warsow Pmove order: CheckJump → CheckDash → CheckWallJump → Friction → Move.
+    // PM_CheckJump returns immediately when airborne. A held jump still hops on
+    // the landing frame because CheckJump runs before Friction while grounded.
+    const bufferedGroundJump = this.jumpBuffer > 0 && this.grounded;
+    if (bufferedGroundJump) {
+      // Held jumping skips the landing-friction frame, matching Warsow's
+      // momentum-preserving bunny hop instead of bleeding speed every cycle.
+      // An existing rise (ramp or stair launch) stacks instead of being
+      // overwritten (PM_CheckJump, gs_pmove.c:1067-1081).
+      const rise = this.playerVelocity.y;
+      if (rise > MOVEMENT.doubleJumpStackThreshold * MOVEMENT.jumpImpulse) {
+        this.playerVelocity.y = rise + MOVEMENT.jumpImpulse;
+        this.doubleJumpCount += 1;
+        this.fovPunch = Math.max(this.fovPunch, 6);
+        this.trauma = Math.min(1, this.trauma + 0.05);
+      } else {
+        this.playerVelocity.y = Math.max(0, rise) + MOVEMENT.jumpImpulse;
+        this.fovPunch = Math.max(this.fovPunch, 3.5);
+      }
+      this.jumpBuffer = 0;
+      this.jumpPressBuffer = 0;
+      this.coyote = 0;
+      this.grounded = false;
+      this.dashCooldown = 0;
+      this.dashMomentumTimer = 0;
+      this.wallJumpCooldown = 0;
+      this.wallJumpedThisAirtime = false;
+      this.wallJumpAirLockout = false;
+      this.audio.jump();
+    }
+
+    // PM_CheckDash: ground only, velocity is set (never added above dashSpeed)
+    // and redirected, with a fixed vertical hop that gives the dash its airtime.
+    const dashAllowed = this.grounded && this.knockbackLockout <= 0;
+    if (this.dashBuffer > 0 && this.dashCooldown <= 0 && dashAllowed) {
+      const dashDirection = this.movementVectorScratchB.copy(
+        this.wishDirection.lengthSq() > 0.01 ? this.wishDirection : this.forward,
+      ).setY(0).normalize();
+      const dashSpeed = Math.max(
+        Math.hypot(this.playerVelocity.x, this.playerVelocity.z),
+        MOVEMENT.dashSpeed * (this.speedBoost > 0 ? 1.25 : 1),
+      );
+      this.playerVelocity.x = dashDirection.x * dashSpeed;
+      this.playerVelocity.z = dashDirection.z * dashSpeed;
+      this.playerVelocity.y = Math.max(this.playerVelocity.y, MOVEMENT.dashUpSpeed);
       this.dashBuffer = 0;
       this.dashCooldown = MOVEMENT.dashCooldown;
-      this.dashMomentumTimer = MOVEMENT.dashPreserveTime;
+      this.dashMomentumTimer = MOVEMENT.wallJumpDashBlockSeconds;
+      this.coyote = 0;
+      this.grounded = false;
       this.fovPunch = Math.max(this.fovPunch, 5.5);
       this.audio.dash();
     }
 
-    const horizontalSpeed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
-    const bufferedGroundJump = this.jumpBuffer > 0 && this.coyote > 0;
-    if (bufferedGroundJump) {
-      // Held jumping skips the landing-friction frame, matching Warsow's
-      // momentum-preserving bunny hop instead of bleeding speed every cycle.
-      this.playerVelocity.y = MOVEMENT.jumpImpulse;
-      this.jumpBuffer = 0;
-      this.coyote = 0;
-      this.grounded = false;
-      this.fovPunch = Math.max(this.fovPunch, 3.5);
-      this.audio.jump();
+    // A fresh Space press in the air is spent on exactly one thing: a wall
+    // jump if a wall is in reach, otherwise it arms the jetpack for as long as
+    // the key stays held. Holding Space through a ground jump never thrusts.
+    if (this.jumpPressBuffer > 0 && !this.grounded) {
+      this.jumpPressBuffer = 0;
+      if (!this.tryWallJump()) this.jetpackArmed = true;
     }
+    if (!this.input.isJumpHeld()) this.jetpackArmed = false;
 
+    const horizontalSpeed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
     const previousJetpackEnergy = this.jetpackEnergy.snapshot();
     const jetpackEnergy = this.jetpackEnergy.update(
       delta,
-      this.input.isJumpHeld(),
+      this.jetpackArmed && this.input.isJumpHeld(),
       this.grounded,
     );
     this.jetpackActive = jetpackEnergy.active;
@@ -1857,12 +2183,12 @@ export class Game {
         }
         const skiMomentum = skiMomentumCurve(horizontalSpeed, this.skiMomentumScratch);
         this.skiMomentumResistance = skiMomentum.resistance;
-        this.skiGravityDriveScale = skiMomentum.gravityDriveScale;
         this.skiDragAcceleration = skiMomentum.dragAcceleration
           * this.weatherSnapshot.multipliers.groundFrictionMultiplier;
+        // Gravity's tangential pull is never scaled down; only drag opposes it.
         const tangentGravity = this.tangentGravityScratch.set(0, -MOVEMENT.gravity, 0)
           .addScaledVector(this.terrainNormal, MOVEMENT.gravity * this.terrainNormal.y)
-          .multiplyScalar(MOVEMENT.skiGravityScale * skiMomentum.gravityDriveScale);
+          .multiplyScalar(MOVEMENT.skiGravityScale);
         this.playerVelocity.addScaledVector(tangentGravity, delta);
         this.applySkiCarve(this.wishDirection, this.terrainNormal, delta);
         const tangentSpeed = this.playerVelocity.length();
@@ -1880,7 +2206,8 @@ export class Game {
           MOVEMENT.skiPushWishSpeed * (this.speedBoost > 0 ? 1.2 : 1),
           delta,
         );
-      } else if (horizontalSpeed > 0 && this.dashMomentumTimer <= 0) {
+      } else if (horizontalSpeed > 0 && this.knockbackLockout <= 0) {
+        // PM_Friction: skipped while PM_STAT_KNOCKBACK is running.
         const control = Math.max(MOVEMENT.stopSpeed, horizontalSpeed);
         const nextSpeed = Math.max(
           0,
@@ -1892,8 +2219,11 @@ export class Game {
         this.playerVelocity.z *= scale;
       }
       if (!this.skiHeld) {
+        // PM_WalkMove (gs_pmove.c:781-790): drop leftover rise before and after
+        // accel. Jump already un-grounded this frame, so a stacked ramp jump
+        // is not zeroed. Ski keeps tangent Y.
+        if (this.playerVelocity.y > 0) this.playerVelocity.y = 0;
         this.skiMomentumResistance = 0;
-        this.skiGravityDriveScale = 1;
         this.skiDragAcceleration = 0;
         this.accelerate(
           this.wishDirection,
@@ -1901,39 +2231,50 @@ export class Game {
           MOVEMENT.wishSpeed * (this.speedBoost > 0 ? 1.25 : 1),
           delta,
         );
+        if (this.playerVelocity.y > 0) this.playerVelocity.y = 0;
       }
     } else {
       this.skiMomentumResistance = 0;
-      this.skiGravityDriveScale = 1;
       this.skiDragAcceleration = 0;
+      // Warsow air branch (gs_pmove.c:800-832): Q3 accelerate at 1 (2 when
+      // pushing against velocity), CPM side-only strafe accel, then forward
+      // air control. PMF_WALLJUMPING zeroes accel and control until the rise
+      // ends; PM_STAT_KNOCKBACK disables strafe mode and air control.
       const wishSpeed = MOVEMENT.wishSpeed * (this.speedBoost > 0 ? 1.25 : 1);
       const movingAgainstVelocity = this.playerVelocity.x * this.wishDirection.x
         + this.playerVelocity.z * this.wishDirection.z < 0;
-      const pureStrafe = Math.abs(this.moveInput.x) > 0.01 && Math.abs(this.moveInput.y) < 0.01;
-      this.accelerate(
-        this.wishDirection,
-        (pureStrafe
-          ? MOVEMENT.strafeAcceleration
-          : movingAgainstVelocity
-            ? MOVEMENT.airDeceleration
-            : MOVEMENT.airAcceleration) * this.weatherSnapshot.multipliers.airControlMultiplier,
-        pureStrafe ? MOVEMENT.strafeWishSpeed : wishSpeed,
-        delta,
-      );
-      this.applyWarsowAirControl(this.wishDirection, delta);
-      this.applyAirCarve(this.wishDirection, delta);
+      const pureStrafe = this.knockbackLockout <= 0
+        && Math.abs(this.moveInput.x) > 0.01
+        && Math.abs(this.moveInput.y) < 0.01;
+      if (!this.wallJumpAirLockout) {
+        this.accelerate(
+          this.wishDirection,
+          (pureStrafe
+            ? MOVEMENT.strafeAcceleration
+            : movingAgainstVelocity && this.knockbackLockout <= 0
+              ? MOVEMENT.airDeceleration
+              : MOVEMENT.airAcceleration) * this.weatherSnapshot.multipliers.airControlMultiplier,
+          pureStrafe ? MOVEMENT.strafeWishSpeed : wishSpeed,
+          delta,
+        );
+        if (this.knockbackLockout <= 0) this.applyWarsowAirControl(this.wishDirection, delta);
+      }
     }
 
     if (!this.grounded) {
       if (this.jetpackActive) {
-        this.playerVelocity.y = Math.min(
-          MOVEMENT.jetpackMaxRiseSpeed,
-          this.playerVelocity.y + MOVEMENT.jetpackAcceleration * delta,
-        );
+        // Thrust only tops up a slower rise; it never clamps a faster one down.
+        if (this.playerVelocity.y < MOVEMENT.jetpackMaxRiseSpeed) {
+          this.playerVelocity.y = Math.min(
+            MOVEMENT.jetpackMaxRiseSpeed,
+            this.playerVelocity.y + MOVEMENT.jetpackAcceleration * delta,
+          );
+        }
         this.fovPunch = Math.max(this.fovPunch, 1.2);
       }
       this.playerVelocity.y -= MOVEMENT.gravity * delta;
     }
+    // Safety clamp only: no gameplay speed cap exists in the air (Warsow §7).
     const speed3d = this.playerVelocity.length();
     if (speed3d > MOVEMENT.maxSpeed) this.playerVelocity.multiplyScalar(MOVEMENT.maxSpeed / speed3d);
     const distance = this.playerVelocity.length() * delta;
@@ -1963,6 +2304,16 @@ export class Game {
 
   private movePlayerSubstep(delta: number): void {
     const startPosition = this.substepStartPosition.copy(this.playerPosition);
+    // PM_SlideMove (gs_pmove.c:245-250): drop downward velocity only on a
+    // perfectly horizontal floor. A 0.95 cosine would treat ~18° ramps as
+    // flat and kill downhill slide.
+    if (
+      this.grounded
+      && this.terrainNormal.y >= MOVEMENT.slideMoveHorizontalCosine
+      && this.playerVelocity.y < 0
+    ) {
+      this.playerVelocity.y = 0;
+    }
     const startVelocity = this.substepStartVelocity.copy(this.playerVelocity);
     const wasGrounded = this.grounded;
     const intendedPosition = this.substepIntendedPosition.copy(this.playerPosition)
@@ -1990,6 +2341,7 @@ export class Game {
     }
     if (sweptContact.ceilingNormal) contact.contacts += 1;
     blockedPosition.copy(this.playerPosition);
+    const downVelocityY = this.playerVelocity.y;
 
     const intendedHorizontalDistance = Math.hypot(startVelocity.x, startVelocity.z) * delta;
     const resolvedHorizontalDistance = Math.hypot(
@@ -2008,9 +2360,11 @@ export class Game {
       if (steppedContact) contact = steppedContact;
     }
 
+    this.applyRampSpeedPreserve(startVelocity, downVelocityY, contact);
+
     this.lastPhysicsContacts = contact.contacts;
-    this.grounded = contact.grounded;
-    if (contact.grounded) {
+    this.grounded = contact.grounded && this.playerVelocity.y <= MOVEMENT.rampUngroundSpeed;
+    if (this.grounded) {
       this.terrainNormal.copy(contact.contactNormal);
       if (impact > 7 && this.lastGroundImpact <= 0) {
         this.trauma = Math.min(1, this.trauma + Math.min(0.34, impact * 0.012));
@@ -2194,15 +2548,14 @@ export class Game {
 
     // Resolving the raised capsule can correctly remove velocity against the
     // stair riser, but that response must not erase the player's horizontal
-    // momentum before the actual tread landing. Keep the authored run vector
-    // for the step probe; the landing resolver still owns final placement.
+    // momentum before the actual tread landing. Like PM_StepSlideMove's ramp
+    // preservation (gs_pmove.c:432-445), the step keeps the pre-move
+    // horizontal speed exactly, re-aimed along the wish direction when there
+    // is input and along the incoming velocity otherwise.
     const stepHorizontal = new THREE.Vector3(startVelocity.x, 0, startVelocity.z);
+    const preservedSpeed = this.lastStepStartSpeed;
     if (this.moveInput.lengthSq() > 0.01 && this.wishDirection.lengthSq() > 0.001) {
-      const preservedSpeed = Math.min(
-        Math.max(stepHorizontal.length(), MOVEMENT.wishSpeed * 0.72),
-        MOVEMENT.wishSpeed * 0.78,
-      );
-      stepHorizontal.copy(this.wishDirection).multiplyScalar(preservedSpeed);
+      stepHorizontal.copy(this.wishDirection).setY(0).normalize().multiplyScalar(preservedSpeed);
     }
     stepVelocity.x = stepHorizontal.x;
     stepVelocity.z = stepHorizontal.z;
@@ -2261,7 +2614,6 @@ export class Game {
       return null;
     }
 
-    stepVelocity.y = 0;
     stepVelocity.x = stepHorizontal.x;
     stepVelocity.z = stepHorizontal.z;
     this.lastStepFinalSpeed = Math.hypot(stepVelocity.x, stepVelocity.z);
@@ -2270,6 +2622,36 @@ export class Game {
     this.stepSuccesses += 1;
     this.lastStepReason = 'success';
     return landing;
+  }
+
+  /**
+   * PM_StepSlideMove ramp preserve (gs_pmove.c:432-451): keep pre-move
+   * horizontal speed, take Z from the first slide, launch off the plane when
+   * that Z exceeds Warsow's 180 u/s un-ground threshold.
+   */
+  private applyRampSpeedPreserve(
+    startVelocity: THREE.Vector3,
+    downVelocityY: number,
+    contact: CapsuleContact,
+  ): void {
+    const walkable = contact.grounded && contact.contactNormal.y >= MOVEMENT.maxSlopeCosine;
+    const hspeed = Math.hypot(startVelocity.x, startVelocity.z);
+    if (walkable && hspeed > 1e-5) {
+      if (contact.contactNormal.y >= MOVEMENT.rampPreserveFlatCosine) {
+        this.playerVelocity.x = startVelocity.x;
+        this.playerVelocity.z = startVelocity.z;
+      } else {
+        const current = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
+        if (current > 1e-5) {
+          this.playerVelocity.x = this.playerVelocity.x / current * hspeed;
+          this.playerVelocity.z = this.playerVelocity.z / current * hspeed;
+        } else {
+          this.playerVelocity.x = startVelocity.x;
+          this.playerVelocity.z = startVelocity.z;
+        }
+      }
+    }
+    this.playerVelocity.y = downVelocityY;
   }
 
   private accelerate(direction: THREE.Vector3, acceleration: number, wishSpeed: number, delta: number): void {
@@ -2320,30 +2702,65 @@ export class Game {
     this.playerVelocity.set(horizontal.x, verticalSpeed, horizontal.z);
   }
 
-  private applyAirCarve(direction: THREE.Vector3, delta: number): void {
-    if (direction.lengthSq() < 0.0001) return;
+  /**
+   * PM_CheckWallJump (gs_pmove.c:1184-1307). Called once for a fresh airborne
+   * Space press; returns true when a wall jump was performed so the same press
+   * does not also arm the jetpack.
+   */
+  private tryWallJump(): boolean {
+    if (this.wallJumpedThisAirtime || this.wallJumpCooldown > 0) return false;
+    if (this.dashMomentumTimer > 0 || this.knockbackLockout > 0) return false;
+
+    // PlayerTouchWall(12, 0.3): probe outward around the capsule mid-height with
+    // 15 ms of velocity look-ahead; keep the nearest near-vertical wall.
+    const from = this.wallJumpProbeStart.copy(this.playerPosition);
+    from.y += MOVEMENT.playerHeight * 0.5;
+    const reach = MOVEMENT.playerRadius + MOVEMENT.wallJumpReach;
+    const lookAheadX = this.playerVelocity.x * MOVEMENT.wallJumpVelocityLookAhead;
+    const lookAheadZ = this.playerVelocity.z * MOVEMENT.wallJumpVelocityLookAhead;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    const wallNormal = this.wallJumpBestNormal;
+    for (let index = 0; index < MOVEMENT.wallJumpProbeCount; index += 1) {
+      const angle = (index / MOVEMENT.wallJumpProbeCount) * Math.PI * 2;
+      const to = this.wallJumpProbeEnd.set(
+        from.x + Math.cos(angle) * reach + lookAheadX,
+        from.y,
+        from.z + Math.sin(angle) * reach + lookAheadZ,
+      );
+      const hit = this.arena.movementSegmentHitDetails(from, to);
+      if (!hit || hit.distance <= 1e-5 || hit.distance >= bestDistance) continue;
+      if (Math.abs(hit.normal.y) >= MOVEMENT.wallJumpMaxNormalY) continue;
+      bestDistance = hit.distance;
+      wallNormal.copy(hit.normal);
+    }
+    if (!Number.isFinite(bestDistance)) return false;
+
+    const oldRise = this.playerVelocity.y;
     const horizontal = this.movementVectorScratchA.set(this.playerVelocity.x, 0, this.playerVelocity.z);
-    const speed = horizontal.length();
-    if (speed < 0.25) return;
-    const target = this.movementVectorScratchB.copy(direction).setY(0).normalize();
-    const heading = horizontal.multiplyScalar(1 / speed);
-    const dot = THREE.MathUtils.clamp(heading.dot(target), -1, 1);
-    const angle = Math.acos(dot);
-    if (angle < 1e-4) return;
-    const speedPenalty = 1 + Math.max(0, speed - MOVEMENT.wishSpeed) / MOVEMENT.wishSpeed * 0.82;
-    const maxTurn = MOVEMENT.airCarveRate
-      * this.weatherSnapshot.multipliers.airControlMultiplier
-      * delta
-      / speedPenalty;
-    const turn = Math.min(angle, maxTurn);
-    const cross = heading.x * target.z - heading.z * target.x;
-    const sign = Math.sign(cross) || 1;
-    const cosine = Math.cos(turn);
-    const sine = Math.sin(turn) * sign;
-    const x = heading.x * cosine - heading.z * sine;
-    const z = heading.x * sine + heading.z * cosine;
-    this.playerVelocity.x = x * speed;
-    this.playerVelocity.z = z * speed;
+    const currentSpeed = horizontal.length();
+    const wallJumpSpeed = Math.max(currentSpeed, MOVEMENT.wishSpeed * MOVEMENT.wallJumpMinSpeedFactor);
+    if (currentSpeed > 1e-4) horizontal.multiplyScalar(1 / currentSpeed);
+    else horizontal.set(wallNormal.x, 0, wallNormal.z).normalize();
+    // GS_ClipVelocity with pm_wjbouncefactor 0.3 added along the wall normal.
+    let backoff = horizontal.x * wallNormal.x + horizontal.z * wallNormal.z;
+    backoff = backoff <= 0 ? backoff * MOVEMENT.wallJumpOverbounce : backoff / MOVEMENT.wallJumpOverbounce;
+    horizontal.x += wallNormal.x * (MOVEMENT.wallJumpBounce - backoff);
+    horizontal.z += wallNormal.z * (MOVEMENT.wallJumpBounce - backoff);
+    horizontal.setY(0);
+    if (horizontal.lengthSq() < 1e-8) horizontal.set(wallNormal.x, 0, wallNormal.z);
+    horizontal.normalize().multiplyScalar(wallJumpSpeed);
+    this.playerVelocity.set(horizontal.x, Math.max(oldRise, MOVEMENT.wallJumpUpSpeed), horizontal.z);
+
+    this.wallJumpCount += 1;
+    this.wallJumpedThisAirtime = true;
+    this.wallJumpAirLockout = true;
+    this.wallJumpCooldown = MOVEMENT.wallJumpCooldown;
+    this.dashCooldown = 0;
+    this.dashMomentumTimer = 0;
+    this.jumpBuffer = 0;
+    this.fovPunch = Math.max(this.fovPunch, 4.5);
+    this.audio.wallJump();
+    return true;
   }
 
   private applySkiCarve(direction: THREE.Vector3, normal: THREE.Vector3, delta: number): void {
@@ -2357,8 +2774,7 @@ export class Game {
     if (tangentWish.lengthSq() < 1e-4) return;
     tangentWish.normalize();
     const heading = tangentVelocity.multiplyScalar(1 / speed);
-    const blend = Math.min(1, MOVEMENT.skiCarveRate * delta / (1 + speed / 42));
-    heading.lerp(tangentWish, blend).normalize().multiplyScalar(speed);
+    heading.lerp(tangentWish, skiCarveBlend(speed, delta)).normalize().multiplyScalar(speed);
     this.playerVelocity.copy(heading);
   }
 
@@ -2583,13 +2999,18 @@ export class Game {
   }
 
   private updateBots(delta: number): void {
+    this.collectBotThreatPoints();
     for (const bot of this.bots) {
       if (bot.readyToRespawn()) {
         bot.respawn(this.selectSafeSpawn(bot.id));
+        this.botObjectives.delete(bot.id);
       }
       if (!bot.alive) {
         this.updateBotFighterAi(bot, delta);
-        bot.update(delta, this.elapsed, bot.group.position, bot.velocity, this.arena.corePosition, false);
+        this.botUpdateContext.hasTarget = false;
+        this.botUpdateContext.retreat = false;
+        bot.update(delta, this.elapsed, bot.group.position, bot.velocity, this.arena.corePosition, false, this.botUpdateContext);
+        this.updateBotWeaponPresentation(bot);
         continue;
       }
       const fighterAi = this.updateBotFighterAi(bot, delta);
@@ -2601,16 +3022,19 @@ export class Game {
           bot.velocity.copy(activeFighter.flight.velocity);
           bot.group.visible = false;
         }
+        this.updateBotWeaponPresentation(bot);
         continue;
       }
       bot.group.visible = true;
       if (bot.consumeRecoveryRequest()) {
-        bot.respawn(this.selectSafeSpawn(bot.id, bot.navigationTarget));
+        this.relocateStuckBot(bot);
         bot.collisionRecoveries += 1;
       }
+      this.applyJumpPadsToBot(bot);
 
-      const botEye = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-      const droneTarget = this.droneSwarm.nearestVisibleDrone(botEye, 105);
+      const botEye = this.botEyeScratch.copy(bot.group.position);
+      botEye.y += 1.42;
+      const droneTarget = this.nearestVisibleHostileDrone(botEye, 105);
       // A movement-locked combatant is an explicitly staged test/capture actor.
       // Preserve its assigned target instead of allowing nearby ambient bots to
       // steal aggro from the sightline being exercised.
@@ -2625,20 +3049,166 @@ export class Game {
         if (targetOwner !== null) this.botTargets.set(bot.id, targetOwner);
         else this.botTargets.delete(bot.id);
       }
-      const target = droneTarget?.position
-        ?? (targetOwner === null ? this.arena.corePosition : this.ownerPosition(targetOwner, 1.05));
+      const target = droneTarget
+        ? (droneTarget.kind === 'grenadier'
+          ? droneTarget.position.clone().add(new THREE.Vector3(0, 1.8, 0))
+          : droneTarget.position)
+        : (targetOwner === null ? this.arena.corePosition : this.ownerPosition(targetOwner, 1.05));
       const targetVelocity = droneTarget?.velocity
         ?? (targetOwner === null ? new THREE.Vector3() : this.ownerVelocity(targetOwner));
       const visibilityRange = 155 * this.weatherSnapshot.multipliers.visibilityMultiplier;
       const canSeeTarget = (targetOwner !== null || droneTarget !== null)
         && botEye.distanceToSquared(target) <= visibilityRange * visibilityRange
         && this.arena.hasLineOfSight(botEye, target, 0.3);
-      const objective = fighterAi.groundTarget ?? this.chooseBotObjective(bot, target, canSeeTarget);
-      bot.update(delta, this.elapsed, target, targetVelocity, objective, canSeeTarget);
+      const objective = fighterAi.groundTarget ?? this.chooseBotObjective(bot);
+      this.botUpdateContext.hasTarget = targetOwner !== null || droneTarget !== null;
+      this.botUpdateContext.retreat = this.botObjectives.get(bot.id)?.retreat === true;
+      this.botUpdateContext.targetGrounded = droneTarget
+        ? false
+        : targetOwner === 'player'
+          ? this.grounded
+          : Boolean(typeof targetOwner === 'number' && this.bots[targetOwner]?.grounded);
+      bot.update(delta, this.elapsed, target, targetVelocity, objective, canSeeTarget, this.botUpdateContext);
+      this.updateBotWeaponPresentation(bot);
       this.resolveCharacterAgainstFighters(bot.group.position, bot.velocity, 0.43, 1.82);
+      this.resolveCharacterAgainstFlamethrowerDrones(bot.group.position, bot.velocity, 0.43);
       if (bot.wantsToThrowGrenade && targetOwner !== null) this.botThrowGrenade(bot, targetOwner);
       if (bot.wantsToFire && droneTarget) this.botFireDrone(bot, droneTarget);
       else if (bot.wantsToFire && targetOwner !== null) this.botFire(bot, targetOwner);
+    }
+  }
+
+  private collectBotThreatPoints(): void {
+    for (const point of this.botThreatPoints) point.active = false;
+    let slot = 0;
+    const record = (
+      position: THREE.Vector3,
+      velocity: THREE.Vector3,
+      owner: DamageSource,
+      radius: number,
+    ): void => {
+      if (slot >= this.botThreatPoints.length) return;
+      const speed = velocity.length();
+      const timeToImpact = Math.min(BOT_THREAT_HORIZON, radius / Math.max(8, speed));
+      const point = this.botThreatPoints[slot];
+      this.botThreatEndScratch.copy(position).addScaledVector(velocity, timeToImpact);
+      point.position.copy(this.botThreatEndScratch);
+      point.owner = owner === 'player' || typeof owner === 'number' ? owner : 'drone';
+      point.timeToImpact = timeToImpact;
+      point.radius = radius;
+      point.active = true;
+      slot += 1;
+    };
+    for (const projectile of this.projectiles) {
+      record(projectile.root.position, projectile.velocity, projectile.owner, (projectile.splash || 2) + 0.5);
+    }
+    for (const grenade of this.grenades) {
+      record(grenade.root.position, grenade.velocity, grenade.owner, GRENADE.splash + 0.5);
+    }
+  }
+
+  private relocateStuckBot(bot: Bot): void {
+    bot.takeDamage(10_000);
+  }
+
+  private applyJumpPadsToBot(bot: Bot): void {
+    for (const pad of this.arena.jumpPads) {
+      if (bot.group.position.distanceToSquared(pad.position) >= pad.radius * pad.radius) continue;
+      if (bot.launchFromPad(pad.direction, pad.launchSpeed)) break;
+    }
+  }
+
+  private updateBotWeaponPresentation(bot: Bot): void {
+    let source = this.weaponVisualCache.get(bot.weapon);
+    if (!source) {
+      const definition = WEAPONS.find((candidate) => candidate.id === bot.weapon);
+      if (!definition) return;
+      source = createWeaponViewModel(definition, true, true);
+      this.weaponVisualCache.set(bot.weapon, source);
+    }
+    const cacheKey = `${bot.id}:${bot.weapon}`;
+    let visual = this.botWeaponVisualCache.get(cacheKey);
+    if (!visual) {
+      visual = this.createThirdPersonWeaponClone(source);
+      visual.root.name = `bot-${bot.id}-${bot.weapon}-equipped-weapon`;
+      visual.root.visible = false;
+      visual.root.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (mesh.isMesh) mesh.castShadow = false;
+      });
+      this.botWeaponVisualCache.set(cacheKey, visual);
+      this.scene.add(visual.root);
+    }
+    const previous = this.botWeaponPresentations.get(bot.id);
+    if (previous && previous !== visual) previous.root.visible = false;
+    this.botWeaponPresentations.set(bot.id, visual);
+
+    visual.root.visible = bot.alive && bot.group.visible && !this.fighterForPilot(bot.id);
+    if (!visual.root.visible || !bot.modelReady) return;
+    this.botWeaponRightScratch.set(-bot.aimDirection.z, 0, bot.aimDirection.x).normalize();
+    this.botWeaponPrimaryTargetScratch.copy(bot.group.position)
+      .addScaledVector(bot.aimDirection, 0.2)
+      .addScaledVector(this.botWeaponRightScratch, 0.13);
+    this.botWeaponPrimaryTargetScratch.y += 1.37;
+    const supportGrip = this.placeWeaponAtPrimaryTarget(
+      visual.root,
+      visual,
+      this.botWeaponPrimaryTargetScratch,
+      bot.aimDirection,
+    );
+    if (supportGrip) {
+      bot.solvePrimaryHand(this.botWeaponPrimaryTargetScratch);
+      supportGrip.getWorldPosition(this.supportGripWorldScratch);
+      bot.solveSupportHand(this.supportGripWorldScratch);
+      bot.supportGripSocket.getWorldPosition(this.supportHandWorldScratch);
+      bot.group.userData.weaponSupportGripError = this.supportGripWorldScratch
+        .distanceTo(this.supportHandWorldScratch);
+    }
+  }
+
+  private placeWeaponAtPrimaryTarget(
+    root: THREE.Object3D,
+    visual: WeaponViewModel,
+    primaryTarget: THREE.Vector3,
+    aimDirection: THREE.Vector3,
+  ): THREE.Object3D | null {
+    const primaryGrip = visual.root.getObjectByName(`${visual.weapon}-primary-grip-socket`);
+    const supportGrip = visual.root.getObjectByName(`${visual.weapon}-support-grip-socket`);
+    if (!primaryGrip || !supportGrip) return null;
+
+    root.position.set(0, 0, 0);
+    root.quaternion.setFromUnitVectors(THIRD_PERSON_WEAPON_FORWARD, aimDirection);
+    root.scale.setScalar(THIRD_PERSON_WEAPON_SCALE[visual.weapon]);
+    root.updateMatrixWorld(true);
+    primaryGrip.getWorldPosition(this.weaponGripWorldScratch);
+    root.position.copy(primaryTarget).sub(this.weaponGripWorldScratch);
+    root.updateMatrixWorld(true);
+    return supportGrip;
+  }
+
+  private resolveCharacterAgainstFlamethrowerDrones(
+    position: THREE.Vector3,
+    velocity: THREE.Vector3,
+    radius: number,
+  ): void {
+    for (const drone of this.flamethrowerDrones.drones) {
+      if (!drone.alive) continue;
+      const dx = position.x - drone.position.x;
+      const dz = position.z - drone.position.z;
+      const minimumDistance = radius + drone.collisionRadius;
+      const distanceSq = dx * dx + dz * dz;
+      if (distanceSq >= minimumDistance * minimumDistance) continue;
+      const distance = Math.sqrt(Math.max(distanceSq, 1e-6));
+      const normalX = distanceSq > 1e-6 ? dx / distance : 1;
+      const normalZ = distanceSq > 1e-6 ? dz / distance : 0;
+      const correction = minimumDistance - distance;
+      position.x += normalX * correction;
+      position.z += normalZ * correction;
+      const inwardSpeed = velocity.x * normalX + velocity.z * normalZ;
+      if (inwardSpeed < 0) {
+        velocity.x -= normalX * inwardSpeed;
+        velocity.z -= normalZ * inwardSpeed;
+      }
     }
   }
 
@@ -2663,9 +3233,33 @@ export class Game {
       (event) => this.resolveDroneLaser(event),
       (event) => this.resolveBusterShard(event),
     );
+    this.flamethrowerDrones.update(
+      delta,
+      this.elapsed,
+      this.droneTargetSnapshots,
+      (event) => this.spawnFlamethrowerGrenade(event),
+    );
     for (const drone of this.droneSwarm.drones) {
       this.audio.setDroneBeamActive(drone.id, drone.beamActive, drone.position);
     }
+  }
+
+  private spawnFlamethrowerGrenade(event: FlamethrowerGrenadeEvent): void {
+    const root = this.weaponVfx.createGrenade(0xff3b20);
+    root.name = `${event.droneId}-red-shard-grenade`;
+    root.position.copy(event.origin);
+    root.scale.setScalar(1.18);
+    this.scene.add(root);
+    this.grenades.push({
+      root,
+      velocity: event.velocity.clone(),
+      owner: 'drone',
+      fuse: event.fuse,
+      trailDistance: 0,
+      bounces: 0,
+    });
+    this.weaponVfx.burst(event.origin, 0xff3b20, 7);
+    this.audio.weaponWorld('rocket', event.origin, event.droneId, 0.28);
   }
 
   private resolveDroneLaser(event: DroneLaserEvent): void {
@@ -2698,10 +3292,46 @@ export class Game {
     }
   }
 
-  private botFireDrone(bot: Bot, intendedTarget: CombatDroneRuntime): void {
+  private nearestVisibleHostileDrone(origin: THREE.Vector3, maxDistance: number): HostileDroneRuntime | null {
+    const flying = this.droneSwarm.nearestVisibleDrone(origin, maxDistance);
+    const walking = this.flamethrowerDrones.nearestVisibleDrone(origin, maxDistance);
+    if (!flying) return walking;
+    if (!walking) return flying;
+    return flying.position.distanceToSquared(origin) <= walking.position.distanceToSquared(origin) ? flying : walking;
+  }
+
+  private raycastHostileDrone(
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    maxDistance: number,
+    extraRadius = 0,
+  ): HostileDroneRayHit | null {
+    const flying = this.droneSwarm.raycast(origin, direction, maxDistance, extraRadius);
+    const walking = this.flamethrowerDrones.raycast(origin, direction, maxDistance, extraRadius);
+    if (!flying) return walking;
+    if (!walking) return flying;
+    return flying.distance <= walking.distance ? flying : walking;
+  }
+
+  private raycastHostileDroneSegment(
+    start: THREE.Vector3,
+    end: THREE.Vector3,
+    extraRadius = 0,
+  ): HostileDroneRayHit | null {
+    const flying = this.droneSwarm.raycastSegment(start, end, extraRadius);
+    const walking = this.flamethrowerDrones.raycastSegment(start, end, extraRadius);
+    if (!flying) return walking;
+    if (!walking) return flying;
+    return flying.distance <= walking.distance ? flying : walking;
+  }
+
+  private botFireDrone(bot: Bot, intendedTarget: HostileDroneRuntime): void {
     if (!intendedTarget.alive) return;
-    const origin = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-    if (!this.arena.hasLineOfSight(origin, intendedTarget.position, 0.3)) return;
+    const origin = this.botMuzzleWorldPosition(bot);
+    const targetCenter = intendedTarget.kind === 'grenadier'
+      ? intendedTarget.position.clone().add(new THREE.Vector3(0, 1.8, 0))
+      : intendedTarget.position;
+    if (!this.arena.hasLineOfSight(origin, targetCenter, 0.3)) return;
     const definition = this.weapon(bot.weapon);
     if (bot.weapon === 'rocket' || bot.weapon === 'plasma' || bot.weapon === 'disc') {
       this.spawnProjectile(origin, bot.aimDirection, bot.id, definition);
@@ -2712,7 +3342,7 @@ export class Game {
     const bulletEnd = origin.clone().addScaledVector(bot.aimDirection, range);
     const worldHit = this.arena.segmentHit(origin, bulletEnd);
     const worldDistance = worldHit ? origin.distanceTo(worldHit) : range;
-    const droneHit = this.droneSwarm.raycast(origin, bot.aimDirection, worldDistance);
+    const droneHit = this.raycastHostileDrone(origin, bot.aimDirection, worldDistance);
     const visibleEnd = droneHit?.point ?? worldHit ?? bulletEnd;
     const visualWeapon = bot.weapon === 'laser' || bot.weapon === 'rail' || bot.weapon === 'sniper' ? bot.weapon : 'machine';
     this.weaponVfx.beam(
@@ -2729,7 +3359,7 @@ export class Game {
         damage *= Math.max(2, Math.round((definition.pellets ?? 10) * falloff * 0.62));
       }
       if (bot.damageBoost > 0) damage *= 1.35;
-      this.applyDamageToDrone(droneHit.drone, damage, bot.id, definition.name);
+      this.applyDamageToHostileDrone(droneHit.drone, damage, bot.id, definition.name);
     }
     this.audio.tracerPass(origin.clone().lerp(visibleEnd, 0.55), !droneHit, (bot.id - 1) * 0.2, `bot-${bot.id}`);
     this.audio.weaponWorld(bot.weapon, origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
@@ -2737,7 +3367,7 @@ export class Game {
 
   private botFire(bot: Bot, targetOwner: Owner): void {
     if (!this.ownerAlive(targetOwner) || targetOwner === bot.id) return;
-    const origin = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+    const origin = this.botMuzzleWorldPosition(bot);
     const target = this.ownerPosition(targetOwner, 0.95);
     // Fire-time LOS closes the reaction/update race: neither hitscan nor a
     // projectile may be emitted once the target has moved behind BSP/patch cover.
@@ -2755,6 +3385,41 @@ export class Game {
     const visibleEnd = worldHit ?? bulletEnd;
     const visualWeapon = bot.weapon === 'laser' || bot.weapon === 'rail' || bot.weapon === 'sniper' ? bot.weapon : 'machine';
     const worldDistance = worldHit ? origin.distanceTo(worldHit) : range;
+    if (bot.weapon === 'shotgun') {
+      const pellets = definition.pellets ?? 14;
+      const spread = definition.spread ?? 0.09;
+      let pelletDamage = 0;
+      let pelletHits = 0;
+      let lastHit: THREE.Vector3 | null = null;
+      for (let pellet = 0; pellet < pellets; pellet += 1) {
+        const pelletDirection = this.sunflowerPelletDirection(bot.aimDirection, pellet, pellets, spread);
+        const pelletEnd = origin.clone().addScaledVector(pelletDirection, range);
+        const pelletWorld = this.arena.segmentHit(origin, pelletEnd);
+        const pelletRange = pelletWorld ? origin.distanceTo(pelletWorld) : range;
+        const hit = this.rayOwnerCapsuleHit(origin, pelletDirection, targetOwner, pelletRange, bot.weapon);
+        if (!hit) continue;
+        const along = hit.distanceTo(origin);
+        const falloff = 1 - THREE.MathUtils.smoothstep(along, definition.falloffStart ?? 5, definition.falloffEnd ?? 30) * 0.58;
+        pelletDamage += definition.damage * falloff;
+        pelletHits += 1;
+        lastHit = hit;
+      }
+      this.weaponVfx.beam(origin, lastHit ?? visibleEnd, 'machine', definition.color, 0.065);
+      if (pelletHits > 0 && lastHit) {
+        if (bot.damageBoost > 0) pelletDamage *= 1.35;
+        this.applyDamageToOwner(
+          targetOwner,
+          pelletDamage,
+          bot.id,
+          definition.name,
+          origin,
+          this.weaponKnockback('shotgun') * pelletHits,
+        );
+      }
+      this.audio.tracerPass(origin.clone().lerp(visibleEnd, 0.55), pelletHits === 0, (bot.id - 1) * 0.2, `bot-${bot.id}`);
+      this.audio.weaponWorld(bot.weapon, origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
+      return;
+    }
     const targetHitPoint = this.rayOwnerCapsuleHit(origin, bot.aimDirection, targetOwner, worldDistance, bot.weapon);
     this.weaponVfx.beam(
       origin,
@@ -2765,31 +3430,42 @@ export class Game {
     );
     let targetHit = targetHitPoint !== null;
     if (targetHitPoint) {
-      const along = targetHitPoint.distanceTo(origin);
-      targetHit = true;
       let damage = definition.damage;
-      if (bot.weapon === 'shotgun') {
-        const falloff = THREE.MathUtils.clamp(1 - Math.max(0, along - 5) / 30, 0.12, 1);
-        const pelletHits = Math.max(2, Math.round((definition.pellets ?? 10) * falloff * 0.62));
-        damage *= pelletHits;
-      }
       if (bot.damageBoost > 0) damage *= 1.35;
-      this.applyDamageToOwner(targetOwner, damage, bot.id, definition.name, origin);
+      this.applyDamageToOwner(
+        targetOwner,
+        damage,
+        bot.id,
+        definition.name,
+        origin,
+        this.weaponKnockback(bot.weapon),
+      );
     }
     const tracerPosition = origin.clone().lerp(visibleEnd, 0.55);
     this.audio.tracerPass(tracerPosition, !targetHit, (bot.id - 1) * 0.2, `bot-${bot.id}`);
     this.audio.weaponWorld(bot.weapon, origin, `bot-${bot.id}`, (bot.id - 1) * 0.2);
   }
 
+  private botMuzzleWorldPosition(bot: Bot): THREE.Vector3 {
+    const visual = this.botWeaponPresentations.get(bot.id);
+    if (visual?.root.visible) {
+      visual.muzzleSocket.updateWorldMatrix(true, false);
+      return visual.muzzleSocket.getWorldPosition(new THREE.Vector3());
+    }
+    return bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+  }
+
   private botThrowGrenade(bot: Bot, targetOwner: Owner): void {
+    if (!this.ownerAlive(targetOwner)) return;
     const origin = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-    const target = this.ownerPosition(targetOwner, 0.9);
-    const direction = target.sub(origin).normalize();
+    const launch = bot.grenadeLaunchVelocity;
+    if (launch.lengthSq() < 1e-4) return;
+    const probe = origin.clone().addScaledVector(launch.clone().normalize(), 3);
+    if (!this.arena.hasLineOfSight(origin, probe, 0.2)) return;
     const root = this.weaponVfx.createGrenade(0xff607d);
     root.position.copy(origin);
     this.scene.add(root);
-    const velocity = direction.multiplyScalar(GRENADE.throwSpeed * 0.92).addScaledVector(bot.velocity, 0.18);
-    velocity.y += GRENADE.upwardImpulse * 0.9;
+    const velocity = launch.clone().addScaledVector(bot.velocity, 0.18);
     this.grenades.push({ root, velocity, owner: bot.id, fuse: GRENADE.fuse, trailDistance: 0, bounces: 0 });
     this.audio.weaponWorld('rocket', origin, `bot-${bot.id}-grenade`, (bot.id - 1) * 0.16);
   }
@@ -2804,46 +3480,115 @@ export class Game {
       const distance = eye.distanceTo(target);
       const visibilityRange = 155 * this.weatherSnapshot.multipliers.visibilityMultiplier;
       const visible = distance <= visibilityRange && this.arena.hasLineOfSight(eye, target, 0.3);
-      const threatScore = owner === 'player' ? this.score : this.bots[owner]?.score ?? 0;
+      const recentAttacker = bot.isRecentAttacker(owner, this.elapsed);
       const pressureBias = bot.getObjectiveUtility('player');
       const score = distance
         - (visible ? 52 * pressureBias : 0)
-        - threatScore * 2.2 * bot.archetypeTuning.aggression
+        - (recentAttacker ? 80 : 0)
+        - (recentAttacker ? bot.threat.damageTakenRecently * 0.45 : 0)
         + (this.botTargets.get(bot.id) === owner ? -9 : 0);
       if (!best || score < best.score) best = { owner, score };
     }
     return best?.owner ?? null;
   }
 
-  private chooseBotObjective(bot: Bot, target: THREE.Vector3, targetVisible: boolean): THREE.Vector3 {
-    const playerPressure = bot.getObjectiveUtility('player');
-    const corePressure = bot.getObjectiveUtility('core');
-    const chaseRange = 62 * THREE.MathUtils.clamp(playerPressure / Math.max(0.45, corePressure), 0.7, 1.3);
-    if (targetVisible && bot.group.position.distanceToSquared(target) < chaseRange * chaseRange) return target;
-    if (this.coreActive && (corePressure >= playerPressure || !targetVisible)) return this.arena.corePosition;
+  private chooseBotObjective(bot: Bot): THREE.Vector3 {
+    const existing = this.botObjectives.get(bot.id);
+    if (existing) {
+      const reached = bot.group.position.distanceToSquared(existing.position) <= BOT_OBJECTIVE_REACH_RADIUS * BOT_OBJECTIVE_REACH_RADIUS;
+      const expired = this.elapsed - existing.committedAt >= BOT_OBJECTIVE_COMMIT_SECONDS;
+      const pickupGone = existing.pickup !== null && !existing.pickup.active;
+      if (!reached && !expired && !pickupGone) return existing.position;
+      this.botObjectives.delete(bot.id);
+    }
 
-    let bestPickup: { point: THREE.Vector3; score: number } | null = null;
+    const needsRetreat = bot.health < BOT_RETREAT_HEALTH || bot.armor <= 0;
+    const recoveryBias = bot.getObjectiveUtility('recovery');
+    if (needsRetreat) {
+      let bestRecovery: { point: THREE.Vector3; score: number; pickup: PickupState } | null = null;
+      for (const pickup of this.pickups) {
+        if (!pickup.active || (pickup.kind !== 'health' && pickup.kind !== 'armor')) continue;
+        if (pickup.kind === 'health' && bot.health >= 95) continue;
+        if (pickup.kind === 'armor' && bot.armor >= 95) continue;
+        const pathCost = this.botNavigation?.pathCost(bot.group.position, pickup.group.position)
+          ?? bot.group.position.distanceTo(pickup.group.position);
+        const need = pickup.kind === 'health'
+          ? 1.1 - (bot.health / 100) ** 2
+          : 1.1 - (bot.armor / 150) ** 2;
+        const score = 1000 * (need * recoveryBias) / Math.max(0.5 * pathCost, 1);
+        if (!bestRecovery || score > bestRecovery.score) {
+          bestRecovery = { point: pickup.group.position, score, pickup };
+        }
+      }
+      if (bestRecovery) {
+        this.botObjectives.set(bot.id, {
+          position: bestRecovery.point,
+          kind: 'retreat',
+          pickup: bestRecovery.pickup,
+          committedAt: this.elapsed,
+          retreat: true,
+        });
+        return bestRecovery.point;
+      }
+    }
+
+    const corePressure = bot.getObjectiveUtility('core');
+    let bestPickup: { point: THREE.Vector3; score: number; pickup: PickupState | null; kind: BotObjectiveKind } | null = null;
     for (const pickup of this.pickups) {
       if (!pickup.active) continue;
-      let utility = 8;
+      let weight = 8;
+      let kind: BotObjectiveKind = 'weapon';
       if (pickup.kind === 'health') {
         if (bot.health >= 95) continue;
-        utility = bot.health < 45 ? 58 : 28;
+        weight = 1.1 - (bot.health / 100) ** 2;
+        kind = 'health';
       } else if (pickup.kind === 'armor') {
         if (bot.armor >= 95) continue;
-        utility = bot.armor < 35 ? 52 : 25;
+        weight = 1.1 - (bot.armor / 150) ** 2;
+        kind = 'armor';
+      } else if (pickup.kind === 'damage' || pickup.kind === 'speed') {
+        weight = 0.8;
+      } else {
+        if (bot.ownsWeaponWithAmmo(pickup.kind)) continue;
+        weight = 0.55 + bot.getPickupUtility(pickup.kind);
       }
-      else if (pickup.kind === 'damage' || pickup.kind === 'speed') utility = 38;
-      else if (pickup.kind === 'rail' || pickup.kind === 'rocket' || pickup.kind === 'sniper' || pickup.kind === 'disc') utility = 32;
-      else utility = 22;
-      utility *= 0.55 + bot.getPickupUtility(pickup.kind);
-      const score = bot.group.position.distanceTo(pickup.group.position) - utility;
-      if (!bestPickup || score < bestPickup.score) bestPickup = { point: pickup.group.position, score };
+      weight *= 0.55 + bot.getPickupUtility(pickup.kind);
+      const pathCost = this.botNavigation?.pathCost(bot.group.position, pickup.group.position)
+        ?? bot.group.position.distanceTo(pickup.group.position);
+      const score = 1000 * weight / Math.max(0.5 * pathCost, 1);
+      if (!bestPickup || score > bestPickup.score) {
+        bestPickup = { point: pickup.group.position, score, pickup, kind };
+      }
     }
-    if (bestPickup && bestPickup.score < 132) return bestPickup.point;
+    if (this.coreActive) {
+      const pathCost = this.botNavigation?.pathCost(bot.group.position, this.arena.corePosition)
+        ?? bot.group.position.distanceTo(this.arena.corePosition);
+      const score = 1000 * corePressure / Math.max(0.5 * pathCost, 1);
+      if (!bestPickup || score > bestPickup.score) {
+        bestPickup = { point: this.arena.corePosition, score, pickup: null, kind: 'core' };
+      }
+    }
+    if (bestPickup && bestPickup.score > 0.8) {
+      this.botObjectives.set(bot.id, {
+        position: bestPickup.point,
+        kind: bestPickup.kind,
+        pickup: bestPickup.pickup,
+        committedAt: this.elapsed,
+        retreat: false,
+      });
+      return bestPickup.point;
+    }
     const routePoints = [...this.arena.spawnPoints, ...Object.values(this.arena.itemPoints), this.arena.corePosition];
-    const phase = Math.floor((this.elapsed + bot.id * 3.1) / 8.5);
-    return routePoints[(bot.id * 5 + phase * 3) % routePoints.length];
+    const phase = Math.floor((this.elapsed + bot.id * 3.1) / BOT_OBJECTIVE_COMMIT_SECONDS);
+    const routed = routePoints[(bot.id * 5 + phase * 3) % routePoints.length];
+    this.botObjectives.set(bot.id, {
+      position: routed,
+      kind: 'route',
+      pickup: null,
+      committedAt: this.elapsed,
+      retreat: false,
+    });
+    return routed;
   }
 
   private ownerAlive(owner: Owner): boolean {
@@ -2865,7 +3610,7 @@ export class Game {
     direction: THREE.Vector3,
     owner: Owner,
     maxDistance: number,
-    weapon: WeaponId,
+    _weapon: WeaponId,
   ): THREE.Vector3 | null {
     const occupiedFighter = this.fighterForPilot(owner);
     if (occupiedFighter) {
@@ -2876,27 +3621,31 @@ export class Game {
       );
     }
     const feet = this.ownerPosition(owner, 0);
-    const capsuleStart = feet.clone().add(new THREE.Vector3(0, 0.28, 0));
-    const capsuleEnd = feet.add(new THREE.Vector3(0, 1.52, 0));
+    const radius = this.combatHitRadius();
+    const height = this.combatHitHeight();
+    const capsuleStart = feet.clone().add(new THREE.Vector3(0, radius, 0));
+    const capsuleEnd = feet.add(new THREE.Vector3(0, Math.max(radius, height - radius), 0));
     const pointOnRay = new THREE.Vector3();
     const pointOnCapsule = new THREE.Vector3();
     const ray = new THREE.Ray(origin, direction);
     const distanceSq = ray.distanceSqToSegment(capsuleStart, capsuleEnd, pointOnRay, pointOnCapsule);
-    const radius = weapon === 'shotgun' ? 1.58
-      : weapon === 'machine' ? 0.58
-        : weapon === 'laser' ? 0.5
-          : weapon === 'sniper' ? 0.5
-            : 0.46;
     const along = pointOnRay.distanceTo(origin);
     if (distanceSq > radius * radius || along <= 0 || along > maxDistance + 0.02) return null;
     return pointOnRay;
   }
 
-  private applyDamageToOwner(owner: Owner, damage: number, attacker: Owner, cause: string, hitOrigin?: THREE.Vector3): void {
+  private applyDamageToOwner(
+    owner: Owner,
+    damage: number,
+    attacker: Owner,
+    cause: string,
+    hitOrigin?: THREE.Vector3,
+    knockback?: number,
+  ): void {
     const occupiedFighter = this.fighterForPilot(owner);
     if (occupiedFighter) this.damageFighter(occupiedFighter, damage, attacker, cause.toUpperCase());
-    else if (owner === 'player') this.damagePlayer(damage, attacker, cause.toUpperCase(), hitOrigin);
-    else this.applyDamageToBot(this.bots[owner], damage, attacker, cause);
+    else if (owner === 'player') this.damagePlayer(damage, attacker, cause.toUpperCase(), hitOrigin, knockback);
+    else this.applyDamageToBot(this.bots[owner], damage, attacker, cause, hitOrigin, knockback);
   }
 
   private damageFirstFighterOnRay(
@@ -2973,36 +3722,34 @@ export class Game {
       return;
     }
     const focusedMachine = definition.id === 'machine' && this.input.isAltFireHeld();
-    this.weaponCooldown = definition.cooldown * (focusedMachine ? 0.84 : 1);
+    this.weaponCooldown += definition.cooldown * (focusedMachine ? 0.84 : 1);
     this.recoil = Math.min(1, this.recoil + definition.recoil);
     this.trauma = Math.min(1, this.trauma + definition.trauma);
     this.ammo.set(definition.id, Math.max(0, ammo - 1));
 
-    const origin = this.weaponMuzzleWorldPosition();
+    const muzzle = this.weaponMuzzleWorldPosition();
+    const origin = this.resolveShotOrigin(muzzle);
     // Long hitscan weapons must converge at their effective range. A fixed
     // 120 m convergence point makes the long sniper barrel diverge from the
     // reticle again before its 165 m endpoint.
     const aimRange = definition.projectileSpeed ? 120 : definition.range ?? 120;
     const direction = this.shotDirectionFromMuzzle(origin, aimRange);
     this.recordPlayerShot(definition.id, origin);
-    this.weaponVfx.muzzle(definition.id, definition.color, this.playerMuzzleVfxSocket(origin, direction));
+    this.weaponVfx.muzzle(definition.id, definition.color, this.playerMuzzleVfxSocket(muzzle, direction));
     if (definition.projectileSpeed) {
       this.spawnProjectile(origin, direction, 'player', definition);
     } else if (definition.pellets) {
-      const hits = new Map<Bot, number>();
-      const spreadRight = direction.clone().cross(new THREE.Vector3(0, 1, 0)).normalize();
-      if (spreadRight.lengthSq() < 0.01) spreadRight.set(1, 0, 0);
-      const spreadUp = spreadRight.clone().cross(direction).normalize();
+      const hits = new Map<Bot, { damage: number; pellets: number; headshot: boolean }>();
       this.lastPelletCount = definition.pellets;
       this.lastPelletSpread = 0;
       for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
-        const normalizedRadius = pellet === 0 ? 0 : Math.sqrt((pellet + 0.35) / definition.pellets);
-        const angle = pellet * 2.399963 + (this.rng() - 0.5) * 0.16;
-        const radius = normalizedRadius * (definition.spread ?? 0.09);
-        const pelletDirection = direction.clone()
-          .addScaledVector(spreadRight, Math.cos(angle) * radius)
-          .addScaledVector(spreadUp, Math.sin(angle) * radius)
-          .normalize();
+        const pelletDirection = this.sunflowerPelletDirection(
+          direction,
+          pellet,
+          definition.pellets,
+          definition.spread ?? 0.09,
+          (this.rng() - 0.5) * 0.16,
+        );
         this.lastPelletSpread = Math.max(this.lastPelletSpread, Math.acos(THREE.MathUtils.clamp(direction.dot(pelletDirection), -1, 1)));
         const trace = this.traceBotShot(origin, pelletDirection, definition.falloffEnd ?? 30, false);
         this.damageFirstFighterOnRay(
@@ -3019,7 +3766,7 @@ export class Game {
             definition.falloffStart ?? 5,
             definition.falloffEnd ?? 30,
           ) * 0.58;
-          this.applyDamageToDrone(
+          this.applyDamageToHostileDrone(
             trace.drone.drone,
             definition.damage * falloff * this.damageMultiplier(),
             'player',
@@ -3029,7 +3776,11 @@ export class Game {
           const distance = trace.first.t;
           const falloff = 1 - THREE.MathUtils.smoothstep(distance, definition.falloffStart ?? 5, definition.falloffEnd ?? 30) * 0.58;
           const locationMultiplier = trace.first.zone === 'head' ? 1.25 : 1;
-          hits.set(trace.first.bot, (hits.get(trace.first.bot) ?? 0) + definition.damage * falloff * locationMultiplier);
+          const current = hits.get(trace.first.bot) ?? { damage: 0, pellets: 0, headshot: false };
+          current.damage += definition.damage * falloff * locationMultiplier;
+          current.pellets += 1;
+          current.headshot = current.headshot || trace.first.zone === 'head';
+          hits.set(trace.first.bot, current);
         }
         const pelletEnd = trace.combatEnd;
         this.weaponVfx.beam(origin, pelletEnd, definition.id, definition.color, 0.055 + pellet * 0.0015);
@@ -3039,7 +3790,17 @@ export class Game {
           if (pellet % 3 === 0) this.registerConcreteTraceImpact(trace, definition.damage * 2.4);
         }
       }
-      for (const [bot, damage] of hits) this.applyDamageToBot(bot, damage * this.damageMultiplier(), 'player', definition.name);
+      for (const [bot, hit] of hits) {
+        this.applyDamageToBot(
+          bot,
+          hit.damage * this.damageMultiplier(),
+          'player',
+          definition.name,
+          bot.group.position,
+          this.weaponKnockback('shotgun') * hit.pellets,
+          hit.headshot,
+        );
+      }
     } else {
       const range = definition.range ?? 120;
       const piercing = definition.id === 'rail';
@@ -3095,7 +3856,8 @@ export class Game {
     }
 
     const wasActive = this.weaponVfx.continuousLaserActive;
-    const origin = this.weaponMuzzleWorldPosition();
+    const muzzle = this.weaponMuzzleWorldPosition();
+    const origin = this.resolveShotOrigin(muzzle);
     const range = definition.range ?? 54;
     const direction = this.shotDirectionFromMuzzle(origin, range);
     const trace = this.traceBotShot(origin, direction, range, false);
@@ -3108,10 +3870,10 @@ export class Game {
     this.recordPlayerShot('laser', origin);
     this.laserHeat = Math.min(1.1, this.laserHeat + delta * (focused ? 1.08 : 0.7));
 
-    if (!wasActive) this.weaponVfx.muzzle('laser', definition.color, this.playerMuzzleVfxSocket(origin, direction));
+    if (!wasActive) this.weaponVfx.muzzle('laser', definition.color, this.playerMuzzleVfxSocket(muzzle, direction));
     if (this.weaponCooldown > 0) return;
 
-    this.weaponCooldown = definition.cooldown * (focused ? 1.35 : 1);
+    this.weaponCooldown += definition.cooldown * (focused ? 1.35 : 1);
     this.ammo.set('laser', Math.max(0, ammo - ammoCost));
     this.recoil = Math.min(0.34, this.recoil + definition.recoil);
     this.trauma = Math.min(0.22, this.trauma + definition.trauma);
@@ -3129,9 +3891,12 @@ export class Game {
         definition.damage * (focused ? 1.8 : 1) * this.damageMultiplier(),
         'player',
         focused ? 'HELIX CUTTING FOCUS' : definition.name,
+        botHit.point,
+        this.weaponKnockback('laser'),
+        botHit.zone === 'head',
       );
     } else if (droneVisible && trace.drone) {
-      this.applyDamageToDrone(
+      this.applyDamageToHostileDrone(
         trace.drone.drone,
         definition.damage * (focused ? 1.8 : 1) * this.damageMultiplier(),
         'player',
@@ -3163,10 +3928,11 @@ export class Game {
     }
 
     this.ammo.set(definition.id, ammo - cost);
-    const origin = this.weaponMuzzleWorldPosition();
+    const muzzle = this.weaponMuzzleWorldPosition();
+    const origin = this.resolveShotOrigin(muzzle);
     const direction = this.shotDirectionFromMuzzle(origin, 220);
     this.recordPlayerShot(definition.id, origin);
-    this.weaponVfx.muzzle(definition.id, definition.color, this.playerMuzzleVfxSocket(origin, direction));
+    this.weaponVfx.muzzle(definition.id, definition.color, this.playerMuzzleVfxSocket(muzzle, direction));
 
     if (definition.id === 'shotgun') {
       this.weaponCooldown = 1.15;
@@ -3239,13 +4005,8 @@ export class Game {
   }
 
   private applyWeaponRecoil(definition: WeaponDefinition): void {
-    // Apply the kick after resolving the shot, so recoil affects follow-up aim
-    // without pulling the projectile that caused it away from the reticle.
-    this.pitch = THREE.MathUtils.clamp(
-      this.pitch + definition.recoil * 0.012,
-      -1.28,
-      1.22,
-    );
+    // Visual kick only. Writing into this.pitch permanently drifted aim.
+    this.recoilPitchOffset = Math.min(0.14, this.recoilPitchOffset + definition.recoil * 0.012);
   }
 
   private weaponMuzzleWorldPosition(): THREE.Vector3 {
@@ -3333,7 +4094,7 @@ export class Game {
     weaponId?: WeaponId,
   ): {
     first: { bot: Bot; point: THREE.Vector3; t: number; zone: 'body' | 'head' } | null;
-    drone: DroneRayHit | null;
+    drone: HostileDroneRayHit | null;
     firstTarget: 'bot' | 'drone' | null;
     worldHit: THREE.Vector3 | null;
     worldNormal: THREE.Vector3 | null;
@@ -3346,24 +4107,24 @@ export class Game {
     const worldHit = surfaceHit?.point ?? null;
     const worldDistance = surfaceHit?.distance ?? range;
     const ray = new THREE.Ray(origin, direction);
-    const droneHit = this.droneSwarm.raycast(origin, direction, worldDistance);
+    const droneHit = this.raycastHostileDrone(origin, direction, worldDistance);
     const hits: Array<{ bot: Bot; t: number; point: THREE.Vector3; zone: 'body' | 'head' }> = [];
+    const radius = this.combatHitRadius();
+    const height = this.combatHitHeight();
     for (const bot of this.bots) {
       if (!bot.alive || this.fighterForPilot(bot.id)) continue;
-      const bodyHit = ray.intersectSphere(
-        new THREE.Sphere(bot.group.position.clone().add(new THREE.Vector3(0, 0.88, 0)), 0.66),
-        new THREE.Vector3(),
-      );
-      const headHit = ray.intersectSphere(
-        new THREE.Sphere(bot.group.position.clone().add(new THREE.Vector3(0, 1.55, 0)), 0.3),
-        new THREE.Vector3(),
-      );
-      const bodyT = bodyHit ? bodyHit.distanceTo(origin) : Number.POSITIVE_INFINITY;
-      const headT = headHit ? headHit.distanceTo(origin) : Number.POSITIVE_INFINITY;
-      const t = Math.min(bodyT, headT);
+      const feet = bot.group.position;
+      const capsuleStart = feet.clone().add(new THREE.Vector3(0, radius, 0));
+      const capsuleEnd = feet.clone().add(new THREE.Vector3(0, Math.max(radius, height - radius), 0));
+      const pointOnRay = new THREE.Vector3();
+      const pointOnCapsule = new THREE.Vector3();
+      const distanceSq = ray.distanceSqToSegment(capsuleStart, capsuleEnd, pointOnRay, pointOnCapsule);
+      if (distanceSq > radius * radius) continue;
+      const t = pointOnRay.distanceTo(origin);
       if (!Number.isFinite(t) || t <= 0 || t > worldDistance + 0.02) continue;
-      const zone = headT <= bodyT ? 'head' : 'body';
-      hits.push({ bot, t, point: zone === 'head' ? headHit! : bodyHit!, zone });
+      const headY = feet.y + height - radius * 0.45;
+      const zone = pointOnCapsule.y >= headY ? 'head' as const : 'body' as const;
+      hits.push({ bot, t, point: pointOnRay, zone });
     }
     hits.sort((a, b) => a.t - b.t);
     const firstBot = hits[0] ?? null;
@@ -3378,10 +4139,18 @@ export class Game {
         const criticalMultiplier = hit.zone === 'head'
           ? weaponId === 'sniper' ? 1.75 : weaponId === 'rail' ? 1.35 : weaponId === 'machine' ? 1.25 : 1.15
           : 1;
-        this.applyDamageToBot(hit.bot, damage * criticalMultiplier, 'player', weaponName);
+        this.applyDamageToBot(
+          hit.bot,
+          damage * criticalMultiplier,
+          'player',
+          weaponName,
+          hit.point,
+          weaponId ? this.weaponKnockback(weaponId) : 0,
+          hit.zone === 'head',
+        );
       }
       if (droneHit && (piercing || firstTarget === 'drone')) {
-        this.applyDamageToDrone(droneHit.drone, damage, 'player', weaponName);
+        this.applyDamageToHostileDrone(droneHit.drone, damage, 'player', weaponName);
       }
     }
     const end = worldHit ?? rangeEnd;
@@ -3433,6 +4202,7 @@ export class Game {
     );
     root.position.copy(origin);
     if (owner === 'player') this.lastProjectileOrigin.copy(root.position);
+    root.position.copy(this.prestepAlong(origin, direction));
     this.weaponVfx.orientProjectile(root, direction, this.elapsed, definition.id);
     this.scene.add(root);
     this.projectiles.push({
@@ -3620,21 +4390,34 @@ export class Game {
     const grenade = this.grenades[index];
     if (!grenade) return;
     const position = grenade.root.position.clone();
-    const color = 0xffb84a;
+    const color = grenade.owner === 'drone' ? 0xff3b20 : 0xffb84a;
+    if (grenade.owner === 'drone') {
+      this.hostileGrenadeExplosions += 1;
+      this.lastHostileGrenadeExplosionPosition.copy(position);
+    }
     this.weaponVfx.grenadeExplosion(position, color);
     this.audio.projectileImpact('rocket', position, this.rng() - 0.5);
     for (const bot of this.bots) {
       if (!bot.alive || grenade.owner === bot.id) continue;
-      const target = bot.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
-      const distance = target.distanceTo(position);
-      if (distance >= GRENADE.splash || !this.explosionHasLineOfSight(position, target)) continue;
-      const falloff = THREE.MathUtils.clamp(1 - distance / GRENADE.splash, 0, 1);
-      this.applyDamageToBot(bot, GRENADE.damage * (falloff * 0.3 + falloff * falloff * 0.7), grenade.owner, 'FRAG GRENADE');
-      const impulse = target.sub(position).normalize().multiplyScalar(falloff * 7.5);
-      bot.velocity.add(impulse);
-      bot.velocity.y = Math.max(bot.velocity.y, impulse.y + 2.2);
+      const sample = this.sampleSplash(
+        position,
+        bot.group.position.clone(),
+        COMBAT.splashInnerBot,
+        MOVEMENT.playerHeight,
+        GRENADE.splash,
+        GRENADE.damage,
+        GRENADE.splashMinDamage,
+        GRENADE.knockback,
+        GRENADE.splashMinKnockback,
+      );
+      if (!sample || !this.explosionHasLineOfSight(position, bot.group.position.clone().add(new THREE.Vector3(0, 0.9, 0)))) continue;
+      this.applyDamageToBot(bot, sample.damage, grenade.owner, 'FRAG GRENADE', position, sample.knockback);
+      if (grenade.owner === 'drone') {
+        this.hostileGrenadeBotHits += 1;
+        this.lastHostileGrenadeBotHit = bot.id;
+      }
     }
-    for (const drone of this.droneSwarm.combatDrones) {
+    for (const drone of grenade.owner === 'drone' ? [] : this.droneSwarm.combatDrones) {
       if (!drone.alive) continue;
       const distance = drone.position.distanceTo(position);
       if (distance >= GRENADE.splash || !this.explosionHasLineOfSight(position, drone.position)) continue;
@@ -3646,17 +4429,42 @@ export class Game {
         'FRAG GRENADE',
       );
     }
+    for (const drone of grenade.owner === 'drone' ? [] : this.flamethrowerDrones.drones) {
+      if (!drone.alive) continue;
+      const center = drone.position.clone().add(new THREE.Vector3(0, 1.7, 0));
+      const distance = center.distanceTo(position);
+      if (distance >= GRENADE.splash || !this.explosionHasLineOfSight(position, center)) continue;
+      const falloff = THREE.MathUtils.clamp(1 - distance / GRENADE.splash, 0, 1);
+      this.applyDamageToFlamethrowerDrone(
+        drone,
+        GRENADE.damage * (falloff * 0.3 + falloff * falloff * 0.7),
+        grenade.owner,
+        'FRAG GRENADE',
+      );
+    }
     const playerCenter = this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0));
     const playerDistance = playerCenter.distanceTo(position);
-    if (this.mode === 'running' && playerDistance < GRENADE.splash && this.explosionHasLineOfSight(position, playerCenter)) {
-      const falloff = THREE.MathUtils.clamp(1 - playerDistance / GRENADE.splash, 0, 1);
-      const damageScale = grenade.owner === 'player' ? 0.34 : 0.78;
-      const damage = GRENADE.damage * damageScale * (falloff * 0.3 + falloff * falloff * 0.7);
-      if (damage > 1) this.damagePlayer(damage, grenade.owner, 'FRAG GRENADE SPLASH', position);
-      const impulse = playerCenter.clone().sub(position).normalize().multiplyScalar(falloff * 6.2);
-      this.playerVelocity.add(impulse);
-      this.playerVelocity.y = Math.max(this.playerVelocity.y, impulse.y + 2.4);
-      this.grounded = false;
+    if (this.mode === 'running' && this.explosionHasLineOfSight(position, playerCenter)) {
+      const playerSample = this.sampleSplash(
+        position,
+        this.playerPosition.clone(),
+        MOVEMENT.playerRadius,
+        MOVEMENT.playerHeight,
+        GRENADE.splash,
+        GRENADE.damage,
+        GRENADE.splashMinDamage,
+        GRENADE.knockback,
+        GRENADE.splashMinKnockback,
+      );
+      if (playerSample) {
+        const damageScale = grenade.owner === 'player' ? 0.34 : 1;
+        const knockbackScale = grenade.owner === 'player' ? 0.5 : 1;
+        const damage = playerSample.damage * damageScale;
+        const knockback = Math.min(GRENADE.knockback, playerSample.knockback * knockbackScale);
+        if (damage > 0) {
+          this.damagePlayer(damage, grenade.owner, 'FRAG GRENADE SPLASH', position, knockback);
+        }
+      }
     }
     this.trauma = Math.min(1, this.trauma + Math.max(0, 0.48 - playerDistance * 0.06));
     this.removeGrenade(index);
@@ -3719,14 +4527,14 @@ export class Game {
           remove = true;
           break;
         }
-        const droneHit = this.droneSwarm.raycastSegment(
+        const droneHit = this.raycastHostileDroneSegment(
           previousPosition,
           projectile.root.position,
           projectile.weapon === 'rocket' ? 0.18 : 0.08,
         );
         if (droneHit) {
           projectile.root.position.copy(droneHit.point);
-          this.applyDamageToDrone(
+          this.applyDamageToHostileDrone(
             droneHit.drone,
             projectile.damage,
             projectile.owner,
@@ -3777,14 +4585,26 @@ export class Game {
         for (const bot of this.bots) {
           if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)
             || (projectile.owner === bot.id && (projectile.weapon !== 'disc' || projectile.ownerSafeTime > 0))) continue;
-          const botCenter = bot.group.position.clone().add(new THREE.Vector3(0, 0.9, 0));
-          if (projectile.root.position.distanceTo(botCenter) >= 0.88) continue;
-          this.applyDamageToBot(bot, projectile.damage, projectile.owner, this.weapon(projectile.weapon).name);
-          if (projectile.weapon === 'rocket') {
-            const impulse = projectile.velocity.clone().normalize().multiplyScalar(6.8);
-            bot.velocity.add(impulse);
-            bot.velocity.y = Math.max(bot.velocity.y, 4.1);
-          }
+          const travel = previousPosition.distanceTo(projectile.root.position);
+          const shotDir = travel > 1e-6
+            ? projectile.root.position.clone().sub(previousPosition).multiplyScalar(1 / travel)
+            : projectile.velocity.clone().normalize();
+          const sweptHit = this.rayOwnerCapsuleHit(
+            previousPosition,
+            shotDir,
+            bot.id,
+            travel + this.combatHitRadius() + 0.04,
+            projectile.weapon,
+          );
+          if (!sweptHit) continue;
+          this.applyDamageToBot(
+            bot,
+            projectile.damage,
+            projectile.owner,
+            this.weapon(projectile.weapon).name,
+            projectile.root.position,
+            this.weaponKnockback(projectile.weapon),
+          );
           if (projectile.splash > 0 || projectile.weapon === 'disc') this.explodeProjectile(projectile, bot);
           else if (projectile.weapon === 'plasma') {
             this.weaponVfx.impact(projectile.root.position, this.weapon('plasma').color, 'plasma');
@@ -3795,19 +4615,15 @@ export class Game {
         }
         if (!remove && !this.playerFighter
           && (projectile.owner !== 'player' || (projectile.weapon === 'disc' && projectile.ownerSafeTime <= 0)) && this.mode === 'running'
-          && projectile.root.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0))) < 0.9) {
+          && projectile.root.position.distanceTo(this.playerPosition.clone().add(new THREE.Vector3(0, MOVEMENT.playerHeight * 0.5, 0))) < this.combatHitRadius() + 0.12) {
           const impactSource = projectile.root.position.clone().addScaledVector(projectile.velocity.clone().normalize(), -1.5);
           this.damagePlayer(
             projectile.damage * (projectile.owner === 'player' ? 0.42 : 1),
             projectile.owner,
             this.weapon(projectile.weapon).name,
             impactSource,
+            projectile.owner === 'player' ? this.weaponKnockback(projectile.weapon) * 0.5 : this.weaponKnockback(projectile.weapon),
           );
-          if (projectile.weapon === 'rocket') {
-            this.playerVelocity.addScaledVector(projectile.velocity.clone().normalize(), 6.4);
-            this.playerVelocity.y = Math.max(this.playerVelocity.y, 4.2);
-            this.grounded = false;
-          }
           if (projectile.splash > 0 || projectile.weapon === 'disc') this.explodeProjectile(projectile, undefined, true);
           else if (projectile.weapon === 'plasma') {
             this.weaponVfx.impact(projectile.root.position, this.weapon('plasma').color, 'plasma');
@@ -3845,7 +4661,7 @@ export class Game {
     surfaceNormal?: THREE.Vector3,
     surface?: 'grass' | 'soil' | 'rock' | 'metal' | 'concrete' | 'water',
     directlyHitFighter?: FighterRuntime,
-    directlyHitDrone?: CombatDroneRuntime,
+    directlyHitDrone?: HostileDroneRuntime,
   ): void {
     const position = projectile.root.position.clone();
     const color = this.weapon(projectile.weapon).color;
@@ -3860,26 +4676,40 @@ export class Game {
       }
     }
     if (projectile.splash <= 0) return;
+    const definition = this.weapon(projectile.weapon);
+    const maxKnockback = this.weaponKnockback(projectile.weapon);
+    const minDamage = definition.splashMinDamage ?? Math.max(1, projectile.damage * 0.08);
+    const minKnockback = definition.splashMinKnockback ?? Math.max(0.5, maxKnockback * 0.08);
     for (const bot of this.bots) {
       if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)
         || bot === directlyHit || projectile.owner === bot.id) continue;
-      const target = bot.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
-      const distance = target.distanceTo(position);
-      if (distance < projectile.splash && this.explosionHasLineOfSight(position, target)) {
-        const falloff = 1 - distance / projectile.splash;
-        const damage = projectile.damage * 0.78 * (falloff * 0.3 + falloff * falloff * 0.7);
-        this.applyDamageToBot(bot, damage, projectile.owner, this.weapon(projectile.weapon).name);
-        if (projectile.weapon === 'rocket') {
-          const impulse = target.sub(position).normalize().multiplyScalar((1 - distance / projectile.splash) * 9.5);
-          bot.velocity.add(impulse);
-          bot.velocity.y = Math.max(bot.velocity.y, impulse.y + 3.4);
-        }
-      }
+      const sample = this.sampleSplash(
+        position,
+        bot.group.position.clone(),
+        COMBAT.splashInnerBot,
+        MOVEMENT.playerHeight,
+        projectile.splash,
+        projectile.damage,
+        minDamage,
+        maxKnockback,
+        minKnockback,
+      );
+      if (!sample || !this.explosionHasLineOfSight(position, bot.group.position.clone().add(new THREE.Vector3(0, 0.9, 0)), surfaceNormal)) continue;
+      this.applyDamageToBot(
+        bot,
+        sample.damage,
+        projectile.owner,
+        this.weapon(projectile.weapon).name,
+        position,
+        sample.knockback,
+        false,
+        sample.direction,
+      );
     }
     for (const fighter of this.fighters) {
       if (fighter.destroyed || fighter === directlyHitFighter || fighter.pilot === projectile.owner) continue;
       const distance = fighter.flight.position.distanceTo(position);
-      if (distance >= projectile.splash || !this.explosionHasLineOfSight(position, fighter.flight.position)) continue;
+      if (distance >= projectile.splash || !this.explosionHasLineOfSight(position, fighter.flight.position, surfaceNormal)) continue;
       const falloff = 1 - distance / projectile.splash;
       this.damageFighter(
         fighter,
@@ -3891,7 +4721,7 @@ export class Game {
     for (const drone of this.droneSwarm.combatDrones) {
       if (!drone.alive || drone === directlyHitDrone || drone.position.distanceToSquared(position) >= projectile.splash * projectile.splash) continue;
       const distance = drone.position.distanceTo(position);
-      if (!this.explosionHasLineOfSight(position, drone.position)) continue;
+      if (!this.explosionHasLineOfSight(position, drone.position, surfaceNormal)) continue;
       const falloff = 1 - distance / projectile.splash;
       this.applyDamageToDrone(
         drone,
@@ -3900,73 +4730,135 @@ export class Game {
         `${this.weapon(projectile.weapon).name} SPLASH`,
       );
     }
+    for (const drone of this.flamethrowerDrones.drones) {
+      if (!drone.alive || drone === directlyHitDrone || drone.position.distanceToSquared(position) >= projectile.splash * projectile.splash) continue;
+      const center = drone.position.clone().add(new THREE.Vector3(0, 1.7, 0));
+      const distance = center.distanceTo(position);
+      if (!this.explosionHasLineOfSight(position, center, surfaceNormal)) continue;
+      const falloff = 1 - distance / projectile.splash;
+      this.applyDamageToFlamethrowerDrone(
+        drone,
+        projectile.damage * 0.78 * (falloff * 0.3 + falloff * falloff * 0.7),
+        projectile.owner,
+        `${this.weapon(projectile.weapon).name} SPLASH`,
+      );
+    }
     const playerCenter = this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0));
     const playerDistance = playerCenter.distanceTo(position);
-    if (!this.playerFighter && !directlyHitPlayer && playerDistance < projectile.splash && this.mode === 'running' && this.explosionHasLineOfSight(position, playerCenter)) {
-      const selfRocketJump = projectile.owner === 'player' && projectile.weapon === 'rocket';
-      if (!selfRocketJump) {
-        const selfScale = projectile.owner === 'player' ? 0.55 : 0.78;
-        const falloff = 1 - playerDistance / projectile.splash;
-        const damage = projectile.damage * selfScale * (falloff * 0.3 + falloff * falloff * 0.7);
-        if (damage > 1) this.damagePlayer(damage, projectile.owner, `${this.weapon(projectile.weapon).name.toUpperCase()} SPLASH`, position);
-        if (projectile.owner !== 'player' && projectile.weapon === 'rocket') {
-          const impulse = playerCenter.clone().sub(position).normalize().multiplyScalar(falloff * 7.8);
-          this.playerVelocity.add(impulse);
-          this.playerVelocity.y = Math.max(this.playerVelocity.y, impulse.y + 3.2);
-          this.grounded = false;
+    const selfRocketJump = projectile.owner === 'player' && projectile.weapon === 'rocket';
+    const selfPlasma = projectile.owner === 'player' && projectile.weapon === 'plasma';
+    const hasLos = this.explosionHasLineOfSight(position, playerCenter, surfaceNormal);
+    if (!this.playerFighter && !directlyHitPlayer && this.mode === 'running' && hasLos) {
+      const playerSample = this.sampleSplash(
+        position,
+        this.playerPosition.clone(),
+        MOVEMENT.playerRadius,
+        MOVEMENT.playerHeight,
+        projectile.splash,
+        projectile.damage,
+        minDamage,
+        maxKnockback,
+        minKnockback,
+      );
+      if (playerSample) {
+        const damageScale = selfRocketJump
+          ? COMBAT.selfRocketDamageScale
+          : projectile.owner === 'player' ? 0.55 : 1;
+        const knockbackScale = selfRocketJump
+          ? COMBAT.selfRocketKnockbackScale
+          : selfPlasma
+            ? COMBAT.selfPlasmaKnockbackScale
+            : projectile.owner === 'player' ? 0.5 : 1;
+        const damage = playerSample.damage * damageScale;
+        const knockback = playerSample.knockback * knockbackScale;
+        if (damage > 0) {
+          this.damagePlayer(
+            damage,
+            projectile.owner,
+            `${this.weapon(projectile.weapon).name.toUpperCase()} SPLASH`,
+            position,
+          );
         }
-      }
-      if (selfRocketJump) {
-        this.applyRocketJump(position, playerDistance);
+        if (knockback > 0) {
+          this.applyCombatKnockback(
+            'player',
+            playerSample.direction,
+            knockback,
+            projectile.owner === 'player' ? 0 : undefined,
+          );
+          if (selfRocketJump) {
+            this.rocketJumpCount += 1;
+            this.fovPunch = Math.max(this.fovPunch, 8);
+            this.audio.jump();
+          }
+        }
       }
     }
     this.trauma = Math.min(1, this.trauma + Math.max(0, 0.55 - playerDistance * 0.06));
   }
 
-  private applyRocketJump(explosionPosition: THREE.Vector3, playerDistance: number): void {
-    const falloff = THREE.MathUtils.clamp(1 - playerDistance / MOVEMENT.rocketJumpRadius, 0, 1);
-    const playerCenter = this.playerPosition.clone().add(new THREE.Vector3(0, 0.9, 0));
-    const away = playerCenter.sub(explosionPosition);
-    const awayHorizontal = new THREE.Vector3(away.x, 0, away.z);
-    if (awayHorizontal.lengthSq() > 1e-4) awayHorizontal.normalize();
-
-    const momentum = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
-    if (momentum.lengthSq() > 0.25) momentum.normalize();
-    else momentum.copy(this.forward).setY(0).normalize();
-
-    // A rocket fired at the player's feet is a deliberate movement tool: the
-    // blast supplies lift, pushes away from the impact, and adds a little speed
-    // in the current travel direction so the jump is easy to chain.
-    this.playerVelocity.addScaledVector(
-      awayHorizontal,
-      MOVEMENT.rocketJumpHorizontalImpulse * (0.45 + falloff * 0.55),
-    );
-    this.playerVelocity.addScaledVector(momentum, MOVEMENT.rocketJumpMomentumBoost * (0.65 + falloff * 0.35));
-    this.playerVelocity.y = Math.max(
-      this.playerVelocity.y,
-      THREE.MathUtils.lerp(MOVEMENT.rocketJumpMinVerticalImpulse, MOVEMENT.rocketJumpMaxVerticalImpulse, falloff),
-    );
-    this.grounded = false;
-    this.coyote = 0;
-    this.jumpBuffer = 0;
-    this.rocketJumpCount += 1;
-    this.fovPunch = Math.max(this.fovPunch, 8);
-    this.trauma = Math.min(1, this.trauma + 0.24);
-    this.audio.jump();
-    this.hud.message('ROCKET BOOST');
-  }
-
-  private explosionHasLineOfSight(origin: THREE.Vector3, target: THREE.Vector3): boolean {
-    const direction = target.clone().sub(origin);
+  private explosionHasLineOfSight(
+    origin: THREE.Vector3,
+    target: THREE.Vector3,
+    surfaceNormal?: THREE.Vector3,
+  ): boolean {
+    const start = origin.clone();
+    if (surfaceNormal && surfaceNormal.lengthSq() > 1e-8) {
+      start.addScaledVector(surfaceNormal, COMBAT.splashLosLift);
+    }
+    const direction = target.clone().sub(start);
     if (direction.lengthSq() < 1e-6) return true;
     direction.normalize();
-    return this.arena.hasLineOfSight(origin.clone().addScaledVector(direction, 0.08), target, 0.2);
+    return this.arena.hasLineOfSight(start.clone().addScaledVector(direction, 0.08), target, 0.2);
+  }
+
+  private applyDamageToHostileDrone(
+    drone: HostileDroneRuntime,
+    damage: number,
+    owner: DamageSource,
+    weaponName: string,
+  ): boolean {
+    return drone.kind === 'grenadier'
+      ? this.applyDamageToFlamethrowerDrone(drone, damage, owner, weaponName)
+      : this.applyDamageToDrone(drone, damage, owner, weaponName);
+  }
+
+  private applyDamageToFlamethrowerDrone(
+    drone: FlamethrowerDroneRuntime,
+    damage: number,
+    owner: DamageSource,
+    weaponName: string,
+  ): boolean {
+    const result = this.flamethrowerDrones.damage(drone, damage);
+    if (!result.applied) return false;
+    this.spawnBurst(result.position, result.destroyed ? 0xffb13d : 0xff4130, result.destroyed ? 34 : 5);
+    if (owner === 'player') {
+      this.playerHits += 1;
+      this.hud.hitMarker(result.destroyed);
+      this.audio.hit();
+    }
+    if (!result.destroyed) return false;
+    this.weaponVfx.vehicleExplosion(result.position, 0xff5a24, DRONE_DESTRUCTION_VFX_SCALE * 1.35);
+    this.audio.projectileImpact('rocket', result.position, this.rng() - 0.5);
+    this.fovPunch = Math.max(this.fovPunch, 4.2);
+    this.trauma = Math.min(1, this.trauma + 0.28);
+    if (owner === 'player') {
+      this.score += 1;
+      this.hud.message(`GRENADIER ${drone.id.toUpperCase()} DESTROYED · ${weaponName.toUpperCase()}`);
+    } else if (typeof owner === 'number') {
+      const bot = this.bots[owner];
+      if (bot) {
+        bot.score += 1;
+        this.hud.message(`${bot.displayName} DESTROYED ${drone.id.toUpperCase()} · ${weaponName.toUpperCase()}`);
+      }
+    }
+    return true;
   }
 
   private applyDamageToDrone(
     drone: CombatDroneRuntime,
     damage: number,
-    owner: Owner,
+    owner: DamageSource,
     weaponName: string,
   ): boolean {
     const result = this.droneSwarm.damage(drone, damage);
@@ -3975,7 +4867,7 @@ export class Game {
     if (owner === 'player') {
       this.playerHits += 1;
       this.hud.hitMarker(result.destroyed);
-      this.audio.hit(result.destroyed ? 1.4 : 0.75);
+      this.audio.hit();
     }
     if (!result.destroyed) return false;
     this.weaponVfx.vehicleExplosion(
@@ -3989,7 +4881,7 @@ export class Game {
     if (owner === 'player') {
       this.score += 1;
       this.hud.message(`HOSTILE ${drone.id.toUpperCase()} DESTROYED · ${weaponName.toUpperCase()}`);
-    } else {
+    } else if (typeof owner === 'number') {
       const bot = this.bots[owner];
       if (bot) {
         bot.score += 1;
@@ -3999,21 +4891,44 @@ export class Game {
     return true;
   }
 
-  private applyDamageToBot(bot: Bot, damage: number, owner: DamageSource, weaponName: string): void {
+  private applyDamageToBot(
+    bot: Bot,
+    damage: number,
+    owner: DamageSource,
+    weaponName: string,
+    hitOrigin?: THREE.Vector3,
+    knockback?: number,
+    _headshot = false,
+    knockbackDirection?: THREE.Vector3,
+  ): void {
     const coreDenial = this.coreActive && this.coreOwner === bot.id && this.coreProgress >= 0.25;
     const eliminationDistance = this.playerPosition.distanceTo(bot.group.position);
     const eliminationSpeed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
     const killed = bot.takeDamage(damage);
+    if (knockback && knockback > 0) {
+      const origin = hitOrigin ?? this.playerPosition;
+      const dir = knockbackDirection?.clone()
+        ?? bot.group.position.clone().add(new THREE.Vector3(0, MOVEMENT.playerHeight * 0.5, 0)).sub(origin);
+      this.applyCombatKnockback(bot, dir, knockback);
+    }
+    bot.registerDamage(owner, damage, hitOrigin ?? null, this.elapsed);
     if (owner === 'player') {
       this.playerHits += 1;
+      this.lastHitDamage = damage;
       this.hud.hitMarker(killed);
-      this.audio.hit(killed ? 1.4 : 0.8);
+      this.audio.hit();
     }
     this.spawnBurst(bot.group.position.clone().add(new THREE.Vector3(0, 1.2, 0)), killed ? 0xffffff : 0xff4f75, killed ? 11 : 4);
     if (!killed) {
       this.audio.grunt(bot.group.position, Math.min(1.35, damage / 34), `bot-${bot.id}`);
     }
     if (!killed) return;
+    const fragLine = owner === 'player'
+      ? `YOU FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`
+      : typeof owner === 'number'
+        ? `${this.bots[owner]?.displayName ?? 'BOT'} FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`
+        : `HOSTILE DRONE FRAGGED ${bot.displayName} · LASER`;
+    this.hud.killConfirm(fragLine);
     if (owner === 'player') {
       this.score += 1;
       if (!this.grounded) this.airborneKills += 1;
@@ -4024,15 +4939,15 @@ export class Game {
         grappled: this.grappleActive,
         speed: eliminationSpeed,
       });
-      this.hud.message(`YOU FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`);
+      this.hud.message(fragLine);
     } else if (typeof owner === 'number') {
       const shooter = this.bots[owner];
       if (shooter) {
         shooter.score += 1;
-        this.hud.message(`${shooter.displayName} FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`);
+        this.hud.message(fragLine);
       }
     } else {
-      this.hud.message(`HOSTILE DRONE FRAGGED ${bot.displayName} · LASER`);
+      this.hud.message(fragLine);
     }
     this.fovPunch = Math.max(this.fovPunch, 4);
     this.trauma = Math.min(1, this.trauma + 0.3);
@@ -4066,7 +4981,7 @@ export class Game {
     }
   }
 
-  private damagePlayer(amount: number, owner: DamageSource, cause: string, hitOrigin?: THREE.Vector3): void {
+  private damagePlayer(amount: number, owner: DamageSource, cause: string, hitOrigin?: THREE.Vector3, knockback?: number): void {
     if (this.mode !== 'running') return;
     const armored = this.armor > 0;
     const absorbed = Math.min(this.armor, amount * 0.66);
@@ -4079,6 +4994,12 @@ export class Game {
     this.audio.damage(armored);
     this.audio.grunt(undefined, Math.min(1.35, amount / 42), 'player');
     this.trauma = Math.min(1, this.trauma + Math.min(0.55, amount * 0.009));
+    if (hitOrigin) this.applyViewKick(hitOrigin, Math.min(1, amount / 70));
+    if (knockback && knockback > 0) {
+      const origin = hitOrigin ?? this.playerPosition;
+      const dir = this.playerPosition.clone().add(new THREE.Vector3(0, MOVEMENT.playerHeight * 0.5, 0)).sub(origin);
+      this.applyCombatKnockback('player', dir, knockback);
+    }
     if (this.health <= 0) {
       this.health = 0;
       this.deaths += 1;
@@ -4352,20 +5273,42 @@ export class Game {
     this.thirdPersonWeaponModel.visible = visible;
     if (!visible || !visual) return;
 
-    // Seat the receiver between the character's hands and the screen-center
-    // reticle. The camera is on the same (right) shoulder, so the weapon stays
-    // visible without covering the target or floating across the torso.
+    // Aim the weapon at the reticle, then solve its authored trigger grip onto
+    // the animated right wrist. This keeps every frame—from the compact disc
+    // launcher to the long sniper—physically seated in the trooper's hand.
     const forward = this.thirdPersonMuzzleForwardScratch
       .set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     const right = this.thirdPersonMuzzleRightScratch
       .set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     const isShoulderedLongshot = visual.weapon === 'sniper';
-    this.thirdPersonWeaponModel.position.copy(this.playerPosition)
-      .addScaledVector(forward, isShoulderedLongshot ? 0.08 : 0.18)
-      .addScaledVector(right, isShoulderedLongshot ? 0.12 : 0.26);
-    this.thirdPersonWeaponModel.position.y += isShoulderedLongshot ? 1.35 : 1.24;
-    this.thirdPersonWeaponModel.quaternion.setFromUnitVectors(THIRD_PERSON_WEAPON_FORWARD, direction);
-    this.thirdPersonWeaponModel.scale.setScalar(THIRD_PERSON_WEAPON_SCALE[visual.weapon]);
+    const triggerGrip = visual.root.getObjectByName(`${visual.weapon}-primary-grip-socket`);
+    if (this.playerAvatar.modelReady && triggerGrip) {
+      this.characterGripWorldScratch.copy(this.playerPosition)
+        .addScaledVector(direction, 0.2)
+        .addScaledVector(right, 0.13);
+      this.characterGripWorldScratch.y += 1.37;
+      const supportGrip = this.placeWeaponAtPrimaryTarget(
+        this.thirdPersonWeaponModel,
+        visual,
+        this.characterGripWorldScratch,
+        direction,
+      );
+      if (supportGrip) {
+        this.playerAvatar.solvePrimaryHand(this.characterGripWorldScratch);
+        supportGrip.getWorldPosition(this.supportGripWorldScratch);
+        this.playerAvatar.solveSupportHand(this.supportGripWorldScratch);
+        this.playerAvatar.supportGripSocket.getWorldPosition(this.supportHandWorldScratch);
+        this.playerAvatar.root.userData.weaponSupportGripError = this.supportGripWorldScratch
+          .distanceTo(this.supportHandWorldScratch);
+      }
+    } else {
+      this.thirdPersonWeaponModel.quaternion.setFromUnitVectors(THIRD_PERSON_WEAPON_FORWARD, direction);
+      this.thirdPersonWeaponModel.scale.setScalar(THIRD_PERSON_WEAPON_SCALE[visual.weapon]);
+      this.thirdPersonWeaponModel.position.copy(this.playerPosition)
+        .addScaledVector(forward, isShoulderedLongshot ? 0.08 : 0.18)
+        .addScaledVector(right, isShoulderedLongshot ? 0.12 : 0.26);
+      this.thirdPersonWeaponModel.position.y += isShoulderedLongshot ? 1.35 : 1.24;
+    }
     this.thirdPersonWeaponModel.updateMatrixWorld(true);
   }
 
@@ -4526,8 +5469,8 @@ export class Game {
     this.camera.position.copy(this.isThirdPerson() ? this.thirdPersonPositionScratch : eye);
     if (!this.isThirdPerson()) this.thirdPersonCameraInitialized = false;
     this.camera.rotation.order = 'YXZ';
-    this.camera.rotation.y = this.yaw;
-    this.camera.rotation.x = this.pitch;
+    this.camera.rotation.y = this.yaw + this.viewKickYaw;
+    this.camera.rotation.x = THREE.MathUtils.clamp(this.pitch + this.recoilPitchOffset + this.viewKickPitch, -1.28, 1.22);
     if (this.isThirdPerson()) {
       // Look through the reticle into the arena. The shoulder offset keeps the
       // avatar low-left while the center of the screen stays on the aim line.
@@ -4572,6 +5515,9 @@ export class Game {
     this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, baseFov, 1 - Math.exp(-scopeDelta * 12));
     this.camera.updateProjectionMatrix();
     this.recoil *= Math.exp(-delta * 11);
+    this.recoilPitchOffset *= Math.exp(-delta * 11);
+    this.viewKickPitch *= Math.exp(-delta * 11);
+    this.viewKickYaw *= Math.exp(-delta * 11);
     const motionDelta = Math.max(delta, MOVEMENT.fixedStep);
     const walkWeightTarget = this.grounded && !this.skiHeld
       ? THREE.MathUtils.smoothstep(speed, 1.5, 11)
@@ -5063,7 +6009,7 @@ export class Game {
     this.mapLighting.addGroundingShadow({
       id: 'player',
       position: this.playerPosition,
-      footprint: { width: 0.92, depth: 0.68 },
+      footprint: { width: 1.04, depth: 0.82 },
       maxHeight: 3.5,
       visible: () => this.health > 0 && !this.playerFighter,
     });
@@ -5071,7 +6017,7 @@ export class Game {
       this.mapLighting.addGroundingShadow({
         id: `bot-${bot.id}`,
         position: bot.group.position,
-        footprint: { width: 0.92, depth: 0.68 },
+        footprint: { width: 1.04, depth: 0.82 },
         maxHeight: 3.5,
         visible: () => bot.alive && bot.group.visible && !this.fighterForPilot(bot.id),
       });
@@ -5093,6 +6039,16 @@ export class Game {
         footprint: drone.kind === 'buster' ? { width: 4.8, depth: 4.8 } : { width: 2.1, depth: 2.1 },
         heightOffset: drone.kind === 'buster' ? 1.9 : 0.5,
         maxHeight: drone.kind === 'buster' ? 18 : 12,
+        visible: () => drone.alive && drone.visual.root.visible,
+      });
+    }
+    for (const drone of this.flamethrowerDrones.drones) {
+      this.mapLighting.addGroundingShadow({
+        id: drone.id,
+        position: drone.position,
+        footprint: { width: 5.1, depth: 5.1 },
+        heightOffset: 1.6,
+        maxHeight: 8,
         visible: () => drone.alive && drone.visual.root.visible,
       });
     }
@@ -5382,14 +6338,13 @@ export class Game {
       const group = this.createPickupModel(kind);
       const authored = this.arena.itemPoints[point].clone();
       if (offset) authored.add(new THREE.Vector3(offset[0], 0, offset[1]));
-      // The authored point is only an XY hint; the support surface may be a
-      // raised ramp, landing roof, or banked route above that hint. Resolve
-      // the highest real support at the point so the pickup cannot be buried
-      // in a lower floor or clipped through a ramp deck.
-      const floor = this.arena.floorHeightAt(authored.x, authored.z, Number.POSITIVE_INFINITY) ?? authored.y - 0.9;
+      // Honour the authored height band. A few metres of upward snap seats
+      // the pickup on a ramp or plaza; sampling from +Infinity parks it on
+      // floating-station roofs and other sky docks.
+      const floor = this.arena.floorHeightAt(authored.x, authored.z, authored.y + 6) ?? authored.y - 0.9;
       group.position.set(authored.x, floor + 0.012, authored.z);
       group.userData.baseY = floor + 0.012;
-      const supportNormal = this.arena.surfaceNormalAt?.(authored.x, authored.z, Number.POSITIVE_INFINITY);
+      const supportNormal = this.arena.surfaceNormalAt?.(authored.x, authored.z, floor + 0.5);
       if (supportNormal) {
         group.quaternion.setFromUnitVectors(THREE.Object3D.DEFAULT_UP, supportNormal);
       }
@@ -5424,11 +6379,10 @@ export class Game {
       mesh.name = name;
       mesh.position.set(...position);
       mesh.rotation.set(...rotation);
-      // Pickups are emissive readability props, not world architecture. Their
-      // former dynamic shadows duplicated the full weapon geometry in every
-      // shadow refresh and dominated the scene's submitted triangle budget.
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
+      // The static parts are batched below, so each pickup contributes only a
+      // small number of shadow draws while still reading as a physical object.
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       group.add(mesh);
       return mesh;
     };
@@ -5519,8 +6473,8 @@ export class Game {
     if (mergedBody) {
       const mesh = new THREE.Mesh(mergedBody, dark);
       mesh.name = `${kind}-pickup-lod-body`;
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       root.add(mesh);
     }
 
@@ -5544,8 +6498,8 @@ export class Game {
     if (mergedBarrel) {
       const mesh = new THREE.Mesh(mergedBarrel, dark);
       mesh.name = `${kind}-pickup-lod-barrel`;
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       root.add(mesh);
     }
 
@@ -5565,8 +6519,8 @@ export class Game {
     }
     const signatureMesh = new THREE.Mesh(signature, accent);
     signatureMesh.name = `${kind}-pickup-lod-signature`;
-    signatureMesh.castShadow = false;
-    signatureMesh.receiveShadow = false;
+    signatureMesh.castShadow = true;
+    signatureMesh.receiveShadow = true;
     root.add(signatureMesh);
     this.compactPickupModel(root);
     return root;
@@ -5620,8 +6574,8 @@ export class Game {
     if (merged) {
       const mesh = new THREE.Mesh(merged, materials.length === 1 ? materials[0] : materials);
       mesh.name = 'pickup-static-material-batches';
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       group.add(mesh);
     }
   }
@@ -5692,9 +6646,27 @@ export class Game {
     const root = source.root.clone(true);
     root.name = `${source.weapon}-third-person-world-model`;
     root.getObjectByName('first-person-armature')?.removeFromParent();
+    const weaponFrame = root.getObjectByName(`${source.weapon}-view-model`);
+    if (!weaponFrame) throw new Error(`Missing third-person weapon frame for ${source.weapon}`);
+    const primaryGripSocket = new THREE.Object3D();
+    primaryGripSocket.name = `${source.weapon}-primary-grip-socket`;
+    primaryGripSocket.position.set(0.06, -0.25, -0.02);
+    weaponFrame.add(primaryGripSocket);
+    const supportGripSocket = new THREE.Object3D();
+    supportGripSocket.name = `${source.weapon}-support-grip-socket`;
+    supportGripSocket.position.set(-0.055, -0.07, THIRD_PERSON_SUPPORT_GRIP_Z[source.weapon]);
+    weaponFrame.add(supportGripSocket);
     const animationNodes = new Map<string, THREE.Object3D>();
     root.traverse((object) => {
       if (object.name) animationNodes.set(object.name, object);
+      const mesh = object as THREE.Mesh;
+      if (mesh.isMesh) {
+        // Moving weapons are grounded with their owner's one-draw contact
+        // projector. Re-rendering 62 weapon pieces into the static map atlas
+        // added ~62 calls and stale shadows every time third person appeared.
+        mesh.castShadow = false;
+        mesh.receiveShadow = true;
+      }
       object.userData.weaponAnimationBase = {
         position: object.position.clone(),
         rotation: object.rotation.clone(),
@@ -5780,7 +6752,10 @@ export class Game {
       this.selectedWeapon = candidate;
     }
     this.buildWeaponModel();
-    if (this.selectedWeapon !== previousWeapon) this.audio.weaponSwitch(WEAPONS[this.selectedWeapon].id);
+    if (this.selectedWeapon !== previousWeapon) {
+      this.weaponCooldown = COMBAT.weaponSwitchHolster;
+      this.audio.weaponSwitch(WEAPONS[this.selectedWeapon].id);
+    }
   }
 
   private sniperScopeRequested(): boolean {
@@ -6215,7 +7190,7 @@ export class Game {
           this.updateCamera(0);
           this.renderer.shadowMap.autoUpdate = false;
           this.renderer.shadowMap.needsUpdate = false;
-        } else if (name === 'drone-encounter' || name === 'buster-encounter') {
+        } else if (name === 'drone-encounter' || name === 'buster-encounter' || name === 'flamethrower-encounter') {
           this.mode = 'running';
           this.audio.setPaused(true);
           this.hud.hideStart();
@@ -6241,10 +7216,26 @@ export class Game {
           if (name === 'buster-encounter') {
             this.droneSwarm.suspendSentinelsForQa();
             this.droneSwarm.resetBustersForQa(encounterCenter);
-          } else this.droneSwarm.resetForQa(encounterCenter);
+          } else if (name === 'flamethrower-encounter') {
+            for (const flyingDrone of this.droneSwarm.combatDrones) {
+              flyingDrone.alive = false;
+              flyingDrone.health = 0;
+              flyingDrone.respawnSeconds = 999;
+              flyingDrone.visual.root.visible = false;
+            }
+            this.flamethrowerDrones.resetForQa(encounterCenter);
+            this.flamethrowerDrones.stageAttackForQa('grenadier-1', {
+              owner: 'player',
+              position: this.playerPosition.clone().add(new THREE.Vector3(0, 0.95, 0)),
+              velocity: new THREE.Vector3(),
+              alive: true,
+            });
+          } else this.droneSwarm.resetForQa(encounterCenter, this.playerPosition);
           const firstDrone = name === 'buster-encounter'
             ? this.droneSwarm.busterDrones[0]
-            : this.droneSwarm.drones[0];
+            : name === 'flamethrower-encounter'
+              ? this.flamethrowerDrones.drones[0]
+              : this.droneSwarm.drones[0];
           const view = firstDrone.position.clone().sub(eye).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
@@ -6253,7 +7244,9 @@ export class Game {
           this.ammo.set('machine', this.weapon('machine').ammo);
           this.buildWeaponModel();
           this.bots.forEach((bot, index) => {
-            const position = this.playerPosition.clone().add(new THREE.Vector3((index - 1) * 3, 0, 4 + index * 2));
+            const position = name === 'flamethrower-encounter'
+              ? this.playerPosition.clone().add(new THREE.Vector3((index - 1) * 7, 0, -6 - index * 2))
+              : this.playerPosition.clone().add(new THREE.Vector3((index - 1) * 3, 0, 4 + index * 2));
             bot.respawn(position, false);
             bot.movementLocked = false;
           });
@@ -6268,8 +7261,6 @@ export class Game {
           // framing, muzzle convergence, and impact marks can all be judged.
           this.playerPosition.copy(this.arena.spawnPoints[3]);
           this.playerVelocity.set(0, 0, 0);
-          this.yaw = 0;
-          this.pitch = 0.045;
           this.selectedWeapon = WEAPONS.findIndex((weapon) => weapon.id === 'machine');
           this.weaponCooldown = 0;
           this.ammo.set('machine', this.weapon('machine').ammo);
@@ -6277,11 +7268,19 @@ export class Game {
           const playerContact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = playerContact.grounded;
           const botPosition = this.playerPosition.clone().add(new THREE.Vector3(0, 0, -4));
+          const botFloor = this.arena.floorHeightAt(botPosition.x, botPosition.z, botPosition.y + 3);
+          if (botFloor !== null) botPosition.y = botFloor;
           this.bots[0].respawn(botPosition, false);
           this.bots[0].health = 35;
           this.bots[0].armor = 0;
           this.bots[1].respawn(this.arena.spawnPoints[1]);
           this.bots[2].respawn(this.arena.spawnPoints[2]);
+          const eye = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0));
+          const chest = this.bots[0].group.position.clone().add(new THREE.Vector3(0, 0.9, 0));
+          const view = chest.sub(eye);
+          const length = Math.max(view.length(), 1e-5);
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = THREE.MathUtils.clamp(Math.asin(view.y / length), -1.28, 1.22);
         } else if (name === 'monsoon-overlook') {
           this.mode = 'running';
           this.audio.setPaused(true);
@@ -6934,12 +7933,39 @@ export class Game {
       },
       fireBotAtDrone: (botIndex: number, droneId: string, weapon: WeaponId) => {
         const bot = this.bots[botIndex];
-        const drone = this.droneSwarm.combatDrones.find((candidate) => candidate.id === droneId);
+        const drone: HostileDroneRuntime | undefined = this.droneSwarm.combatDrones.find((candidate) => candidate.id === droneId)
+          ?? this.flamethrowerDrones.drones.find((candidate) => candidate.id === droneId);
         if (!bot) throw new RangeError(`Unknown bot index ${botIndex}.`);
         if (!drone) throw new RangeError(`Unknown drone id ${droneId}.`);
         bot.weapon = weapon;
-        bot.aimDirection.copy(drone.position).sub(bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0))).normalize();
+        const center = drone.kind === 'grenadier'
+          ? drone.position.clone().add(new THREE.Vector3(0, 1.8, 0))
+          : drone.position;
+        const aimBotAtDrone = (): void => {
+          bot.aimDirection.copy(center).sub(bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0))).normalize();
+        };
+        aimBotAtDrone();
+        this.updateBotWeaponPresentation(bot);
+        const healthBefore = drone.health;
         this.botFireDrone(bot, drone);
+        if (drone.health >= healthBefore) {
+          const radii = drone.kind === 'grenadier' ? [8, 10, 14, 18, 22, 28] : [16];
+          for (const radius of radii) {
+            for (let attempt = 0; attempt < 12 && drone.health >= healthBefore; attempt += 1) {
+              const angle = attempt / 12 * Math.PI * 2;
+              const candidate = drone.position.clone().add(new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius));
+              const safe = this.arena.safeSpawnPoint(candidate, 0.43, 1.82);
+              if (!safe) continue;
+              const eye = safe.clone().add(new THREE.Vector3(0, 1.5, 0));
+              if (!this.arena.hasLineOfSight(eye, center, 0.3)) continue;
+              bot.respawn(safe, false);
+              bot.movementLocked = true;
+              aimBotAtDrone();
+              this.updateBotWeaponPresentation(bot);
+              this.botFireDrone(bot, drone);
+            }
+          }
+        }
         this.publishDiagnostics();
       },
       fireWeapon: () => {
@@ -6987,9 +8013,10 @@ export class Game {
         return true;
       },
       damageDrone: (id: string, amount: number) => {
-        const drone = this.droneSwarm.combatDrones.find((candidate) => candidate.id === id);
+        const drone: HostileDroneRuntime | undefined = this.droneSwarm.combatDrones.find((candidate) => candidate.id === id)
+          ?? this.flamethrowerDrones.drones.find((candidate) => candidate.id === id);
         if (!drone) return false;
-        this.applyDamageToDrone(drone, Math.max(0, amount), 'player', 'QA DAMAGE');
+        this.applyDamageToHostileDrone(drone, Math.max(0, amount), 'player', 'QA DAMAGE');
         this.updateHud();
         this.publishDiagnostics();
         return true;
@@ -7013,6 +8040,25 @@ export class Game {
         this.publishDiagnostics();
         return staged;
       },
+      stageFlamethrowerAttack: (id: string, targetOwner: DroneTargetOwner) => {
+        const target = targetOwner === 'player'
+          ? {
+            owner: 'player' as const,
+            position: this.playerPosition.clone().add(new THREE.Vector3(0, 0.95, 0)),
+            velocity: this.playerVelocity.clone(),
+            alive: this.health > 0,
+          }
+          : {
+            owner: targetOwner,
+            position: this.bots[targetOwner]?.group.position.clone().add(new THREE.Vector3(0, 1.05, 0))
+              ?? new THREE.Vector3(),
+            velocity: this.bots[targetOwner]?.velocity.clone() ?? new THREE.Vector3(),
+            alive: Boolean(this.bots[targetOwner]?.alive),
+          };
+        const staged = this.flamethrowerDrones.stageAttackForQa(id, target);
+        this.publishDiagnostics();
+        return staged;
+      },
       throwGrenade: () => {
         this.tryThrowGrenade();
         this.publishDiagnostics();
@@ -7030,6 +8076,12 @@ export class Game {
           // every static mesh merely because the player was teleported.
           this.renderer.shadowMap.autoUpdate = false;
           this.renderer.shadowMap.needsUpdate = false;
+          // Publish a state that exactly matches the frozen review frame.
+          // Periodic diagnostics can otherwise lag a fast-moving bot by one
+          // HUD interval and report a hand error from a different pose.
+          for (const bot of this.bots) this.updateBotWeaponPresentation(bot);
+          this.updateCamera(0);
+          this.publishDiagnostics();
         }
       },
       setWeaponInspectionMode: (enabled: boolean) => {
@@ -7069,9 +8121,16 @@ export class Game {
       setReducedMotion: (enabled: boolean) => {
         this.reducedMotion = enabled;
       },
+      queueJumpPress: () => {
+        this.queueJumpPress();
+      },
+      queueDash: () => {
+        this.dashBuffer = 0.12;
+      },
       stepSimulation: (seconds: number) => {
+        if (!this.playerFighter) this.handleWeaponRequest();
         if (this.input.consumeInteract()) this.togglePlayerFighter();
-        if (this.input.consumeJump() && !this.playerFighter) this.jumpBuffer = MOVEMENT.jumpBuffer;
+        if (this.input.consumeJump() && !this.playerFighter) this.queueJumpPress();
         if (this.input.consumeDash()) {
           if (this.playerFighter) this.fighterBoostQueued = true;
           else this.dashBuffer = 0.12;
@@ -7093,6 +8152,12 @@ export class Game {
         const steps = THREE.MathUtils.clamp(Math.ceil(seconds / MOVEMENT.fixedStep), 1, 3_600);
         for (let index = 0; index < steps; index += 1) {
           this.droneSwarm.update(MOVEMENT.fixedStep, this.elapsed, this.droneTargetSnapshots, () => undefined);
+          this.flamethrowerDrones.update(
+            MOVEMENT.fixedStep,
+            this.elapsed,
+            this.droneTargetSnapshots,
+            () => undefined,
+          );
         }
         this.droneTargetSnapshots.forEach((target, index) => { target.alive = targetActivity[index]; });
         this.publishDiagnostics();
@@ -7111,9 +8176,18 @@ export class Game {
         this.playerPosition.set(position.x, position.y, position.z);
         this.playerVelocity.set(velocity.x, velocity.y, velocity.z);
         this.jumpBuffer = 0;
+        this.jumpPressBuffer = 0;
         this.coyote = 0;
         this.dashBuffer = 0;
+        this.dashCooldown = 0;
         this.dashMomentumTimer = 0;
+        this.jetpackArmed = false;
+        this.jetpackActive = false;
+        this.jetpackEnergy.reset();
+        this.wallJumpCooldown = 0;
+        this.wallJumpedThisAirtime = false;
+        this.wallJumpAirLockout = false;
+        this.knockbackLockout = 0;
         this.wallContactTimer = 0;
         this.ceilingContactTimer = 0;
         const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
@@ -7145,6 +8219,50 @@ export class Game {
         fighter.visual.root.quaternion.copy(fighter.flight.orientation);
         this.publishDiagnostics();
         return true;
+      },
+      stageCharacterLineup: () => {
+        this.mode = 'running';
+        this.audio.setPaused(false);
+        this.hud.hideStart();
+        this.playerVelocity.set(0, 0, 0);
+        const forward = this.viewDirection(new THREE.Vector3()).setY(0);
+        if (forward.lengthSq() < 0.001) forward.set(0, 0, -1);
+        forward.normalize();
+        const side = new THREE.Vector3(-forward.z, 0, forward.x);
+        const center = this.playerPosition.clone().addScaledVector(forward, 3.4);
+        const weapons: readonly WeaponId[] = ['machine', 'rocket', 'sniper'];
+        let lineupFloor = 0;
+        for (let index = 0; index < this.bots.length; index += 1) {
+          const bot = this.bots[index];
+          const candidate = center.clone().addScaledVector(side, (index - (this.bots.length - 1) * 0.5) * 2.25);
+          const floor = this.arena.floorHeightAt(candidate.x, candidate.z, candidate.y + 10);
+          if (floor !== null) candidate.y = floor;
+          lineupFloor += candidate.y;
+          bot.respawn(candidate, false);
+          bot.movementLocked = true;
+          bot.velocity.set(0, 0, 0);
+          bot.weapon = weapons[index % weapons.length];
+          bot.targetOwner = 'player';
+          bot.aimDirection.copy(this.playerPosition).add(new THREE.Vector3(0, PLAYER_EYE * 0.72, 0))
+            .sub(bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0)))
+            .normalize();
+          bot.group.rotation.y = Math.atan2(bot.aimDirection.x, bot.aimDirection.z);
+          this.updateBotWeaponPresentation(bot);
+        }
+        center.y = lineupFloor / Math.max(1, this.bots.length);
+        const camera = this.playerPosition.clone()
+          .addScaledVector(side, 3.35)
+          .addScaledVector(forward, -1.6);
+        camera.y += 0.65;
+        const target = center.clone().add(new THREE.Vector3(0, 1.14, 0));
+        this.pausedForScreenshot = true;
+        this.updateCamera(0);
+        this.updateSpeedEffects(0, this.elapsed, true);
+        this.publishDiagnostics();
+        return {
+          camera: { x: camera.x, y: camera.y, z: camera.z },
+          target: { x: target.x, y: target.y, z: target.z },
+        };
       },
       setSpeedCapture: (speedKmh: number) => {
         const speed = Math.max(0, speedKmh) / 3.6;
@@ -7224,6 +8342,41 @@ export class Game {
       getOutpostTowerPieceAudit: () => (
         this.arena.group.userData.outpostTowerPieces as QuickSenseOutpostTowerPieceAudit[] | undefined
       ) ?? [],
+      getSceneShadowAudit: () => {
+        type ShadowRole = 'characters' | 'drones' | 'fighters' | 'objects' | 'environment';
+        const audit: Record<ShadowRole, { meshes: number; casters: number; receivers: number; contactProjectors: number }> = {
+          characters: { meshes: 0, casters: 0, receivers: 0, contactProjectors: 1 + this.bots.length },
+          drones: { meshes: 0, casters: 0, receivers: 0, contactProjectors: this.droneSwarm.combatDrones.length + this.flamethrowerDrones.drones.length },
+          fighters: { meshes: 0, casters: 0, receivers: 0, contactProjectors: this.fighters.length },
+          objects: { meshes: 0, casters: 0, receivers: 0, contactProjectors: 0 },
+          environment: { meshes: 0, casters: 0, receivers: 0, contactProjectors: 0 },
+        };
+        this.scene.traverse((object) => {
+          const mesh = object as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          const lineage: string[] = [];
+          let current: THREE.Object3D | null = mesh;
+          while (current) {
+            if (current.name) lineage.push(current.name.toLowerCase());
+            current = current.parent;
+          }
+          const path = lineage.join('/');
+          let role: ShadowRole = 'environment';
+          if (path.includes('rift-player-avatar') || path.includes('rift-bot-') || path.includes('equipped-weapon')) {
+            role = 'characters';
+          } else if (path.includes('drone')) {
+            role = 'drones';
+          } else if (path.includes('fighter') || path.includes('star-sparrow')) {
+            role = 'fighters';
+          } else if (path.includes('pickup') || path.includes('grenade') || path.includes('projectile')) {
+            role = 'objects';
+          }
+          audit[role].meshes += 1;
+          audit[role].casters += Number(mesh.castShadow);
+          audit[role].receivers += Number(mesh.receiveShadow);
+        });
+        return audit;
+      },
       getArenaRenderAudit: () => {
         const rows = new Map<string, {
           material: string;
@@ -7263,6 +8416,15 @@ export class Game {
           right.draws + right.shadowDraws - left.draws - left.shadowDraws
         ));
       },
+      getSpawnCubbyBunkerAudit: () => (
+        this.arena.group.userData.spawnCubbyBunkers as {
+          count: number;
+          hullInstances: number;
+          trimInstances: number;
+          signalInstances: number;
+          names: string[];
+        } | undefined
+      ) ?? null,
       hideDebugUi: () => undefined,
     };
   }
@@ -7305,6 +8467,7 @@ export class Game {
         wantsToFire: bot.wantsToFire,
         facingDot: bot.facingDot,
         grounded: bot.grounded,
+        velocity: { x: bot.velocity.x, y: bot.velocity.y, z: bot.velocity.z },
         stepSuccesses: bot.stepSuccesses,
         shotsFired: bot.shotsFired,
         navigationTarget: { x: bot.navigationTarget.x, y: bot.navigationTarget.y, z: bot.navigationTarget.z },
@@ -7317,6 +8480,16 @@ export class Game {
         modelCenterZ: bot.modelCenterZ,
         modelMeshCount: bot.modelMeshCount,
         renderedMeshCount: bot.renderedMeshCount,
+        characterSource: 'combat-trooper' as const,
+        runtimeBoneCount: bot.runtimeBoneCount,
+        runtimeAnimationCount: bot.runtimeAnimationCount,
+        sourceTriangleCount: bot.sourceTriangleCount,
+        sourceTextureCount: bot.sourceTextureCount,
+        animationName: bot.animationName,
+        roleHardwareProfile: bot.roleHardwareProfile,
+        roleHardwareMeshCount: bot.roleHardwareMeshCount,
+        weaponModel: this.botWeaponPresentations.get(bot.id)?.weapon ?? null,
+        weaponSupportGripError: Number(bot.group.userData.weaponSupportGripError ?? 0),
         weaponSwitches: bot.weaponSwitches,
         bunnyHops: bot.bunnyHops,
         jetpackActive: bot.jetpackActive,
@@ -7419,6 +8592,58 @@ export class Game {
         position: { x: drone.position.x, y: drone.position.y, z: drone.position.z },
         velocity: { x: drone.velocity.x, y: drone.velocity.y, z: drone.velocity.z },
       })),
+      flamethrowerDrones: this.flamethrowerDrones.drones.map((drone) => ({
+        id: drone.id,
+        kind: drone.kind,
+        alive: drone.alive,
+        health: drone.health,
+        maxHealth: drone.maxHealth,
+        state: drone.state,
+        targetOwner: drone.targetOwner,
+        fireCooldown: drone.fireCooldown,
+        jumpCooldown: drone.jumpCooldown,
+        respawnSeconds: drone.respawnRemaining,
+        shotsFired: drone.shotsFired,
+        jumps: drone.jumps,
+        landings: drone.landings,
+        distanceWalked: drone.distanceWalked,
+        collisionRadius: drone.collisionRadius,
+        collisionHits: drone.collisionHits,
+        modelReady: drone.visual.isReady,
+        partCount: drone.visual.partCount,
+        rigNodeCount: drone.visual.rigNodeCount,
+        sourceTriangles: drone.visual.sourceTriangles,
+        sourceAnimationCount: drone.visual.sourceAnimationCount,
+        sourceSkinCount: drone.visual.sourceSkinCount,
+        animationSource: 'runtime-rigid' as const,
+        loadError: drone.visual.loadError?.message ?? null,
+        targetedByBots: [...this.botDroneTargets.values()].filter((id) => id === drone.id).length,
+        position: { x: drone.position.x, y: drone.position.y, z: drone.position.z },
+        velocity: { x: drone.velocity.x, y: drone.velocity.y, z: drone.velocity.z },
+      })),
+      flamethrowerGrenade: {
+        launched: this.flamethrowerDrones.grenadesLaunched,
+        explosions: this.hostileGrenadeExplosions,
+        botHits: this.hostileGrenadeBotHits,
+        lastBotHit: this.lastHostileGrenadeBotHit,
+        sourceId: this.flamethrowerDrones.lastGrenadeSourceId,
+        targetOwner: this.flamethrowerDrones.lastGrenadeTargetOwner,
+        origin: {
+          x: this.flamethrowerDrones.lastGrenadeOrigin.x,
+          y: this.flamethrowerDrones.lastGrenadeOrigin.y,
+          z: this.flamethrowerDrones.lastGrenadeOrigin.z,
+        },
+        velocity: {
+          x: this.flamethrowerDrones.lastGrenadeVelocity.x,
+          y: this.flamethrowerDrones.lastGrenadeVelocity.y,
+          z: this.flamethrowerDrones.lastGrenadeVelocity.z,
+        },
+        lastExplosionPosition: {
+          x: this.lastHostileGrenadeExplosionPosition.x,
+          y: this.lastHostileGrenadeExplosionPosition.y,
+          z: this.lastHostileGrenadeExplosionPosition.z,
+        },
+      },
       busterDrones: this.droneSwarm.busterDrones.map((drone) => ({
         id: drone.id,
         kind: drone.kind,
@@ -7484,6 +8709,7 @@ export class Game {
       projectiles: this.projectiles.length,
       grenades: this.grenades.length,
       grenadeStates: this.grenades.map((grenade) => ({
+        owner: grenade.owner,
         position: {
           x: grenade.root.position.x,
           y: grenade.root.position.y,
@@ -7551,7 +8777,9 @@ export class Game {
         visuals: this.arena.getWeatherVisualDiagnostics(),
       },
       map: this.arena.mapInfo,
-      lighting: this.mapLighting.diagnostics(this.scene),
+      lighting: {
+        ...this.mapLighting.diagnostics(this.scene),
+      },
       fog: this.scene.fog instanceof THREE.Fog
         ? {
           type: 'linear',
@@ -7573,11 +8801,17 @@ export class Game {
         jetpackPhase: jetpackEnergy.phase,
         jetpackRechargeDelay: jetpackEnergy.rechargeDelayRemaining,
         jetpackRestartIn: jetpackEnergy.restartInSeconds,
+        jetpackArmed: this.jetpackArmed,
         dashCooldown: this.dashCooldown,
+        wallJumpCount: this.wallJumpCount,
+        wallJumpCooldown: this.wallJumpCooldown,
+        wallJumpAirLockout: this.wallJumpAirLockout,
+        doubleJumpCount: this.doubleJumpCount,
+        knockbackLockout: this.knockbackLockout,
         wallContact: this.wallContactTimer > 0,
         ceilingContact: this.ceilingContactTimer > 0,
         yaw: this.yaw,
-        pitch: this.pitch,
+        pitch: this.pitch + this.recoilPitchOffset + this.viewKickPitch,
         modelReady: this.playerAvatar.modelReady,
         modelMeshCount: this.playerAvatar.modelMeshCount,
         modelHeight: this.playerAvatar.modelHeight,
@@ -7588,6 +8822,13 @@ export class Game {
         thirdPersonWeaponVisible: this.thirdPersonWeaponModel.visible,
         thirdPersonWeapon: this.thirdPersonWeaponVisual?.weapon ?? null,
         thirdPersonWeaponMeshes: this.thirdPersonWeaponVisual?.renderMeshCount ?? 0,
+        characterSource: 'combat-trooper' as const,
+        runtimeBoneCount: this.playerAvatar.runtimeBoneCount,
+        runtimeAnimationCount: this.playerAvatar.runtimeAnimationCount,
+        sourceTriangleCount: this.playerAvatar.sourceTriangleCount,
+        sourceTextureCount: this.playerAvatar.sourceTextureCount,
+        animationName: this.playerAvatar.animationName,
+        weaponSupportGripError: Number(this.playerAvatar.root.userData.weaponSupportGripError ?? 0),
       },
       camera: {
         distance: this.camera.position.distanceTo(this.playerPosition),
@@ -7609,7 +8850,6 @@ export class Game {
       skiMomentum: {
         speedKmh: Math.hypot(this.playerVelocity.x, this.playerVelocity.z) * 3.6,
         resistance: this.skiMomentumResistance,
-        gravityDriveScale: this.skiGravityDriveScale,
         dragAcceleration: this.skiDragAcceleration,
       },
       physics: {
@@ -7680,6 +8920,8 @@ export class Game {
       combat: {
         lastDamageDirection: this.lastDamageDirection,
         lastDamageBearing: this.lastDamageBearing,
+        lastHitDamage: this.lastHitDamage,
+        weaponCooldown: this.weaponCooldown,
         secondaryAbility: WEAPONS[this.selectedWeapon].secondary,
         altFireHeld: this.input.isAltFireHeld(),
         continuousLaserActive: this.weaponVfx.continuousLaserActive,
@@ -7740,11 +8982,8 @@ export class Game {
       return;
     }
 
-    // QuickSense's environment is static, so its authored directional shadow
-    // atlas is valid after the first complete render. Rebuilding that 2048²
-    // atlas resubmits hundreds of arena meshes in one frame and presents as a
-    // recurring hitch rather than ordinary low FPS. Dynamic actors use their
-    // own local grounding and do not justify stalling the entire map.
+    // Buildings, terrain, and props keep a high-resolution static sun atlas;
+    // actors are grounded by the single-draw contact-shadow batch.
     this.composer.render();
     this.renderer.shadowMap.autoUpdate = false;
   }

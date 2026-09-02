@@ -117,10 +117,25 @@ export class InputController {
     this.lookSensitivity = THREE.MathUtils.clamp(value, 0.5, 2);
   }
 
+  /**
+   * Returns true once per fresh jump press (keydown without auto-repeat, or a
+   * touch jump-button press). Holding the key never re-queues it, which is
+   * what lets the game distinguish a held bunny hop from an airborne re-press
+   * that arms the jetpack or triggers a wall jump. Alias: consumeJumpPress().
+   */
   consumeJump(): boolean {
     const value = this.jumpQueued;
     this.jumpQueued = false;
     return value;
+  }
+
+  consumeJumpPress(): boolean {
+    return this.consumeJump();
+  }
+
+  /** Peek at a pending fresh press without consuming it. */
+  wasJumpPressed(): boolean {
+    return this.jumpQueued;
   }
 
   consumeDash(): boolean {

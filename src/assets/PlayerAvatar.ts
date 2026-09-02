@@ -1,10 +1,8 @@
 import * as THREE from 'three';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { loadCharacterAsset } from './CharacterAsset';
+import { SupportArmIk } from './SupportArmIk';
 import { JetpackRig } from './JetpackRig';
-
-const PLAYER_MODEL_HEIGHT = 1.78;
-const SOURCE_MODEL_HEIGHT = 1.85245;
 
 /**
  * Third-person presentation for the local player. Gameplay owns position and
@@ -13,17 +11,25 @@ const SOURCE_MODEL_HEIGHT = 1.85245;
  */
 export class PlayerAvatar {
   readonly root = new THREE.Group();
-  readonly jetpack = new JetpackRig({ color: 0x43e8ff, thirdPersonPlayer: true });
+  readonly jetpack = new JetpackRig({ color: 0x43e8ff, thirdPersonPlayer: true, vfxOnly: true });
+  readonly weaponGripSocket = new THREE.Object3D();
+  readonly supportGripSocket = new THREE.Object3D();
   readonly ready: Promise<void>;
   modelReady = false;
   modelMeshCount = 0;
   modelHeight = 0;
   modelWidth = 0;
   modelDepth = 0;
+  runtimeBoneCount = 0;
+  runtimeAnimationCount = 0;
+  sourceTriangleCount = 0;
+  sourceTextureCount = 0;
 
   private readonly materials: THREE.Material[] = [];
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly actions = new Map<string, THREE.AnimationAction>();
+  private readonly primaryArmIk = new SupportArmIk();
+  private readonly supportArmIk = new SupportArmIk();
   private mixer?: THREE.AnimationMixer;
   private activeAnimation = '';
   private disposed = false;
@@ -31,6 +37,11 @@ export class PlayerAvatar {
   constructor() {
     this.root.name = 'rift-player-avatar';
     this.root.visible = false;
+    this.weaponGripSocket.name = 'player-trigger-hand-socket';
+    this.supportGripSocket.name = 'player-support-hand-socket';
+    this.weaponGripSocket.position.set(-0.22, 1.28, 0.34);
+    this.supportGripSocket.position.set(0.22, 1.3, 0.48);
+    this.root.add(this.weaponGripSocket, this.supportGripSocket);
     this.root.add(this.jetpack.root);
     this.ready = this.installAuthoredModel();
   }
@@ -40,7 +51,7 @@ export class PlayerAvatar {
   }
 
   setPose(yaw: number, strafe: number): void {
-    // The SWAT asset faces +Z. The gameplay view faces -Z at yaw 0, hence the
+    // The combat trooper faces +Z. The gameplay view faces -Z at yaw 0, hence the
     // half-turn. A restrained roll gives lateral movement a readable silhouette
     // without making the player look permanently tilted at high speed.
     this.root.rotation.y = yaw + Math.PI;
@@ -65,12 +76,13 @@ export class PlayerAvatar {
         ? 'idle_gun_pointing'
       : !grounded
         ? 'jump'
-        : speed > 6
-          ? 'run_shoot'
-          : speed > 0.8
-            ? 'walk'
+        : speed > 0.8
+            ? 'run_shoot'
             : 'idle_gun_pointing';
     this.playAnimation(animation, 0.13);
+    for (const [key, action] of this.actions) {
+      if (key.includes('run_shoot')) action.timeScale = THREE.MathUtils.clamp(speed / 6.8, 0.58, 1.34);
+    }
     this.mixer.update(delta);
   }
 
@@ -98,28 +110,26 @@ export class PlayerAvatar {
           const material = source.clone();
           if (material instanceof THREE.MeshStandardMaterial) {
             const role = material.name.toLowerCase();
-            if (role.includes('visor')) {
-              material.color.set(0x9ff5ff).lerp(teamColor, 0.2);
-              material.emissive.copy(material.color).multiplyScalar(0.38);
-              material.emissiveIntensity = 1.35;
-            } else if (role.includes('skin')) {
-              material.color.offsetHSL(0, -0.04, 0.07);
-              material.emissive.set(0x000000);
-              material.emissiveIntensity = 0;
-            } else if (role.includes('black')) {
-              material.color.set(0x28353e).lerp(teamColor, 0.035);
-              material.emissive.copy(teamColor).multiplyScalar(0.008);
-              material.emissiveIntensity = 0.08;
+            if (role.includes('helmet')) {
+              material.color.multiplyScalar(0.96).lerp(teamColor, 0.055);
+              material.emissive.copy(teamColor).multiplyScalar(0.12);
+              material.emissiveIntensity = 0.72;
+            } else if (role.includes('jumpjet')) {
+              material.color.multiplyScalar(0.9).lerp(teamColor, 0.08);
+              material.emissive.copy(teamColor).multiplyScalar(0.1);
+              material.emissiveIntensity = 0.58;
             } else {
-              // Preserve the authored SWAT palette and texture contrast. Team
-              // color belongs on the visor and hardware; washing every suit
-              // material cyan makes the character read as a glowing blob.
-              material.color.multiplyScalar(0.82).lerp(new THREE.Color(0x53616a), 0.18);
-              material.emissive.copy(teamColor).multiplyScalar(0.01);
-              material.emissiveIntensity = 0.12;
+              // Preserve the trooper's authored PBR color/normal/roughness
+              // detail. Team identity stays on small light hardware so armor
+              // never becomes a flat cyan tint.
+              material.color.multiplyScalar(role.includes('pants') ? 0.86 : 0.92)
+                .lerp(teamColor, role.includes('gear') ? 0.045 : 0.018);
+              material.emissive.copy(teamColor).multiplyScalar(0.035);
+              material.emissiveIntensity = 0.22;
             }
-            material.roughness = Math.max(0.28, material.roughness * 0.84);
-            material.metalness = Math.min(0.8, material.metalness + 0.12);
+            material.roughness = Math.max(0.3, material.roughness * 0.92);
+            material.metalness = Math.min(0.72, material.metalness + 0.06);
+            material.envMapIntensity = 0.88;
             material.side = THREE.DoubleSide;
           }
           this.materials.push(material);
@@ -132,7 +142,7 @@ export class PlayerAvatar {
         this.modelMeshCount += 1;
       });
 
-      model.scale.setScalar(PLAYER_MODEL_HEIGHT / SOURCE_MODEL_HEIGHT);
+      model.scale.setScalar(1);
       model.position.set(0, 0, 0);
       model.name = 'rift-player-authored-character';
 
@@ -140,6 +150,10 @@ export class PlayerAvatar {
         if (child !== this.jetpack.root) this.root.remove(child);
       }
       this.root.add(model);
+      this.attachGripSocket(model, 'WristR', this.weaponGripSocket);
+      this.attachGripSocket(model, 'WristL', this.supportGripSocket);
+      this.primaryArmIk.attach(model, 'R');
+      this.supportArmIk.attach(model, 'L');
       this.addTeamHardware();
       this.root.updateMatrixWorld(true);
       const bounds = new THREE.Box3().setFromObject(model);
@@ -147,6 +161,10 @@ export class PlayerAvatar {
       this.modelHeight = size.y;
       this.modelWidth = size.x;
       this.modelDepth = size.z;
+      this.runtimeBoneCount = asset.diagnostics.runtimeBoneCount;
+      this.runtimeAnimationCount = asset.diagnostics.runtimeAnimationCount;
+      this.sourceTriangleCount = asset.diagnostics.triangleCount;
+      this.sourceTextureCount = asset.diagnostics.textureCount;
 
       this.mixer = new THREE.AnimationMixer(model);
       for (const clip of asset.animations) {
@@ -165,6 +183,27 @@ export class PlayerAvatar {
       // the optional authored character asset is unavailable.
       this.modelReady = false;
     }
+  }
+
+  private attachGripSocket(model: THREE.Object3D, boneName: string, socket: THREE.Object3D): void {
+    const bone = model.getObjectByName(boneName);
+    if (!bone) return;
+    bone.add(socket);
+    socket.position.set(0, 0, 0);
+    socket.rotation.set(0, 0, 0);
+    socket.scale.set(1, 1, 1);
+  }
+
+  solveSupportHand(targetWorld: THREE.Vector3): number {
+    return this.supportArmIk.solve(targetWorld);
+  }
+
+  solvePrimaryHand(targetWorld: THREE.Vector3): number {
+    return this.primaryArmIk.solve(targetWorld);
+  }
+
+  get animationName(): string {
+    return this.activeAnimation;
   }
 
   private playAnimation(name: string, fade: number): void {
@@ -203,6 +242,8 @@ export class PlayerAvatar {
       beacons.setMatrixAt(index, matrix);
     }
     beacons.instanceMatrix.needsUpdate = true;
+    beacons.castShadow = true;
+    beacons.receiveShadow = true;
     this.root.add(beacons);
   }
 }

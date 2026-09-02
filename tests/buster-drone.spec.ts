@@ -11,6 +11,9 @@ test('QuickSense Busters use the authored rig, gaze-gated shards, damage, and re
 
   await page.goto('/?map=quicksense&qa=visual', { waitUntil: 'commit' });
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__), null, { timeout: 240_000 });
+  await page.waitForFunction(() => (
+    window.__THREE_GAME_DIAGNOSTICS__?.busterDrones.every((drone) => drone.modelReady && drone.loadError === null) === true
+  ), null, { timeout: 60_000 });
   const initial = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     hooks.setReducedMotion(true);

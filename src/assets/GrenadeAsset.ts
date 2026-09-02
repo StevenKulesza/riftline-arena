@@ -29,8 +29,8 @@ export async function loadGrenadeAsset(): Promise<THREE.Group> {
   root.traverse((object) => {
     object.frustumCulled = false;
     if (object instanceof THREE.Mesh) {
-      object.castShadow = false;
-      object.receiveShadow = false;
+      object.castShadow = true;
+      object.receiveShadow = true;
     }
   });
   return root;

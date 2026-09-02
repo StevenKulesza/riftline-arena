@@ -22,12 +22,15 @@ The player chains movement and weapon fire to eliminate bots and capture the Flu
 
 - Fixed simulation step: 1/120 second with clamped frame accumulation; movement subdivides again so no collision sweep exceeds 0.25 m.
 - Collider: swept custom kinematic capsule approximation (0.55 m radius, 1.8 m standing height) over an analytic open-terrain height/normal field; walls, tunnels, ramps, and overhangs use separate convex proxy volumes.
-- Ground acceleration: 48 m/s²; air acceleration: 22 m/s²; max wish speed: 18 m/s before slope/rocket momentum.
-- Normal ground friction: 9.5; skiing friction while Shift is held: 0.12.
-- Jump impulse: 10.8 m/s; gravity: 28 m/s²; coyote window: 100 ms; jump buffer: 120 ms.
-- Bunny hopping preserves horizontal velocity; air strafing rewards perpendicular wish direction and camera steering.
-- Acceleration adds at most `min(acceleration × dt, wishSpeed - dot(horizontalVelocity, wishDirection))`; friction scales speed by `max(0, 1 - friction × dt)`.
-- Skiing projects gravity onto the ground tangent without creating uphill energy, preserves downhill momentum, and allows speeds up to a 58 m/s safety cap.
+- Movement numbers follow Warsow/qfusion `gs_pmove.c` with 320 u/s mapped to 15 m/s.
+- Ground: wish speed 15 m/s, Quake accelerate 11.5, friction 8 with stop speed 10.5 → 0→14 m/s in ≈0.16 s; hard 15 m/s cap on foot.
+- Air: Q3 accelerate 1 (2 when pushing against velocity), CPM side-only strafe accel 74 at a 1.9 m/s cap, forward-only air control `k = 32 × 7.03 × dot² × dt` that preserves speed and cannot turn while decelerating (dot ≤ 0). No air friction and no gameplay speed cap (120 m/s NaN/tunnelling safety clamp only).
+- Jump impulse: 9 m/s (1.62 m apex, 0.72 s airtime); gravity 25 m/s²; coyote window 100 ms; jump buffer 120 ms. A held jump re-jumps on the landing frame with zero friction frames. If the body is already rising (ramp/stair launch) the jump adds: `vy > 0.35 × jump → vy += jump` (double-jump event), `0 < vy → vy += jump`, else `vy = jump`. Any jump clears dash and wall-jump timers.
+- Dash: ground only, sets `hspeed = max(current, 21 m/s)` along the input direction plus a 5.6 m/s hop (0.45 s airtime); 1.0 s cooldown cleared by any jump or wall jump.
+- Wall jump: fresh airborne Space press with a near-vertical wall (|normal.y| < 0.3) within radius + 0.2 m across 12 probes at 30°; horizontal speed `max(|v|, 11.25)` clipped off the wall plus 0.3 × normal; `vy = max(vy, 10.6)`; one per airtime, 1.3 s cooldown, blocked in the first 100 ms of a dash; air accel/control are off while still rising afterwards.
+- Jetpack: only a fresh airborne Space press arms thrust; holding through a ground jump bunny hops instead. Thrust adds 42 m/s² while `vy < 18` and never reduces a faster rise. 2.25 s burn, 4.5 s refill.
+- Knockback lockout (PM_STAT_KNOCKBACK): while active there is no ground friction, dash, strafe-mode accel, or air control, so weapon shoves are not absorbed on the landing frame.
+- Skiing projects gravity onto the ground tangent at full strength (scale 1.12) and never scales it down; drag is `0.025 × v + 0.004 × max(0, v − 22)²`, so a 30° slope settles above 45 m/s (3× run) and a 15° slope still passes 70 km/h. Ski steering blends toward input at `1.6 × dt / (1 + v / 42)` — a 90° carve at run speed takes over 1.2 s — and ski input pushes only to 3 m/s, so the line does the work.
 - Walkable slope limit: 50°; ground snap: 0.25 m; step height: 0.4 m.
 - Rocket splash can add controlled self-knockback; the player cannot self-kill from full health with one rocket.
 - Camera FOV scales from 82° to 102° with speed; landing, damage, rail, and rocket events use bounded trauma shake.

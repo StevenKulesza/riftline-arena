@@ -15,6 +15,9 @@ for (const map of [
 
     await page.goto(`/?qa=visual${map.query}`, { waitUntil: 'commit' });
     await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__), null, { timeout: 240_000 });
+    await page.waitForFunction(() => (
+      window.__THREE_GAME_DIAGNOSTICS__?.drones.every((drone) => drone.modelReady && drone.loadError === null) === true
+    ), null, { timeout: 60_000 });
     await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
       hooks.setReducedMotion(true);

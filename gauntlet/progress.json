@@ -1,0 +1,573 @@
+{
+  "updatedAt": "2026-09-02T14:10:00Z",
+  "phase": "Drone acquire/fire cut to local sector + forward cone. Spawn cubbies dressed as bunker kits (AABB unchanged). Maps/bots critics not relaunched.",
+  "bar": "Warfork (open-source Warsow) pmove + bot AI source cloned to /tmp/gauntlet-bar/warfork, distilled with file:line citations to /tmp/gauntlet-bar/warfork-reference.md; Tribes: Ascend (Katabatic / Arx Novena) ski + jetpack flow; UT2004 Deck 17 Godlike bots for combat pacing.",
+  "commits": 0,
+  "tests": {
+    "typecheck": "pass",
+    "playwright": "pass",
+    "note": "drone-awareness 5/5; drone 2/2; buster 1/1; flamethrower 2/2; map-cover spawn pairs + cubby bunker audit on 5233/5234."
+  },
+  "pieces": [
+    {
+      "id": "air-control",
+      "name": "Air control / strafe jumping",
+      "status": "running",
+      "gap": "r2 critic picked A; coyote was the named gap and is now gone. Re-judge.",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "free air carve + additive airborne dash + hidden 60 m/s cap + no knockback lockout"
+        },
+        {
+          "verdict": "bar",
+          "gap": "100 ms coyote + 120 ms tap buffer lets you jump after leaving the ground"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r2",
+          "text": "A. Warsow CheckJump returns when groundentity==-1. Ours treated coyote>0 as jumpable."
+        },
+        {
+          "who": "lead r3",
+          "text": "Jump and dash require grounded. coyoteTime is 0. Parity 6/6 still green."
+        }
+      ]
+    },
+    {
+      "id": "jetpack-ski",
+      "name": "Jetpack + ski flow",
+      "status": "running",
+      "gap": "r2: skiGravityScale 1.12 was not unscaled gravity. Now 1. Re-judge vs Tribes.",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "jump overwrites ramp launch; jet on jump key; ski ceiling 2.2\u00d7 run"
+        },
+        {
+          "verdict": "bar",
+          "gap": "skiGravityScale 1.12 is already not unscaled gravity"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r2",
+          "text": "Ski would lose to Tribes Ascend \u2014 skiGravityScale 1.12, carve dies with speed, quadratic drag starts at 22 m/s."
+        },
+        {
+          "who": "lead r3",
+          "text": "skiGravityScale is 1. Gravity's tangential pull is unscaled; only drag limits the line."
+        }
+      ]
+    },
+    {
+      "id": "ground-move",
+      "name": "Ground movement, dash, wall jump, bunny hop",
+      "status": "won",
+      "gap": "r5 picked ours. SlideMove downward-Y zero is now normal.y\u22481 only, not the 0.95 ramp-preserve cosine.",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "bhop impossible, no wall jump, dash semantics inverted, step-up bleeds speed"
+        },
+        {
+          "verdict": "bar",
+          "gap": "dash allowed during coyote after walking off a ledge"
+        },
+        {
+          "verdict": "bar",
+          "gap": "no PM_StepSlideMove ramp preserve; step zeros vertical; ramps clip XY into the plane"
+        },
+        {
+          "verdict": "bar",
+          "gap": "grounded move skips gravity and never sets vy=0; un-ground is a seated loft"
+        },
+        {
+          "verdict": "ours",
+          "gap": "WalkMove zeros leftover rise; 11\u00b0 cannot loft; 50 m/s launches in one conversion"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r3",
+          "text": "A. Ramps trade XY for Y instead of launching."
+        },
+        {
+          "who": "lead",
+          "text": "applyRampSpeedPreserve keeps pre-move 2D speed, copies slide Z, un-grounds above 8.4 m/s."
+        },
+        {
+          "who": "critic r4",
+          "text": "A. Preserve restores 2D speed but grounded walk never zeroes vy."
+        },
+        {
+          "who": "lead",
+          "text": "WalkMove zeroes leftover rise (ski keeps tangent Y). Flat SlideMove drops downward vz."
+        },
+        {
+          "who": "critic r5",
+          "text": "B. WalkMove zeros leftover rise. Remaining: SlideMove used rampPreserveFlatCosine 0.95 (~18\u00b0) instead of normal.z==1."
+        },
+        {
+          "who": "lead",
+          "text": "slideMoveHorizontalCosine is 1-1e-5. 11\u00b0 ramps keep downhill Y."
+        }
+      ]
+    },
+    {
+      "id": "weapon-feel",
+      "name": "Weapon feel (knockback, projectile, hitscan)",
+      "status": "won",
+      "gap": "r6 picked ours. Splash LOS no longer bypasses inside 5 m; origin lifts 9 u along the impact plane.",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "no knockback model"
+        },
+        {
+          "verdict": "bar",
+          "gap": "self-rocket splash kb forced to 0; applyRocketJump sets vy to 16\u201323 m/s over 5 m linear radius"
+        },
+        {
+          "verdict": "bar",
+          "gap": "rocket splashMinKnockback 1 vs Warsow minkb 35 \u2192 ~8.2 m/s"
+        },
+        {
+          "verdict": "bar",
+          "gap": "rocket is 90 dmg / 0.75s / splashMinDamage 1, not 80 / 0.95s / 15"
+        },
+        {
+          "verdict": "bar",
+          "gap": "bot splash max is 0.78\u00d7 firedef damage"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r4",
+          "text": "A. Minkb is 8.2 and self-splash is 1.18\u00d7; rocket firedef is still 90/0.75/min 1. Hit-feedback: B."
+        },
+        {
+          "who": "lead",
+          "text": "rocket is 80 damage, 0.95 s reload, splashMinDamage 15."
+        },
+        {
+          "who": "critic r5",
+          "text": "A. Firedef matches; bot splash still 0.78\u00d7 at explodeProjectile. Hit-feedback: B."
+        },
+        {
+          "who": "lead",
+          "text": "sampleSplash max vs bots is projectile.damage, same as the player."
+        }
+      ]
+    },
+    {
+      "id": "hit-feedback",
+      "name": "Hit feedback (hitmarker, sound, hitstop, damage direction)",
+      "status": "won",
+      "gap": "Combat r6 hit-feedback sub-verdict B (binary ping vs Warsow).",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "no damage-scaled feedback"
+        },
+        {
+          "verdict": "bar",
+          "gap": "B tiers markers/pitch by damage; Warsow is a binary hit ping"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r2",
+          "text": "Hit-feedback sub-verdict: A \u2014 Warsow is a binary hit ping."
+        },
+        {
+          "who": "lead r3",
+          "text": "Hud.hitMarker is hit vs kill only. audio.hit is a single ping. killConfirm / elim feed remains."
+        }
+      ]
+    },
+    {
+      "id": "map-monsoon",
+      "name": "Monsoon Divide flow + cover",
+      "status": "won",
+      "gap": "Maps critic after northwest cubby picked ours. 32/32 \u2265250 m spawn chords blocked. Leftover 248 m cubby at (81.0, 68.7).",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "centre bowl is a 100 m+ sightline dead zone"
+        },
+        {
+          "verdict": "bar",
+          "gap": "rocket (\u2212148, \u221286) to sniper (139, 93) is 338 m; nearest breaker at (8, 34) sits ~19 m off that line"
+        },
+        {
+          "verdict": "bar",
+          "gap": "rail (\u2212158, 96) \u2192 sniper (139, 93) is 297 m; rocket-sniper box at z=75 misses by ~15 m"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (\u2212158, 90) \u2192 (153, 79) is a 311 m open shelf at z\u224880.6, missing both item breakers"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (\u2212158, 90) \u2192 (125, \u2212104) is 343 m; 40 m breaker at (109, 81) misses the ray at z\u2248\u221293"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (153, 79) \u2192 (\u2212130, \u2212101) is 335 m along ski corridor 2"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (75, 130) \u2192 (\u2212130, \u2212101) is 309 m CLEAR; cubby not another x\u2248110 column"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (153, 79) \u2192 (\u2212109, \u221222) is 281 m CLEAR; cubby at inner pad, not x\u2248110 z\u224862"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (89, 55) \u2192 (\u2212130, \u2212101) is 269 m CLEAR, 3\u201313 m off corridor 2; nudge north, do not wall the grade"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (51, \u221273) \u2192 (\u2212158, 90) is 265 m CLEAR along ski corridor 1; cubby the south pad, do not wall the grade"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (\u221299, 64) \u2192 (153, 79) is 252 m CLEAR; cubby at 24 m, not 8 m on corridor 1"
+        },
+        {
+          "verdict": "ours",
+          "gap": "northwest cubby blocks (\u221299, 64)\u2192(153, 79); 32/32 \u2265250 m spawn chords blocked"
+        }
+      ],
+      "log": [
+        {
+          "who": "lead",
+          "text": "midfield-rail-sniper-breaker at (109, 93), 28 m tall. map-cover rail+rocket chords passed."
+        },
+        {
+          "who": "critic maps after rail breaker",
+          "text": "A. 28 m slab only clips the ITEM rail\u2192sniper ray. Spawn shelf 311 m still open at (109, 60, 81)."
+        },
+        {
+          "who": "lead",
+          "text": "midfield-spawn-shelf-breaker at (109, 81), 40 m. map-cover spawn pair assertion passed."
+        },
+        {
+          "who": "critic maps after spawn shelf",
+          "text": "A. 40 m plug clips only the named 311 m shelf. (\u2212158, 90) \u2192 (125, \u2212104) is 343 m, ray at x=109 is z\u2248\u221293, breaker misses by ~15 m. Twelve spawn chords \u2265250 m still clear. Do not put a 40 m box at (109, \u221293) \u2014 that is ski corridor 1."
+        },
+        {
+          "who": "lead",
+          "text": "Moved SE spawn off the ski line to (160, \u221240) behind the eastern massif; local cubby at the pad. map-cover asserts the 343 m pair is blocked."
+        },
+        {
+          "who": "critic maps after spawn nudge",
+          "text": "A. Cited close is real. Seven spawn chords \u2265250 m still CLEAR. Longest: (153, 79) \u2192 (\u2212130, \u2212101) 335.4 m along ski corridor 2. Do not drop a 40 m box on corridor 2."
+        },
+        {
+          "who": "lead",
+          "text": "ski-corridor-2-nunatak at (110.5, 52), 5.2\u00d728\u00d75.2 \u2014 7.5 m north of the grade so the ski runs south of it."
+        },
+        {
+          "who": "critic maps after corridor-2 nunatak",
+          "text": "A. Nunatak clips the 335 m pair. Five spawn chords \u2265250 m still CLEAR. Longest: (75, 130) \u2192 (\u2212130, \u2212101) 308.85 m. Next builder: spawn-adjacent cubby, not a fifth column at x\u2248110."
+        },
+        {
+          "who": "lead",
+          "text": "spawn-north-east-cubby at (69.7, 124), 4.6\u00d75.8\u00d73.2, 8 m along that chord, ~84 m off ski corridor 2."
+        },
+        {
+          "who": "critic maps after north-rim cubby",
+          "text": "A. Cubby clips the 309 m pair. Four spawn chords \u2265250 m still CLEAR. Longest: (153, 79) \u2192 (\u2212109, \u221222) 280.79 m. Next: cubby at inner pad, not x\u2248110 z\u224862."
+        },
+        {
+          "who": "lead",
+          "text": "spawn-inner-west-cubby at (\u2212101.5, \u221219.1). Lid is pad+5.8 m because local ground drops 7 m. map-cover 281 m pair blocked on 5204."
+        },
+        {
+          "who": "critic maps after inner-west cubby",
+          "text": "A. Inner-west cubby is real. Three spawn chords \u2265250 m still CLEAR. Longest: (89, 55) \u2192 (\u2212130, \u2212101) 268.88 m on corridor 2. Next: relocate that pad north \u226525 m off the grade, then a pad-height cubby. Do not cubby the SW pad."
+        },
+        {
+          "who": "lead",
+          "text": "Moved inner-east spawn to (89, 68) (25.7 m off corridor 2). spawn-inner-east-cubby at (82.7, 63.1), pad+5.8 m lid. map-cover 269 m pair blocked on 5206."
+        },
+        {
+          "who": "critic maps after inner-east nudge",
+          "text": "A. Inner-east close is real. Two spawn chords \u2265250 m still CLEAR. Longest: (51, \u221273) \u2192 (\u2212158, 90) 265.05 m along corridor 1. Next: pad-height cubby at (44.7, \u221268.1). Do not cubby (\u2212158, 90)."
+        },
+        {
+          "who": "lead",
+          "text": "spawn-inner-south-cubby at (44.7, \u221268.1), pad+5.8 m lid, 25.8 m off corridor 1. map-cover 265 m pair blocked on 5222."
+        },
+        {
+          "who": "critic maps after inner-south cubby",
+          "text": "A. Inner-south cubby is real. 1 monsoon \u2265250 m still CLEAR: (\u221299, 64)\u2192(153, 79) 252.45 m. Named next gap was QuickSense 256 m."
+        },
+        {
+          "who": "critic maps after QuickSense cubby",
+          "text": "A overall. QuickSense B. Monsoon (\u221299, 64)\u2192(153, 79) 252.45 m CLEAR. 8 m along that chord is on corridor 1. Next: cubby at 24 m (\u221275.0, 65.4), pad+5.8 m. Do not cubby (153, 79)."
+        },
+        {
+          "who": "lead",
+          "text": "spawn-northwest-cubby at (\u221275.0, 65.4), 24 m along the chord, pad+5.8 m lid. map-cover 252 m pair blocked on 5226."
+        },
+        {
+          "who": "critic maps after northwest cubby",
+          "text": "B. Named 252 m chord hits cubby at 21.97 m. 32/32 monsoon and 12/12 QuickSense \u2265250 m blocked. Leftover: (89, 68)\u2192(\u2212158, 90) 247.98 m CLEAR."
+        },
+        {
+          "who": "lead",
+          "text": "spawn-inner-east-ridge-cubby at (81.0, 68.7), 8 m along that chord, pad+5.8 m. Did not cubby (\u2212158, 90). map-cover 248 m pair blocked on 5228."
+        }
+      ]
+    },
+    {
+      "id": "map-quicksense",
+      "name": "QuickSense flow + cover",
+      "status": "won",
+      "gap": "Maps critic after west cubby: QuickSense sub-verdict B. 12/12 \u2265250 m chords blocked. Plates still 0.84.",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "pointOnFloor parks pickups/spawns on floating roofs"
+        },
+        {
+          "verdict": "bar",
+          "gap": "spawn (\u2212144, 5) \u2192 (89, \u2212101) is 256 m CLEAR over 0.84 m barricades; cubby the west pad at eye height"
+        },
+        {
+          "verdict": "ours",
+          "gap": "west-pad cubby blocks (\u2212144, 5)\u2192(89, \u2212101); 12/12 \u2265250 m spawn chords blocked"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r1",
+          "text": "B. Spawn 7 + rail on Amber Command Ark; health-b on Needle Dock roof."
+        },
+        {
+          "who": "builder r1",
+          "text": "Chest-high barricades off ski routes; eight spawns offset \u22648 m. Live probe 19/28 pairs blocked."
+        },
+        {
+          "who": "lead",
+          "text": "playableSurfaceHeight caps at terrain+12 local. createPickups no longer samples from +Infinity. map-cover QuickSense spawns passed."
+        },
+        {
+          "who": "critic maps after spawn shelf",
+          "text": "QuickSense sub-verdict A."
+        },
+        {
+          "who": "critic maps after inner-south cubby",
+          "text": "A. QuickSense (\u2212144, 5)\u2192(89, \u2212101) 255.98 m CLEAR. West barricade 16.5 m off-axis and 0.66 m under eye. Next: cubby at local (\u221268.4, 0.8), lid \u2265 eye. Do not raise plates or wall the basin."
+        },
+        {
+          "who": "lead",
+          "text": "QuickSense west spawn cubby at local (\u221268.4, 0.8), 4.6\u00d73.2 world, pad+5.8 m lid. 0.84 m plates unchanged. map-cover 256 m pair blocked on 5224."
+        },
+        {
+          "who": "critic maps after QuickSense cubby",
+          "text": "QuickSense B. 256 m cubby real (hit 5.38 m). 12/12 \u2265250 m blocked. Plates still 0.84 local. Overall maps A on remaining Monsoon 252 m rail."
+        }
+      ]
+    },
+    {
+      "id": "bot-aim",
+      "name": "Bot aim model",
+      "status": "won",
+      "gap": "r after fire cone picked ours. Splash geometry veto deleted (Warfork FireWeapon has none).",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "feet-origin aim parallax"
+        },
+        {
+          "verdict": "bar",
+          "gap": "toy-movement chaser vs node-routing DM bot"
+        },
+        {
+          "verdict": "bar",
+          "gap": "aimDirection.lerp(desired, 1-exp(-dt*trackingRate)) instead of AI_ChangeAngle yaw cap"
+        },
+        {
+          "verdict": "bar",
+          "gap": "rotateAimTowards copies desired whenever remaining angle \u2264 yaw_speed*dt (~10\u201315\u00b0)"
+        },
+        {
+          "verdict": "bar",
+          "gap": "0.55\u00b0 angular walk sits inside the 1\u00b0 ChangeAngle deadzone; Warfork wfac is world-XY"
+        },
+        {
+          "verdict": "bar",
+          "gap": "tryFire cone on unjittered chest vetoes hunted wfac shots"
+        },
+        {
+          "verdict": "ours",
+          "gap": "chest cone gone; trigger is in-front + skill delay along hunted heading"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r2",
+          "text": "Aim: A. Pathing: A. Decisions: A. Biggest gap: grounded threat dodge requests a dash."
+        },
+        {
+          "who": "lead r3",
+          "text": "Extreme band is rail/sniper only. bot-weapon.spec 3/3."
+        },
+        {
+          "who": "critic r6 item path",
+          "text": "A. Aim lerp at Bot.ts:1323. Warfork AI_ChangeAngle caps turn at yaw_speed*dt (600\u2013950 \u00b0/s)."
+        },
+        {
+          "who": "lead",
+          "text": "rotateTowards at 620\u2013920 \u00b0/s minus 20*(1-S). Cannot snap 90\u00b0 in one 16 ms tick (bot-ai)."
+        },
+        {
+          "who": "critic r7 yaw cap",
+          "text": "A. Aim. rotateAimTowards copies desired when remaining \u2264 cap. No speed_yaw, no yaw_accel, no overshoot. Pathing B, Decisions B."
+        },
+        {
+          "who": "lead",
+          "text": "stepAimChangeAngle ports AI_ChangeAngle: persistent rates, 10\u00b0/3\u00b0 damping, snap left off. bot-ai overshoot + 8-frame spool passed."
+        },
+        {
+          "who": "critic r8 ChangeAngle",
+          "text": "A. Turner is real, but 0.55\u00b0 walk sits inside the 1\u00b0 deadzone so heading laser-locks. Warfork wfac is \u00b112.5\u2013188 u world-XY."
+        },
+        {
+          "who": "lead",
+          "text": "applyAimWfacOffset: 25+W*(1-S) u on aim XZ. LG/PG circle, others \u00b1wfac/2. Turner untouched. bot-ai 6/6."
+        },
+        {
+          "who": "critic r9 wfac",
+          "text": "A. wfac hunts but tryFire cone on unjittered chest vetoes the miss. Rail 1.2\u00b0, laser 3\u00b0. Warfork fires along the hunting view."
+        },
+        {
+          "who": "lead",
+          "text": "Dropped WEAPON_FIRE_CONE. botMayPullTrigger is in-front + 1.25-S delay. Turner untouched. bot-ai 7/7."
+        },
+        {
+          "who": "critic r10 fire cone",
+          "text": "B. Aim/pathing/decisions B. Leftover: splash veto at 5.93 m rocket / 2.58 m plasma. Warfork FireWeapon has none."
+        },
+        {
+          "who": "lead",
+          "text": "Deleted splash geometry veto. tryFire is range + ammo + botMayPullTrigger. Turner untouched. bot-ai 7/7."
+        }
+      ]
+    },
+    {
+      "id": "bot-pathing",
+      "name": "Bot pathing / traversal",
+      "status": "won",
+      "gap": "Bots r10 pathing sub-verdict B.",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "no nav graph"
+        },
+        {
+          "verdict": "bar",
+          "gap": "grounded threat dodge requests a dash (Bot.ts dodge)"
+        },
+        {
+          "verdict": "bar",
+          "gap": "considerGrapple aims a hook at the visible target"
+        },
+        {
+          "verdict": "bar",
+          "gap": "stuck bots warp instead of dying"
+        },
+        {
+          "verdict": "ours",
+          "gap": "path goal stays on the item/core objective; close combat sidesteps"
+        }
+      ],
+      "log": [
+        {
+          "who": "critic r3",
+          "text": "A. Grapples the opponent at ordinary 1v1 range."
+        },
+        {
+          "who": "lead",
+          "text": "considerGrapple only hooks path nodes or distant out-of-combat goals."
+        },
+        {
+          "who": "critic r4",
+          "text": "A. Visible-and-near chase plus stuck warp. Pathing: A. Aim: B."
+        },
+        {
+          "who": "lead",
+          "text": "relocateStuckBot calls takeDamage(10000); no teleport."
+        },
+        {
+          "who": "critic r6 item path",
+          "text": "Pathing sub-verdict B. Chase-as-nav-goal is gone."
+        },
+        {
+          "who": "critic r10 fire cone",
+          "text": "Pathing B."
+        }
+      ]
+    },
+    {
+      "id": "bot-decisions",
+      "name": "Bot decision-making",
+      "status": "won",
+      "gap": "Bots r10 decisions sub-verdict B.",
+      "rounds": [
+        {
+          "verdict": "bar",
+          "gap": "no threat model / retreat"
+        },
+        {
+          "verdict": "bar",
+          "gap": "chases instead of routing the item cycle; 6 s warp instead of suicide"
+        },
+        {
+          "verdict": "bar",
+          "gap": "visible-and-near still replaces the item cycle with a chase (Game.ts:3527)"
+        },
+        {
+          "verdict": "bar",
+          "gap": "Bot.update still paths to the fight target when visible-and-near (Bot.ts:474)"
+        },
+        {
+          "verdict": "bar",
+          "gap": "chooseBotObjective freezes 12 s or snaps to core instead of re-scoring items every 2\u20133 s"
+        }
+      ],
+      "log": [
+        {
+          "who": "lead",
+          "text": "chooseBotObjective no longer commits a chase goal; fight while routing items/core."
+        },
+        {
+          "who": "critic r5",
+          "text": "A. Chase moved into Bot.update: goal = chasing ? target : objective."
+        },
+        {
+          "who": "lead",
+          "text": "planPathIfNeeded / steerAlongPath / considerGrapple use the objective. Close combat still sidesteps (Warfork CombatMovement)."
+        },
+        {
+          "who": "critic r6 item path",
+          "text": "A. BOT_OBJECTIVE_COMMIT_SECONDS = 12 or snaps to core. Warfork AI_PickLongRangeGoal re-scores every 2\u20133 s."
+        },
+        {
+          "who": "lead",
+          "text": "Commit is 2.5 s. Core is scored against items; no early-return."
+        },
+        {
+          "who": "critic r10 fire cone",
+          "text": "Decisions B."
+        }
+      ]
+    }
+  ]
+}

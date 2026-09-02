@@ -15,6 +15,8 @@ Monsoon Divide is Riftline's deterministic, procedural outdoor movement arena. I
 
 Two continuous cross-island ski grades thread three connected, asymmetric ridgelines through the central recovery bowl. Layered upper benches, broad foothill shelves, carved side valleys, unequal escarpments, and an irregular bay-and-headland coastline replace the former compact ring of isolated massifs. Six concrete launch zones, six jump pads, route gates, a two-way underpass, and two enterable relay structures create alternate lines without turning the map into a hallway network. Authored crowns, secondary shoulders, saddles, and banked approaches let a descent store the momentum needed for the opposing climb. Terrain, ramps, platforms, and structures expose analytic floor height/normal queries; projectile traces use the merged BVH collision surface.
 
+Fifteen spawns sit 6–14 m off the nearest bunker, gate, or ridge shoulder rather than on open flats. Low concrete cover (1.2–1.5 m) stands 4–8 m from every pickup, three 5–6 m mid-bowl fragments break the crater through-lines, and a 2.4 m berm traces the inner AABB so the playable bound is visible geometry.
+
 Substantial faceted rocks, gate columns, reactor/tower bases, and every structural wall are solid capsule colliders. Ambient animal routes resolve against the same collision set.
 
 ## Rendering and authored procedural assets

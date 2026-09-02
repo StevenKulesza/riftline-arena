@@ -24,7 +24,9 @@ export function createRenderer(canvas: HTMLCanvasElement): THREE.WebGLRenderer {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.96;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.VSMShadowMap;
+  // PCF shadows keep receiving characters out of the static-atlas build
+  // and avoid VSM's two full-resolution blur passes on this very large arena.
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   return renderer;
 }
 

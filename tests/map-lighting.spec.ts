@@ -16,9 +16,8 @@ for (const map of MAPS) {
     expect(lighting.fillIntensity).toBeGreaterThan(0);
     expect(lighting.rimIntensity).toBeGreaterThan(0);
     expect(lighting.environmentIntensity).toBeGreaterThan(0.5);
-    expect(lighting.shadow.type).toBe('VSMShadowMap');
+    expect(lighting.shadow.type).toBe('PCFShadowMap');
     expect([1024, 2048]).toContain(lighting.shadow.mapSize);
-    expect([4, 8]).toContain(lighting.shadow.blurSamples);
     expect(lighting.shadow.casters).toBeGreaterThan(0);
     expect(lighting.shadow.receivers).toBeGreaterThan(0);
     expect(lighting.contactShadows.sources).toBeGreaterThanOrEqual(7);

@@ -16,13 +16,19 @@ export type BotMovementTuning = Readonly<{
 export type BotVisualIdentity = Readonly<{
   accentColor: number;
   markerShape: 'chevron' | 'diamond' | 'split-ring';
-  roleLabel: string;
+  roleLabel: 'HUNTER' | 'ANCHOR' | 'RUNNER';
 }>;
 
 export type BotArchetypeTuning = Readonly<{
   id: BotArchetypeId;
   callsign: string;
   aggression: number;
+  /**
+   * Warfork-style skill scalar S in [0.1, 1]. Drives reaction latency, fire
+   * probability, aim noise radius, projectile prediction, dodging, weapon
+   * lockout and respawn delay.
+   */
+  skill: number;
   reactionSeconds: number;
   movement: BotMovementTuning;
   objectiveBias: Readonly<Record<BotObjectiveKind, number>>;
@@ -36,6 +42,7 @@ export const BOT_ARCHETYPES: Readonly<Record<BotArchetypeId, BotArchetypeTuning>
     id: 'hunter',
     callsign: 'VIPER',
     aggression: 0.92,
+    skill: 0.92,
     reactionSeconds: 0.2,
     movement: {
       speedScale: 1.04,
@@ -53,6 +60,7 @@ export const BOT_ARCHETYPES: Readonly<Record<BotArchetypeId, BotArchetypeTuning>
     id: 'anchor',
     callsign: 'BASTION',
     aggression: 0.56,
+    skill: 0.62,
     reactionSeconds: 0.28,
     movement: {
       speedScale: 0.94,
@@ -70,6 +78,7 @@ export const BOT_ARCHETYPES: Readonly<Record<BotArchetypeId, BotArchetypeTuning>
     id: 'runner',
     callsign: 'SLIPSTREAM',
     aggression: 0.66,
+    skill: 0.76,
     reactionSeconds: 0.24,
     movement: {
       speedScale: 1.1,
@@ -118,4 +127,36 @@ export function weaponRole(weapon: WeaponId): BotWeaponRole {
 export function botWeaponUtility(tuning: BotArchetypeTuning, weapon: WeaponId): number {
   const rank = tuning.preferredWeaponRoles.indexOf(weaponRole(weapon));
   return rank < 0 ? 0 : 1 - rank / tuning.preferredWeaponRoles.length;
+}
+
+/** Skill-derived combat parameters (Warfork `ai_class_dmbot` / `bot_spawn` scaling). */
+export type BotSkillProfile = Readonly<{
+  skill: number;
+  /** Seconds a newly seen enemy stays latched before the bot may fire. */
+  reactionSeconds: number;
+  /** Chance to pull the trigger on each ready tick for single-shot weapons. */
+  fireProbability: number;
+  /** Bots below this skill do not lead projectiles. */
+  predictsProjectiles: boolean;
+  /** Bots below this skill do not sidestep incoming rockets. */
+  dodgesProjectiles: boolean;
+  /** Seconds a weapon choice is locked after switching. */
+  weaponLockoutSeconds: number;
+  respawnDelaySeconds: number;
+  /** Bots at or above this skill bunny-hop on straight path segments. */
+  bunnyHops: boolean;
+}>;
+
+export function botSkillProfile(tuning: BotArchetypeTuning): BotSkillProfile {
+  const skill = Math.min(1, Math.max(0.1, tuning.skill));
+  return {
+    skill,
+    reactionSeconds: tuning.reactionSeconds * (0.35 + 1.65 * (1 - skill)),
+    fireProbability: Math.min(1, Math.max(0.25, 1.25 - skill)),
+    predictsProjectiles: skill >= 0.33,
+    dodgesProjectiles: skill >= 0.25,
+    weaponLockoutSeconds: 1.5 + 1.5 * (1 - skill),
+    respawnDelaySeconds: 2.4 - 0.8 * skill,
+    bunnyHops: skill >= 0.33,
+  };
 }

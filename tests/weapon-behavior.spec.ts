@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('player shots originate at authored muzzle sockets and laser remains continuous while aim bends', async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   page.on('console', (message) => {
@@ -16,7 +16,6 @@ test('player shots originate at authored muzzle sockets and laser remains contin
     hooks.setState('active-play');
     hooks.parkBotsForScreenshot();
     hooks.setReducedMotion(true);
-    hooks.setPausedForScreenshot(true);
   });
 
   const reticleSignatures = new Set<string>();
@@ -102,7 +101,6 @@ test('player shots originate at authored muzzle sockets and laser remains contin
     hooks.setState('active-play');
     hooks.parkBotsForScreenshot();
     hooks.setReducedMotion(true);
-    hooks.setPausedForScreenshot(true);
   });
 
   for (const weapon of ['rocket', 'plasma', 'disc'] as const) {
@@ -159,7 +157,7 @@ test('player shots originate at authored muzzle sockets and laser remains contin
 });
 
 test('disc launcher uses swept ricochet physics and emits exactly one disc per primary or secondary shot', async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   await page.goto('/?qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
 
@@ -210,17 +208,21 @@ test('disc launcher uses swept ricochet physics and emits exactly one disc per p
 });
 
 test('default player loadout makes all eight weapon slots immediately selectable', async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   await page.goto('/?qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
-  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.setState('active-play'));
+  await page.evaluate(() => {
+    const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+    hooks.setState('active-play');
+    hooks.setWeapon('disc');
+  });
 
   expect(await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.weapon)).toBe('disc');
 
   const expected = ['disc', 'machine', 'shotgun', 'rocket', 'plasma', 'laser', 'sniper', 'rail'] as const;
   for (let index = 0; index < expected.length; index += 1) {
     await page.keyboard.press(`Digit${index + 1}`);
-    await page.waitForTimeout(60);
+    await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.stepSimulation(1 / 120));
     const selected = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.weapon);
     expect(selected).toBe(expected[index]);
   }

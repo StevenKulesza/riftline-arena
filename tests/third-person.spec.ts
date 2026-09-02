@@ -40,6 +40,11 @@ test('switches to a readable third-person player presentation', async ({ browser
   expect(thirdPerson?.viewMode).toBe('third-person');
   expect(thirdPerson?.player.avatarVisible).toBe(true);
   expect(thirdPerson?.player.modelMeshCount).toBeGreaterThanOrEqual(4);
+  expect(thirdPerson?.player.characterSource).toBe('combat-trooper');
+  expect(thirdPerson?.player.runtimeBoneCount).toBeGreaterThanOrEqual(60);
+  expect(thirdPerson?.player.runtimeAnimationCount).toBeGreaterThanOrEqual(20);
+  expect(thirdPerson?.player.sourceTriangleCount).toBeGreaterThan(30_000);
+  expect(thirdPerson?.player.sourceTextureCount).toBe(24);
   expect(thirdPerson?.player.firstPersonWeaponVisible).toBe(false);
   expect(thirdPerson?.player.thirdPersonWeaponVisible).toBe(true);
   expect(thirdPerson?.player.thirdPersonWeapon).toBe('machine');
@@ -48,6 +53,29 @@ test('switches to a readable third-person player presentation', async ({ browser
   expect(thirdPerson?.camera.distance).toBeGreaterThan(2.5);
   expect(thirdPerson?.camera.distance).toBeLessThan(3.7);
   expect(thirdPerson?.player.modelHeight).toBeGreaterThan(1.5);
+  expect(thirdPerson?.player.modelHeight).toBeLessThan(1.9);
+  expect(thirdPerson?.player.modelWidth).toBeGreaterThan(0.45);
+  expect(thirdPerson?.player.modelWidth).toBeLessThan(1);
+  expect(thirdPerson?.player.modelDepth).toBeGreaterThan(0.3);
+  expect(thirdPerson?.player.modelDepth).toBeLessThan(0.9);
+  expect(thirdPerson?.player.weaponSupportGripError).toBeLessThan(0.03);
+  for (const bot of thirdPerson?.bots ?? []) {
+    expect(bot.characterSource).toBe('combat-trooper');
+    expect(bot.runtimeBoneCount).toBeGreaterThanOrEqual(60);
+    expect(bot.runtimeAnimationCount).toBeGreaterThanOrEqual(20);
+    expect(bot.modelHeight).toBeGreaterThan(1.5);
+    expect(bot.modelHeight).toBeLessThan(1.9);
+    expect(bot.modelWidth).toBeLessThan(1);
+    expect(bot.weaponModel).toBe(bot.weapon);
+    expect(bot.weaponSupportGripError).toBeLessThan(0.03);
+  }
+  const shadowAudit = await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.getSceneShadowAudit());
+  expect(shadowAudit.environment.casters).toBeGreaterThan(0);
+  expect(shadowAudit.environment.receivers).toBeGreaterThan(0);
+  expect(shadowAudit.objects.casters).toBeGreaterThan(0);
+  expect(shadowAudit.characters.contactProjectors).toBeGreaterThanOrEqual(4);
+  expect(shadowAudit.drones.contactProjectors).toBeGreaterThanOrEqual(3);
+  expect(shadowAudit.fighters.contactProjectors).toBeGreaterThanOrEqual(4);
   if (!thirdPerson) throw new Error('Missing third-person diagnostics');
   const cameraOffset = {
     x: thirdPerson.camera.position.x - thirdPerson.player.position.x,

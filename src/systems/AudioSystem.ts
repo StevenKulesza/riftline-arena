@@ -285,9 +285,8 @@ export class AudioSystem {
     this.playPool(pool, `world:${cell}`, variance, spatial);
   }
 
-  hit(intensity = 1): void {
-    const pool = intensity > 1 ? CONFIRM_AUDIO_POOLS.elimination : CONFIRM_AUDIO_POOLS.hit;
-    this.playPool(pool, 'player', intensity);
+  hit(_intensity = 1): void {
+    this.playPool(CONFIRM_AUDIO_POOLS.hit, 'player', 0);
   }
 
   announceCountdown(cue: keyof typeof COUNTDOWN_AUDIO_POOLS): void {
@@ -584,6 +583,7 @@ export class AudioSystem {
     emitter: string,
     variance: number,
     spatial?: SpatialOptions,
+    playbackRate?: number,
   ): void {
     if (!this.canPlay()) return;
     const context = this.context;
@@ -597,7 +597,7 @@ export class AudioSystem {
     if (urls.length === 0) return;
     const url = this.selectVariant(pool.id, urls, variance);
     const buffer = this.buffers.get(url);
-    if (buffer) this.playBuffer(pool, buffer, variance, spatial);
+    if (buffer) this.playBuffer(pool, buffer, variance, spatial, playbackRate);
   }
 
   private startLoopIfReady(pool: AudioPool): void {
@@ -823,7 +823,7 @@ export class AudioSystem {
     return urls[index];
   }
 
-  private playBuffer(pool: AudioPool, buffer: AudioBuffer, variance: number, spatial?: SpatialOptions): void {
+  private playBuffer(pool: AudioPool, buffer: AudioBuffer, variance: number, spatial?: SpatialOptions, playbackRate?: number): void {
     const context = this.context;
     const group = this.groups.get(pool.group);
     if (!context || !group) return;
@@ -831,7 +831,7 @@ export class AudioSystem {
     const gain = context.createGain();
     source.buffer = buffer;
     source.loop = Boolean(pool.loop);
-    source.playbackRate.value = 1 + Math.max(-0.5, Math.min(0.5, variance)) * (pool.pitchVariance ?? 0);
+    source.playbackRate.value = playbackRate ?? (1 + Math.max(-0.5, Math.min(0.5, variance)) * (pool.pitchVariance ?? 0));
     gain.gain.value = pool.volume;
     const nodes = this.connectVoice(source, gain, group, spatial, pool.tone);
     this.trackVoice(source, nodes, pool.id, pool.maxVoices);

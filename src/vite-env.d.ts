@@ -48,6 +48,7 @@ interface ThreeGameDiagnostics {
     wantsToFire: boolean;
     facingDot: number;
     grounded: boolean;
+    velocity: { x: number; y: number; z: number };
     stepSuccesses: number;
     shotsFired: number;
     navigationTarget: { x: number; y: number; z: number };
@@ -60,6 +61,16 @@ interface ThreeGameDiagnostics {
     modelCenterZ: number;
     modelMeshCount: number;
     renderedMeshCount: number;
+    characterSource: 'combat-trooper';
+    runtimeBoneCount: number;
+    runtimeAnimationCount: number;
+    sourceTriangleCount: number;
+    sourceTextureCount: number;
+    animationName: string;
+    roleHardwareProfile: 'HUNTER' | 'ANCHOR' | 'RUNNER';
+    roleHardwareMeshCount: number;
+    weaponModel: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc' | null;
+    weaponSupportGripError: number;
     weaponSwitches: number;
     bunnyHops: number;
     jetpackActive: boolean;
@@ -149,6 +160,46 @@ interface ThreeGameDiagnostics {
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };
   }>;
+  flamethrowerDrones: Array<{
+    id: string;
+    kind: 'grenadier';
+    alive: boolean;
+    health: number;
+    maxHealth: number;
+    state: 'patrol' | 'stalk' | 'attack-windup' | 'attack-recover' | 'jump-anticipation' | 'airborne' | 'landing' | 'destroyed';
+    targetOwner: 'player' | number | null;
+    fireCooldown: number;
+    jumpCooldown: number;
+    respawnSeconds: number;
+    shotsFired: number;
+    jumps: number;
+    landings: number;
+    distanceWalked: number;
+    collisionRadius: number;
+    collisionHits: number;
+    modelReady: boolean;
+    partCount: number;
+    rigNodeCount: number;
+    sourceTriangles: number;
+    sourceAnimationCount: number;
+    sourceSkinCount: number;
+    animationSource: 'runtime-rigid';
+    loadError: string | null;
+    targetedByBots: number;
+    position: { x: number; y: number; z: number };
+    velocity: { x: number; y: number; z: number };
+  }>;
+  flamethrowerGrenade: {
+    launched: number;
+    explosions: number;
+    botHits: number;
+    lastBotHit: number | null;
+    sourceId: string;
+    targetOwner: 'player' | number | null;
+    origin: { x: number; y: number; z: number };
+    velocity: { x: number; y: number; z: number };
+    lastExplosionPosition: { x: number; y: number; z: number };
+  };
   busterDrones: Array<{
     id: string;
     kind: 'sentinel' | 'buster';
@@ -206,6 +257,7 @@ interface ThreeGameDiagnostics {
   projectiles: number;
   grenades: number;
   grenadeStates: Array<{
+    owner: 'player' | 'drone' | number;
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };
     bounces: number;
@@ -299,12 +351,11 @@ interface ThreeGameDiagnostics {
     environmentIntensity: number;
     exposure: number;
     shadow: {
-      type: 'VSMShadowMap';
+      type: 'PCFShadowMap';
       mapSize: number;
       extent: number;
       bias: number;
       normalBias: number;
-      blurSamples: number;
       casters: number;
       receivers: number;
     };
@@ -333,7 +384,17 @@ interface ThreeGameDiagnostics {
     jetpackPhase: 'ready' | 'burning' | 'available' | 'cooldown' | 'recharging' | 'depleted';
     jetpackRechargeDelay: number;
     jetpackRestartIn: number;
+    /** A fresh airborne Space press has armed thrust for as long as Space stays held. */
+    jetpackArmed: boolean;
     dashCooldown: number;
+    wallJumpCount: number;
+    wallJumpCooldown: number;
+    /** PMF_WALLJUMPING: air accel/control disabled until the post-wall-jump rise ends. */
+    wallJumpAirLockout: boolean;
+    /** Jumps that stacked on top of an existing ramp/stair rise. */
+    doubleJumpCount: number;
+    /** PM_STAT_KNOCKBACK seconds remaining (no friction, dash, strafe accel, or air control). */
+    knockbackLockout: number;
     wallContact: boolean;
     ceilingContact: boolean;
     yaw: number;
@@ -348,6 +409,13 @@ interface ThreeGameDiagnostics {
     thirdPersonWeaponVisible: boolean;
     thirdPersonWeapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc' | null;
     thirdPersonWeaponMeshes: number;
+    characterSource: 'combat-trooper';
+    runtimeBoneCount: number;
+    runtimeAnimationCount: number;
+    sourceTriangleCount: number;
+    sourceTextureCount: number;
+    animationName: string;
+    weaponSupportGripError: number;
   };
   camera: {
     distance: number;
@@ -364,7 +432,6 @@ interface ThreeGameDiagnostics {
   skiMomentum: {
     speedKmh: number;
     resistance: number;
-    gravityDriveScale: number;
     dragAcceleration: number;
   };
   physics: {
@@ -424,6 +491,8 @@ interface ThreeGameDiagnostics {
   combat: {
     lastDamageDirection: string;
     lastDamageBearing: number;
+    lastHitDamage: number;
+    weaponCooldown: number;
     secondaryAbility: string;
     altFireHeld: boolean;
     continuousLaserActive: boolean;
@@ -552,6 +621,8 @@ interface ThreeGameTestHooks {
   ): void;
   /** Stage one Buster on a real clear sightline for deterministic shard QA. */
   stageBusterAttack(id: string, targetOwner: 'player' | number): boolean;
+  /** Stage one walking grenadier on a real clear sightline for lob QA. */
+  stageFlamethrowerAttack(id: string, targetOwner: 'player' | number): boolean;
   /** Fire the equipped weapon once for deterministic combat/VFX captures. */
   fireWeapon(): void;
   /** Trigger deterministic hit/kill reticle feedback for HUD verification. */
@@ -571,6 +642,10 @@ interface ThreeGameTestHooks {
   setReducedMotion(enabled: boolean): void;
   /** Advance the fixed 120 Hz simulation without relying on browser wall time. */
   stepSimulation(seconds: number): void;
+  /** Queue a fresh jump press without going through the keyboard (QA isolation). */
+  queueJumpPress(): void;
+  /** Queue a dash the same way stepSimulation consumes KeyE (QA isolation). */
+  queueDash(): void;
   /** Advance only hostile drone flight/lifecycle state with combat targets disabled. */
   stepDrones(seconds: number): void;
   /** Advance short-lived weapon presentation independently for deterministic VFX review. */
@@ -587,6 +662,11 @@ interface ThreeGameTestHooks {
     velocity: { x: number; y: number; z: number },
     yaw?: number,
   ): boolean;
+  /** Stage the three tactical bot silhouettes and their real equipped weapons for visual QA. */
+  stageCharacterLineup(): {
+    camera: { x: number; y: number; z: number };
+    target: { x: number; y: number; z: number };
+  };
   /** Stage a fast player and bot for deterministic blur/trail screenshots. */
   setSpeedCapture(speedKmh: number): void;
   /** Hide debug UI (lil-gui) before capturing. */
@@ -662,6 +742,21 @@ interface ThreeGameTestHooks {
     shadowDraws: number;
     triangles: number;
     instances: number;
+  }>;
+  /** Authored spawn-cubby bunker kit: hull/trim/signal instance counts and collider names. */
+  getSpawnCubbyBunkerAudit(): {
+    count: number;
+    hullInstances: number;
+    trimInstances: number;
+    signalInstances: number;
+    names: string[];
+  } | null;
+  /** Scene-wide cast/receive coverage grouped by gameplay role. */
+  getSceneShadowAudit(): Record<'characters' | 'drones' | 'fighters' | 'objects' | 'environment', {
+    meshes: number;
+    casters: number;
+    receivers: number;
+    contactProjectors: number;
   }>;
 }
 

@@ -43,12 +43,11 @@ export type MapLightingDiagnostics = Readonly<{
   environmentIntensity: number;
   exposure: number;
   shadow: Readonly<{
-    type: 'VSMShadowMap';
+    type: 'PCFShadowMap';
     mapSize: number;
     extent: number;
     bias: number;
     normalBias: number;
-    blurSamples: number;
     casters: number;
     receivers: number;
   }>;
@@ -117,8 +116,9 @@ function createContactShadowTexture(): THREE.CanvasTexture {
   // alphaMap samples the texture's green channel, not its alpha channel.
   // Encode the falloff as grayscale so the quad never reads as a rectangle.
   gradient.addColorStop(0, 'rgb(255,255,255)');
-  gradient.addColorStop(0.42, 'rgb(196,196,196)');
-  gradient.addColorStop(0.76, 'rgb(58,58,58)');
+  gradient.addColorStop(0.34, 'rgb(226,226,226)');
+  gradient.addColorStop(0.67, 'rgb(92,92,92)');
+  gradient.addColorStop(0.9, 'rgb(18,18,18)');
   gradient.addColorStop(1, 'rgb(0,0,0)');
   context.fillStyle = gradient;
   context.fillRect(0, 0, canvas.width, canvas.height);
@@ -133,8 +133,9 @@ function createContactShadowTexture(): THREE.CanvasTexture {
 
 /**
  * One coherent, performance-bounded lighting stack for both authored maps.
- * The directional atlas is static world lighting; moving actors use a single
- * instanced contact-shadow draw so they never leave frozen shadows behind.
+ * The directional atlas owns the static world while one batched contact layer
+ * grounds moving characters and vehicles. This keeps buildings and props on
+ * full soft sun shadows without resubmitting the arena when an actor moves.
  */
 export class MapLightingRig {
   readonly root = new THREE.Group();
@@ -202,7 +203,6 @@ export class MapLightingRig {
     this.key.shadow.bias = -0.00008;
     this.key.shadow.normalBias = this.profile.normalBias;
     this.key.shadow.radius = mobileQuality ? 1.6 : 2.25;
-    this.key.shadow.blurSamples = mobileQuality ? 4 : 8;
 
     this.fill = new THREE.DirectionalLight(this.profile.fillColor, this.profile.fillIntensity);
     this.fill.name = `${mapName} playable-side fill`;
@@ -221,7 +221,7 @@ export class MapLightingRig {
       depthTest: true,
       depthWrite: false,
       fog: true,
-      opacity: this.profileName === 'quicksense' ? 0.29 : 0.25,
+      opacity: this.profileName === 'quicksense' ? 0.44 : 0.38,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       side: THREE.DoubleSide,
@@ -292,7 +292,7 @@ export class MapLightingRig {
     this.contactMesh.instanceMatrix.needsUpdate = true;
   }
 
-  /** Excludes moving meshes from the one-time static world atlas. */
+  /** Moving silhouettes use the dedicated contact-shadow batch. */
   excludeDynamicShadowCasters(roots: readonly THREE.Object3D[]): void {
     for (const root of roots) {
       root.traverse((object) => {
@@ -328,12 +328,11 @@ export class MapLightingRig {
       environmentIntensity: this.environmentIntensity,
       exposure: this.exposure,
       shadow: {
-        type: 'VSMShadowMap',
+        type: 'PCFShadowMap',
         mapSize: this.key.shadow.mapSize.x,
         extent: this.shadowExtent,
         bias: this.key.shadow.bias,
         normalBias: this.key.shadow.normalBias,
-        blurSamples: this.key.shadow.blurSamples,
         casters,
         receivers,
       },

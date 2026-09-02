@@ -197,10 +197,10 @@ type SurfaceTextureSet = {
 };
 
 const SPAWN_XZ: ReadonlyArray<readonly [number, number]> = [
-  [-92, 70], [80, 60], [-48, -55], [55, -62],
-  [-150, 90], [145, 80], [-136, -109], [128, -114],
-  [-84, 137], [82, 137], [-178, 25], [174, 20],
-  [0, -148], [0, 132], [-110, -10],
+  [-99, 64], [89, 68], [-60, -58], [51, -73],
+  [-158, 90], [153, 79], [-130, -101], [160, -40],
+  [-75, 130], [75, 130], [-179, 33], [176, 28],
+  [6, -140], [-10, 130], [-109, -22],
 ];
 
 const ITEM_XZ: Readonly<Record<string, readonly [number, number]>> = {
@@ -452,6 +452,7 @@ export class Arena implements ArenaRuntime {
 
     this.registerGameplayColliders();
     this.registerConcreteTraversal();
+    this.registerCoverLayout();
     this.registerRockField();
     const collisionParts = [this.positionOnlyGeometry(terrain.geometry)];
     for (const collider of this.colliders) collisionParts.push(this.geometryFromBox(collider.box));
@@ -748,6 +749,8 @@ export class Arena implements ArenaRuntime {
     this.correction.y += correctionY;
     const intoSurface = velocity.dot(this.contactNormal);
     if (intoSurface < 0) velocity.addScaledVector(this.contactNormal, -intoSurface);
+    // ClipVelocity only. PM_StepSlideMove ramp preserve (restore pre-move 2D
+    // speed, keep this Z, un-ground if Z is a launch) lives in Game.pmove.
     // Grounding depends on separation from the contact plane, not world-Y
     // velocity. A skier climbing a ramp can have strong upward velocity while
     // remaining exactly tangent to the riding surface.
@@ -821,6 +824,11 @@ export class Arena implements ArenaRuntime {
 
   floorHeightAt(x: number, z: number, fromY = 96): number | null {
     return this.floorSurfaceAt(x, z, fromY)?.height ?? null;
+  }
+
+  /** Support normal of the highest floor at or below `fromY` (shared scratch; copy to keep). */
+  surfaceNormalAt(x: number, z: number, fromY = Number.POSITIVE_INFINITY): THREE.Vector3 | null {
+    return this.floorSurfaceAt(x, z, fromY)?.normal ?? null;
   }
 
   private floorSurfaceAt(
@@ -1474,6 +1482,202 @@ export class Arena implements ArenaRuntime {
     );
   }
 
+  /**
+   * Deck-17 / Katabatic cover pass: low hard cover at every pickup, mid-bowl
+   * sightline breakers, and a visible perimeter berm just inside the AABB.
+   * Collision is registered here so the merged BVH matches the concrete mesh.
+   */
+  private registerCoverLayout(): void {
+    const addBox = (
+      name: string,
+      x: number,
+      z: number,
+      width: number,
+      minY: number,
+      maxY: number,
+      depth: number,
+    ): void => {
+      const box = new THREE.Box3(
+        new THREE.Vector3(x - width * 0.5, minY, z - depth * 0.5),
+        new THREE.Vector3(x + width * 0.5, maxY, z + depth * 0.5),
+      );
+      this.concreteBoxes.push(box);
+      this.colliders.push({ name, box });
+    };
+    const addGroundedBox = (
+      name: string,
+      x: number,
+      z: number,
+      width: number,
+      height: number,
+      depth: number,
+    ): void => {
+      const y = sampleMonsoonHeight(x, z, this.seed);
+      addBox(name, x, z, width, y, y + height, depth);
+    };
+    const supportYAt = (x: number, z: number): number => {
+      let supportY = sampleMonsoonHeight(x, z, this.seed);
+      for (const platform of this.platformSurfaces) {
+        if (
+          x >= platform.minX && x <= platform.maxX
+          && z >= platform.minZ && z <= platform.maxZ
+        ) {
+          supportY = Math.max(supportY, platform.y);
+        }
+      }
+      for (const ramp of this.rampSurfaces) {
+        const rampY = this.rampHeightAt(ramp, x, z);
+        if (rampY !== null) supportY = Math.max(supportY, rampY);
+      }
+      return supportY;
+    };
+    const addPickupCover = (
+      name: string,
+      pickupX: number,
+      pickupZ: number,
+      offsetX: number,
+      offsetZ: number,
+      width: number,
+      depth: number,
+    ): void => {
+      const x = pickupX + offsetX;
+      const z = pickupZ + offsetZ;
+      const pickupY = supportYAt(pickupX, pickupZ);
+      const localY = supportYAt(x, z);
+      const wallHeight = 1.48;
+      const wallBase = pickupY;
+      const wallTop = pickupY + wallHeight;
+      if (wallBase - localY > 0.28) {
+        addBox(`${name}-footing`, x, z, width * 0.78, localY, wallBase, depth * 0.78);
+      }
+      addBox(name, x, z, width, wallBase, wallTop, depth);
+    };
+
+    addPickupCover('rail-cover-west', -158, 96, -5, 0, 0.9, 3.1);
+    addPickupCover('rocket-cover-north', -148, -86, 0, 5, 2.8, 0.85);
+    addPickupCover('disc-cover-north', -144.8, -87.8, 0, 5, 2.8, 0.85);
+    addPickupCover('sniper-cover-south', 139, 93, 0, -5, 3.2, 0.9);
+    addPickupCover('damage-cover-east', 0, -31, 5, 0, 0.85, 2.8);
+    addPickupCover('damage-cover-north', 0, -31, 0, 5, 2.8, 0.85);
+    addPickupCover('health-a-cover-north', -58, -42, 0, 5, 2.8, 0.85);
+    addPickupCover('health-a-cover-east', -58, -42, 5, 0, 0.85, 2.6);
+    addPickupCover('health-b-cover-north', 68, 34, 0, 5, 2.8, 0.85);
+    addPickupCover('health-b-cover-south', 68, 34, 0, -5, 2.8, 0.85);
+    addPickupCover('armor-cover-east', -98, 28, 5, 0, 0.85, 2.8);
+    addPickupCover('armor-cover-west', -98, 28, -5, 0, 0.85, 2.8);
+    addPickupCover('speed-cover-south', 112, -88, 0, -7, 2.8, 0.85);
+    addPickupCover('plasma-cover-north', 113, 63, 0, 5, 3.0, 0.9);
+    addPickupCover('shotgun-cover-west', 16, -86, -5, 0, 0.85, 2.8);
+    addPickupCover('laser-cover-east', -78, 136, 5, 0, 0.85, 2.8);
+    // Local cubby at the east-slope pad. The old (125, −104) pad sat on ski
+    // corridor 1; this pad is ~62 m off that line and behind the eastern
+    // massif so west-ridge LOS dies in terrain instead of a midfield slab.
+    addPickupCover('spawn-east-slope-west', 160, -40, -5, 0, 0.9, 3.1);
+    addPickupCover('spawn-east-slope-south', 160, -40, 0, -5, 3.2, 0.9);
+    // Deck-17 cubby on the north-rim pad. SPAWN (75, 130) → (−130, −101) is a
+    // 309 m rail; 8 m along that chord is ~84 m off ski corridor 2. A bunker
+    // wall here clips eye-height LOS without a fifth column at x≈110.
+    addGroundedBox('spawn-north-east-cubby', 69.7, 124, 4.6, 5.8, 3.2);
+    // Deck-17 cubby on the inner-west pad. SPAWN (153, 79) → (−109, −22) is a
+    // 281 m rail; 8 m along that chord is ~45 m off ski corridor 2. The 8 m
+    // step drops ~7 m into a ravine, so the lid is pad height + 5.8 m (not
+    // local-grounded 5.8 m) or the eye ray flies over. Do not put a box at
+    // x≈110, z≈62 — that ray is 18 m off the grade, inside halfWidth 20.
+    {
+      const cubbyX = -101.5;
+      const cubbyZ = -19.1;
+      const padY = supportYAt(-109, -22);
+      const localY = supportYAt(cubbyX, cubbyZ);
+      addBox('spawn-inner-west-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+    }
+    // Old pad (89, 55) sat 13 m off ski corridor 2 (inside halfWidth 20); the
+    // 269 m rail to (−130, −101) ran 3–13 m off the grade. Nudge north to
+    // (89, 68) (≥25 m off corridor 2), then a pad-height cubby 8 m along the
+    // new chord. Do not wall corridor 2 and do not cubby the SW pad.
+    {
+      const cubbyX = 82.7;
+      const cubbyZ = 63.1;
+      const padY = supportYAt(89, 68);
+      const localY = supportYAt(cubbyX, cubbyZ);
+      addBox('spawn-inner-east-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+    }
+    // Leftover after maps B: (89, 68) → (−158, 90) is 248 m CLEAR. The SW
+    // cubby at (82.7, 63.1) misses this chord. 8 m along it is (81.0, 68.7),
+    // 27.6 m off corridor 2. Do not cubby (−158, 90) (8 m back is on corridor 1).
+    {
+      const cubbyX = 81.0;
+      const cubbyZ = 68.7;
+      const padY = supportYAt(89, 68);
+      const localY = supportYAt(cubbyX, cubbyZ);
+      addBox('spawn-inner-east-ridge-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+    }
+    // SPAWN (51, −73) → (−158, 90) is a 265 m rail along ski corridor 1.
+    // 8 m along that chord is (44.7, −68.1), 25.8 m off the grade (outside
+    // halfWidth 20). Pad-height lid — do not cubby (−158, 90) (7 m off
+    // corridor 1) and do not drop a midfield wall on the ski.
+    {
+      const cubbyX = 44.7;
+      const cubbyZ = -68.1;
+      const padY = supportYAt(51, -73);
+      const localY = supportYAt(cubbyX, cubbyZ);
+      addBox('spawn-inner-south-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+    }
+    // SPAWN (−99, 64) → (153, 79) is a 252 m rail. 8 m along that chord sits
+    // 17.6 m off ski corridor 1 (inside halfWidth 20). 24 m lands at
+    // (−75.0, 65.4), off the grade. Pad-height lid — local floor drops 10.9 m.
+    // Do not cubby (153, 79) (8 m back is on corridor 2) and do not wall the bowl.
+    {
+      const cubbyX = -75.0;
+      const cubbyZ = 65.4;
+      const padY = supportYAt(-99, 64);
+      const localY = supportYAt(cubbyX, cubbyZ);
+      addBox('spawn-northwest-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+    }
+
+    const midfieldBreakers: Array<{
+      name: string;
+      x: number;
+      z: number;
+      width: number;
+      height: number;
+      depth: number;
+    }> = [
+      { name: 'midfield-north-breaker', x: 8, z: 34, width: 4.6, height: 5.8, depth: 3.2 },
+      { name: 'midfield-northwest-breaker', x: -32, z: 32, width: 3.8, height: 6.4, depth: 4.2 },
+      { name: 'midfield-southeast-breaker', x: 32, z: -28, width: 4.2, height: 5.4, depth: 3.6 },
+      // On the rocket (−148, −86) → sniper (139, 93) chord, past the ski
+      // corridor. A bowl-floor 6 m box cannot reach that 38 m LOS.
+      { name: 'midfield-rocket-sniper-breaker', x: 110, z: 75, width: 8.4, height: 18, depth: 6.2 },
+      // Rail (−158, 96) → sniper (139, 93) is a 297 m east-west chord at z≈94.
+      // The rocket-sniper box at z=75 misses it by ~15 m. Sniper sits inside
+      // east-weather-station; a roof/cabin eye is ~52 m, so 16 m from terrain
+      // 28 leaves the lid at 44 and the ray flies over.
+      { name: 'midfield-rail-sniper-breaker', x: 109, z: 93, width: 8.4, height: 28, depth: 6.2 },
+      // SPAWN (−158, 90) → (153, 79) is a 311 m shelf chord at z≈81, 2.4 m
+      // north of the rocket box and 9.3 m south of the rail box. Eye ~60 m
+      // over terrain ~23 m, so a 18 m lid cannot reach it.
+      { name: 'midfield-spawn-shelf-breaker', x: 109, z: 81, width: 8.4, height: 40, depth: 6.2 },
+      // SPAWN (153, 79) → (−130, −101) is a 335 m rail along ski corridor 2.
+      // At x=110 the ray is z≈52, ~7.5 m north of the grade centerline
+      // (halfWidth 20). A 5.2 m nunatak sits in that offset so the ski still
+      // runs south of it; do not span the 40 m run with a wall.
+      { name: 'ski-corridor-2-nunatak', x: 110.5, z: 52, width: 5.2, height: 28, depth: 5.2 },
+    ];
+    for (const breaker of midfieldBreakers) {
+      addGroundedBox(breaker.name, breaker.x, breaker.z, breaker.width, breaker.height, breaker.depth);
+    }
+
+    const halfWidth = MONSOON_DIVIDE.width * 0.5 - 4;
+    const halfDepth = MONSOON_DIVIDE.depth * 0.5 - 4;
+    const bermThickness = 3.2;
+    const bermBottom = MONSOON_DIVIDE.waterY - 1.2;
+    const bermTop = MONSOON_DIVIDE.waterY + 2.4;
+    addBox('perimeter-berm-north', 0, halfDepth - bermThickness * 0.5, halfWidth * 2, bermBottom, bermTop, bermThickness);
+    addBox('perimeter-berm-south', 0, -(halfDepth - bermThickness * 0.5), halfWidth * 2, bermBottom, bermTop, bermThickness);
+    addBox('perimeter-berm-east', halfWidth - bermThickness * 0.5, 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
+    addBox('perimeter-berm-west', -(halfWidth - bermThickness * 0.5), 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
+  }
+
   private rampHeightAt(ramp: RampSurface, x: number, z: number): number | null {
     return ramp.flow.heightAt(x, z);
   }
@@ -1514,11 +1718,14 @@ export class Arena implements ArenaRuntime {
 
     const boxGeometry = new RoundedBoxGeometry(1, 1, 1, 1, 0.075);
     this.geometries.push(boxGeometry);
-    const boxes = new THREE.InstancedMesh(boxGeometry, concrete, this.concreteBoxes.length);
+    const cubbyColliders = this.colliders.filter((collider) => collider.name.includes('cubby'));
+    const cubbyBoxes = new Set(cubbyColliders.map((collider) => collider.box));
+    const structuralBoxes = this.concreteBoxes.filter((box) => !cubbyBoxes.has(box));
+    const boxes = new THREE.InstancedMesh(boxGeometry, concrete, structuralBoxes.length);
     boxes.name = 'MonsoonEnterableConcreteStructures';
     const matrix = new THREE.Matrix4();
     const identity = new THREE.Quaternion();
-    this.concreteBoxes.forEach((box, index) => {
+    structuralBoxes.forEach((box, index) => {
       matrix.compose(box.getCenter(new THREE.Vector3()), identity, box.getSize(new THREE.Vector3()));
       boxes.setMatrixAt(index, matrix);
     });
@@ -1659,6 +1866,20 @@ export class Arena implements ArenaRuntime {
     addFoundationDetails('east-weather-station-terrain-foundation');
     addFoundationDetails('south-underpass-terrain-foundation');
 
+    const cubbyHulls: DetailTransform[] = [];
+    const cubbyDark: DetailTransform[] = [];
+    const cubbySignal: DetailTransform[] = [];
+    for (const collider of cubbyColliders) {
+      this.dressSpawnCubbyBunker(collider.box, addDetail, cubbyHulls, cubbyDark, cubbySignal);
+    }
+    this.group.userData.spawnCubbyBunkers = {
+      count: cubbyColliders.length,
+      hullInstances: cubbyHulls.length,
+      trimInstances: cubbyDark.length,
+      signalInstances: cubbySignal.length,
+      names: cubbyColliders.map((collider) => collider.name),
+    };
+
     const tunnelFloor = this.platformSurfaces.find((platform) => platform.name === 'south-underpass-floor');
     const tunnelRoof = this.platformSurfaces.find((platform) => platform.name === 'south-underpass-roof');
     if (tunnelFloor && tunnelRoof) {
@@ -1764,6 +1985,15 @@ export class Arena implements ArenaRuntime {
     const toes = buildDetails(concreteDetails, concrete, 'MonsoonRampBuriedConcreteToes');
     const trims = buildDetails(darkDetails, structuralDark, 'MonsoonConcreteStructuralTrims');
     const accents = buildDetails(signalDetails, signal, 'MonsoonConcreteNavigationAccents');
+    const cubbyHullMesh = cubbyHulls.length > 0
+      ? buildDetails(cubbyHulls, concrete, 'MonsoonSpawnCubbyBunkerHulls')
+      : null;
+    const cubbyTrimMesh = cubbyDark.length > 0
+      ? buildDetails(cubbyDark, structuralDark, 'MonsoonSpawnCubbyBunkerTrims')
+      : null;
+    const cubbySignalMesh = cubbySignal.length > 0
+      ? buildDetails(cubbySignal, signal, 'MonsoonSpawnCubbyBunkerSignals')
+      : null;
     const rampDarkGeometry = mergeGeometries(rampDarkParts, false);
     const rampSignalGeometry = mergeGeometries(rampSignalParts, false);
     for (const part of [...rampDarkParts, ...rampSignalParts]) part.dispose();
@@ -1774,6 +2004,86 @@ export class Arena implements ArenaRuntime {
     const rampSignals = new THREE.Mesh(rampSignalGeometry, signal);
     rampSignals.name = 'MonsoonCurvedRampCenterGuides';
     this.group.add(aprons, boxes, ramps, signs, toes, trims, accents, rampTrims, rampSignals);
+    if (cubbyHullMesh) this.group.add(cubbyHullMesh);
+    if (cubbyTrimMesh) this.group.add(cubbyTrimMesh);
+    if (cubbySignalMesh) this.group.add(cubbySignalMesh);
+  }
+
+  /**
+   * Visual bunker kit for spawn cubbies. Collision stays on the original AABB
+   * so LOS tests keep matching the authored cover chords.
+   */
+  private dressSpawnCubbyBunker(
+    box: THREE.Box3,
+    addDetail: (
+      target: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 }>,
+      position: THREE.Vector3,
+      scale: THREE.Vector3,
+      quaternion?: THREE.Quaternion,
+    ) => void,
+    hulls: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 }>,
+    dark: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 }>,
+    signal: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 }>,
+  ): void {
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    addDetail(hulls, center, size);
+    addDetail(
+      dark,
+      new THREE.Vector3(center.x, box.max.y + 0.14, center.z),
+      new THREE.Vector3(size.x + 0.38, 0.28, size.z + 0.38),
+    );
+    addDetail(
+      dark,
+      new THREE.Vector3(center.x, box.min.y + 0.16, center.z),
+      new THREE.Vector3(size.x + 0.24, 0.32, size.z + 0.24),
+    );
+    for (const sideX of [-1, 1]) {
+      for (const sideZ of [-1, 1]) {
+        addDetail(
+          dark,
+          new THREE.Vector3(
+            center.x + sideX * (size.x * 0.5 - 0.18),
+            center.y,
+            center.z + sideZ * (size.z * 0.5 - 0.18),
+          ),
+          new THREE.Vector3(0.44, size.y * 0.94, 0.44),
+        );
+      }
+    }
+    const fasciaZ = center.z + size.z * 0.5 + 0.06;
+    addDetail(
+      signal,
+      new THREE.Vector3(center.x, box.max.y - 0.22, fasciaZ),
+      new THREE.Vector3(size.x * 0.62, 0.1, 0.08),
+    );
+    addDetail(
+      dark,
+      new THREE.Vector3(center.x, center.y - size.y * 0.08, fasciaZ),
+      new THREE.Vector3(1.15, size.y * 0.42, 0.12),
+    );
+    addDetail(
+      signal,
+      new THREE.Vector3(center.x, center.y - size.y * 0.08, fasciaZ + 0.04),
+      new THREE.Vector3(0.72, size.y * 0.18, 0.06),
+    );
+    addDetail(
+      dark,
+      new THREE.Vector3(center.x + size.x * 0.18, box.max.y + 0.82, center.z - size.z * 0.12),
+      new THREE.Vector3(0.1, 1.36, 0.1),
+    );
+    addDetail(
+      signal,
+      new THREE.Vector3(center.x + size.x * 0.18, box.max.y + 1.52, center.z - size.z * 0.12),
+      new THREE.Vector3(0.22, 0.12, 0.22),
+    );
+    for (const side of [-1, 1]) {
+      addDetail(
+        dark,
+        new THREE.Vector3(center.x, center.y + size.y * 0.12, center.z + side * (size.z * 0.5 + 0.03)),
+        new THREE.Vector3(size.x * 0.78, 0.08, 0.07),
+      );
+    }
   }
 
   private createConcreteTexture(): THREE.CanvasTexture {
@@ -2820,13 +3130,9 @@ export class Arena implements ArenaRuntime {
     });
     this.materials.push(animalMaterial, shadowMaterial, beetleMaterial, birdMaterial);
 
-    this.animalRoutes.push(
-      { centerX: -171, centerZ: 8, radiusX: 14, radiusZ: 9, phase: 0.2, speed: 0.12 },
-      { centerX: 169, centerZ: -18, radiusX: 12, radiusZ: 15, phase: 1.7, speed: 0.1 },
-      { centerX: -73, centerZ: 145, radiusX: 18, radiusZ: 8, phase: 3.2, speed: 0.085 },
-      { centerX: 80, centerZ: 143, radiusX: 16, radiusZ: 9, phase: 4.8, speed: 0.095 },
-      { centerX: 4, centerZ: -154, radiusX: 22, radiusZ: 7, phase: 5.6, speed: 0.08 },
-    );
+    // The passive quadruped grazers were replaced by the three combat-capable
+    // flamethrower grenadiers managed by Game. Ambient birds and beetles stay
+    // here so the biome retains its small-scale life and motion.
     const animalCount = this.animalRoutes.length;
     const beetleCount = window.matchMedia('(pointer: coarse)').matches ? 12 : 24;
     const birdCount = window.matchMedia('(pointer: coarse)').matches ? 7 : 12;

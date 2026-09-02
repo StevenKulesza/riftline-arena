@@ -85,7 +85,6 @@ export type HudState = {
 };
 
 type OverlayMode = 'ready' | 'paused' | 'complete';
-
 export class Hud {
   private readonly health = this.element('#health-value');
   private readonly armor = this.element('#armor-value');
@@ -156,6 +155,7 @@ export class Hud {
   private readonly respawnOverlay = this.element('#respawn-overlay');
   private readonly respawnText = this.element('#respawn-text');
   private readonly killFeed = this.element('#kill-feed');
+  private readonly elimFeed = this.element('#elim-feed');
   private readonly overlayTagline = this.element('#overlay-tagline');
   private readonly overlayFootnote = this.element('#overlay-footnote');
   private readonly startButton = this.element<HTMLButtonElement>('#start-button');
@@ -300,15 +300,24 @@ export class Hud {
   }
 
   hitMarker(kill = false): void {
-    this.crosshair.classList.remove('hit', 'kill');
-    this.scopeOverlay.classList.remove('hit', 'kill');
+    this.crosshair.classList.remove('hit', 'kill', 'hit-light', 'hit-medium', 'hit-heavy');
+    this.scopeOverlay.classList.remove('hit', 'kill', 'hit-light', 'hit-medium', 'hit-heavy');
+    delete this.crosshair.dataset.tier;
     void this.crosshair.offsetWidth;
     this.crosshair.classList.add(kill ? 'kill' : 'hit');
     this.scopeOverlay.classList.add(kill ? 'kill' : 'hit');
     window.setTimeout(() => {
-      this.crosshair.classList.remove('hit', 'kill');
-      this.scopeOverlay.classList.remove('hit', 'kill');
+      this.crosshair.classList.remove('hit', 'kill', 'hit-light', 'hit-medium', 'hit-heavy');
+      this.scopeOverlay.classList.remove('hit', 'kill', 'hit-light', 'hit-medium', 'hit-heavy');
     }, kill ? 180 : 100);
+  }
+
+  killConfirm(text: string): void {
+    const line = document.createElement('div');
+    line.textContent = text;
+    this.elimFeed.prepend(line);
+    while (this.elimFeed.children.length > 3) this.elimFeed.lastElementChild?.remove();
+    window.setTimeout(() => line.remove(), 2400);
   }
 
   damage(direction = '', bearingRadians = 0, strength = 0.5): void {
