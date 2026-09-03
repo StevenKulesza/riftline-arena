@@ -34,6 +34,23 @@ for (const mode of modes) {
     if (mode.id === 'ctf') {
       expect(active.flags).toHaveLength(2);
       expect(new Set(active.flags.map((flag) => flag.team))).toEqual(new Set(['azure', 'crimson']));
+      expect(new Set(active.flags.map((flag) => flag.modelId))).toEqual(new Set(['riftline-ctf-standard-v2']));
+      expect(new Set(active.flags.map((flag) => flag.geometrySignature))).toEqual(new Set([
+        'cloth-11x7-1.34x0.76|pole-3.04|plinth-1.08-v2',
+      ]));
+      active.flags.forEach((flag) => {
+        expect(flag.physics).toMatchObject({
+          engine: 'custom-verlet-cloth',
+          modelId: 'riftline-ctf-standard-v2',
+          geometrySignature: 'cloth-11x7-1.34x0.76|pole-3.04|plinth-1.08-v2',
+          objectTimestep: 1 / 120,
+          clothTimestep: 1 / 60,
+          bodyCount: 1,
+          colliderCount: 1,
+          clothVertices: 77,
+          mode: 'base',
+        });
+      });
       await expect(page.locator('#core-location')).toHaveText('AZURE BASE // CRIMSON BASE');
     } else if (mode.id === 'raid') {
       expect(active.raid).toMatchObject({ uplinksSecured: 0, uplinkTarget: 3, activeUplink: 0 });
@@ -59,7 +76,7 @@ const ctfLayouts = [
   {
     query: '&map=quicksense',
     name: 'QuickSense',
-    positions: [[-10, -276], [10, 276]],
+    positions: [[-308, -72], [308, 72]],
   },
 ] as const;
 

@@ -306,6 +306,24 @@ interface ThreeGameDiagnostics {
     atBase: boolean;
     droppedSeconds: number;
     position: { x: number; y: number; z: number };
+    modelId: 'riftline-ctf-standard-v2';
+    geometrySignature: 'cloth-11x7-1.34x0.76|pole-3.04|plinth-1.08-v2';
+    physics: {
+      engine: 'custom-verlet-cloth';
+      modelId: 'riftline-ctf-standard-v2';
+      geometrySignature: 'cloth-11x7-1.34x0.76|pole-3.04|plinth-1.08-v2';
+      objectTimestep: number;
+      clothTimestep: number;
+      bodyCount: 1;
+      colliderCount: 1;
+      clothVertices: number;
+      clothConstraints: number;
+      mode: 'base' | 'carried' | 'dropped';
+      grounded: boolean;
+      bounces: number;
+      maxClothDeflection: number;
+      velocity: { x: number; y: number; z: number };
+    };
   }>;
   coreProgress: number;
   core: {
