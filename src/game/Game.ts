@@ -7197,9 +7197,13 @@ export class Game {
             0,
             132 * MONSOON_WORLD_SCALE,
           );
+          const floor = this.arena.floorHeightAt(
+            movementFlatSpawn.x,
+            movementFlatSpawn.z,
+            Number.POSITIVE_INFINITY,
+          );
+          if (floor !== null) movementFlatSpawn.y = floor;
           this.playerPosition.copy(movementFlatSpawn);
-          const floor = this.arena.floorHeightAt(this.playerPosition.x, this.playerPosition.z, this.playerPosition.y + 3);
-          if (floor !== null) this.playerPosition.y = floor;
           this.playerVelocity.set(0, 0, 0);
           this.jumpBuffer = 0;
           this.coyote = 0;
