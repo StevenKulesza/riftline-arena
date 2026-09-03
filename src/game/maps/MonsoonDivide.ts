@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 /** Authored layout lives in this design space; public sampling is world metres. */
-export const MONSOON_WORLD_SCALE = 2;
+export const MONSOON_WORLD_SCALE = 8;
 const MONSOON_DESIGN_WIDTH = 480;
 const MONSOON_DESIGN_DEPTH = 400;
 const MONSOON_DESIGN_WATER_Y = -9.5;
@@ -10,12 +10,12 @@ const MONSOON_DESIGN_KILL_Y = -13.5;
 export const MONSOON_DIVIDE = {
   id: 'monsoon-divide',
   name: 'Monsoon Divide',
-  generationVersion: 6,
+  generationVersion: 13,
   seed: 0x4d4f4e53,
   width: MONSOON_DESIGN_WIDTH * MONSOON_WORLD_SCALE,
   depth: MONSOON_DESIGN_DEPTH * MONSOON_WORLD_SCALE,
-  segmentsX: 120,
-  segmentsZ: 100,
+  segmentsX: 240,
+  segmentsZ: 200,
   waterY: MONSOON_DESIGN_WATER_Y * MONSOON_WORLD_SCALE,
   killY: MONSOON_DESIGN_KILL_Y * MONSOON_WORLD_SCALE,
 } as const;
@@ -157,11 +157,13 @@ function sampleRidgeline(x: number, z: number, nodes: Ridgeline): number {
     const dx = x - THREE.MathUtils.lerp(ax, bx, t);
     const dz = z - THREE.MathUtils.lerp(az, bz, t);
     const halfWidth = THREE.MathUtils.lerp(aWidth, bWidth, t);
-    const normalizedDistance = Math.hypot(dx, dz) / halfWidth;
-    const foothill = (1 - smoothstep(1.28, 2.05, normalizedDistance)) * 0.2;
-    const lowerBench = (1 - smoothstep(0.76, 1.3, normalizedDistance)) * 0.25;
-    const upperBench = (1 - smoothstep(0.32, 0.82, normalizedDistance)) * 0.31;
-    const crown = Math.exp(-Math.pow(normalizedDistance / 0.43, 2) * 0.5) * 0.24;
+    const signedSide = (abx * dz - abz * dx) / Math.sqrt(lengthSquared);
+    const faceWidth = signedSide >= 0 ? 1.52 : 0.92;
+    const normalizedDistance = Math.hypot(dx, dz) / (halfWidth * faceWidth);
+    const foothill = (1 - smoothstep(1.28, 2.15, normalizedDistance)) * 0.24;
+    const lowerBench = (1 - smoothstep(0.76, 1.34, normalizedDistance)) * 0.28;
+    const upperBench = (1 - smoothstep(0.32, 0.84, normalizedDistance)) * 0.28;
+    const crown = Math.exp(-Math.pow(normalizedDistance / 0.48, 2) * 0.5) * 0.2;
     strongestRelief = Math.max(
       strongestRelief,
       THREE.MathUtils.lerp(aRelief, bRelief, t) * (foothill + lowerBench + upperBench + crown),
@@ -283,26 +285,57 @@ function fbm(x: number, z: number, seed: number): number {
   return value;
 }
 
+function orientedEllipseRadius(
+  x: number,
+  z: number,
+  cx: number,
+  cz: number,
+  radiusX: number,
+  radiusZ: number,
+  angle: number,
+): number {
+  const dx = x - cx;
+  const dz = z - cz;
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const localX = dx * cosine + dz * sine;
+  const localZ = -dx * sine + dz * cosine;
+  return Math.hypot(localX / radiusX, localZ / radiusZ);
+}
+
 function islandRadius(x: number, z: number): number {
-  const base = Math.hypot(x / 226, z / 186);
-  const angle = Math.atan2(z, x);
-  const shorelineVariation = 1
-    + Math.sin(angle * 2 - 0.2) * 0.035
-    + Math.sin(angle * 3 + 0.45) * 0.082
-    + Math.cos(angle * 5 - 0.8) * 0.047
-    + Math.sin(angle * 7 + 1.1) * 0.026;
-  // Local bays and headlands keep the playable land contiguous while breaking
-  // the unmistakable oval footprint. Positive terms cut inward; negative
-  // terms push a headland outward.
-  const baysAndHeadlands = (
-    0.105 * gaussian(x, z, -205, -30, 31, 45)
-    + 0.075 * gaussian(x, z, 34, 177, 46, 25)
-    + 0.09 * gaussian(x, z, 187, -107, 34, 36)
-    - 0.08 * gaussian(x, z, -174, 110, 42, 34)
-    - 0.06 * gaussian(x, z, 204, 27, 30, 48)
-    - 0.055 * gaussian(x, z, -30, -181, 54, 24)
+  // A union of offset geological lobes makes Monsoon a broken continent,
+  // rather than a scaled-up circular arena. The two broad opposing shoulders
+  // hold the CTF bases; the long central shelf keeps the ski network connected.
+  const continentalRadius = Math.min(
+    orientedEllipseRadius(x, z, 0, -5, 232, 178, -0.05),
+    orientedEllipseRadius(x, z, -120, 55, 112, 125, -0.28),
+    orientedEllipseRadius(x, z, 122, -45, 110, 130, -0.19),
+    orientedEllipseRadius(x, z, -91, 128, 120, 68, 0.16),
+    orientedEllipseRadius(x, z, 104, -126, 124, 68, -0.14),
+    orientedEllipseRadius(x, z, 178, 86, 56, 72, 0.42),
+    orientedEllipseRadius(x, z, -178, -111, 55, 77, -0.38),
+    orientedEllipseRadius(x, z, 11, 164, 82, 29, 0.08),
+    orientedEllipseRadius(x, z, -25, -165, 94, 30, -0.06),
   );
-  return base * shorelineVariation * (1 + baysAndHeadlands);
+  const angle = Math.atan2(z + 6, x - 8);
+  const shorelineVariation = 1
+    + Math.sin(angle * 3 + 0.4) * 0.048
+    + Math.cos(angle * 5 - 0.8) * 0.035
+    + Math.sin(angle * 9 + 1.3) * 0.018;
+  // Deep unequal bays oppose long headlands so the coastline has memorable
+  // attack-side shapes without severing the land between the two bases.
+  const baysAndHeadlands = (
+    0.31 * gaussian(x, z, -22, 194, 54, 22)
+    + 0.28 * gaussian(x, z, 213, -73, 24, 58)
+    + 0.24 * gaussian(x, z, -226, -15, 22, 54)
+    + 0.2 * gaussian(x, z, 38, -199, 69, 19)
+    - 0.16 * gaussian(x, z, -118, 160, 55, 33)
+    - 0.14 * gaussian(x, z, 128, -157, 58, 32)
+    - 0.13 * gaussian(x, z, 224, 69, 33, 46)
+    - 0.12 * gaussian(x, z, -214, -124, 39, 35)
+  );
+  return continentalRadius * shorelineVariation * (1 + baysAndHeadlands);
 }
 
 function sampleMonsoonMasksDesign(x: number, z: number): MonsoonTerrainMasks {
@@ -318,10 +351,14 @@ function sampleMonsoonMasksDesign(x: number, z: number): MonsoonTerrainMasks {
     loopMaskAt(x, z, MONSOON_OUTER_LOOP_POINTS, 24),
     loopMaskAt(x, z, MONSOON_INNER_LOOP_POINTS, 18),
   );
-  const craterRadius = Math.hypot(x / 75, z / 61);
-  const crater = 1 - smoothstep(0.72, 1.18, craterRadius);
+  // "Crater" remains the legacy gameplay/material mask name, but the actual
+  // landform is now a broken diagonal rift rather than a circular bowl.
+  const crater = clamp01(
+    orientedGaussian(x, z, -32, 13, -0.46, 118, 37) * 0.78
+    + orientedGaussian(x, z, 83, 30, -0.72, 72, 29) * 0.48,
+  ) * island;
   const coast = smoothstep(0.77, 1.01, radius);
-  return { island, route: route * island, crater: crater * island, coast };
+  return { island, route: route * island, crater, coast };
 }
 
 export function sampleMonsoonMasks(x: number, z: number): MonsoonTerrainMasks {
@@ -340,31 +377,44 @@ function sampleMonsoonHeightDesign(
 
   let height = -19 + land * (39 - radius * 2.2);
 
-  // Three connected, asymmetric mountain systems replace the former ring of
-  // isolated massifs. The western and eastern ranges arc around the arena and
-  // join a lower southern spine, leaving legible passes rather than a crater
-  // encircled by repeated cones.
-  const westernRange: Ridgeline = [
-    [-188, -112, 41, 28], [-160, -78, 53, 31], [-145, -28, 37, 36],
-    [-153, 32, 48, 32], [-178, 99, 59, 27], [-121, 126, 45, 32], [-55, 149, 52, 27],
+  // Open, offset chains replace the old perimeter ring. Their long downhill
+  // faces aim into the rift and the opposing CTF territories, producing real
+  // ski lines while keeping the map silhouette legible from above.
+  const northwestMassif: Ridgeline = [
+    [-226, 62, 47, 42], [-191, 91, 75, 34], [-151, 122, 98, 28],
+    [-107, 151, 61, 43], [-55, 164, 84, 29], [-18, 132, 38, 48],
   ];
-  const easternRange: Ridgeline = [
-    [48, 151, 38, 33], [103, 125, 51, 29], [171, 78, 58, 27],
-    [145, 19, 41, 35], [153, -43, 48, 31], [181, -110, 62, 26],
-    [124, -139, 47, 30], [64, -155, 43, 28],
+  const southwestSpur: Ridgeline = [
+    [-224, -130, 52, 38], [-179, -111, 81, 30], [-137, -76, 56, 42],
+    [-104, -34, 73, 31], [-62, 4, 35, 48],
   ];
-  const southernSpine: Ridgeline = [
-    [-174, -104, 39, 33], [-126, -124, 47, 36], [-72, -135, 43, 39],
-    [-18, -141, 47, 38], [39, -132, 50, 40], [91, -137, 45, 36], [151, -118, 47, 32],
+  const centralDivide: Ridgeline = [
+    [-171, 58, 43, 48], [-126, 44, 68, 35], [-78, 28, 46, 49],
+    [-29, 8, 78, 32], [21, -18, 51, 47], [71, -38, 83, 31],
+    [123, -62, 53, 44], [171, -93, 91, 28], [218, -128, 57, 40],
   ];
-  const westernRelief = sampleRidgeline(x, z, westernRange);
-  const easternRelief = sampleRidgeline(x, z, easternRange);
-  const southernRelief = sampleRidgeline(x, z, southernSpine);
-  const dominantRelief = Math.max(westernRelief, easternRelief, southernRelief);
+  const northeastMassif: Ridgeline = [
+    [36, 167, 43, 46], [82, 145, 72, 35], [126, 117, 96, 27],
+    [171, 86, 63, 39], [215, 43, 82, 29],
+  ];
+  const southernRange: Ridgeline = [
+    [-72, -172, 44, 43], [-24, -158, 69, 34], [29, -145, 48, 46],
+    [76, -132, 78, 31], [123, -112, 54, 41], [174, -94, 73, 30],
+  ];
+  const westernRelief = Math.max(
+    sampleRidgeline(x, z, northwestMassif),
+    sampleRidgeline(x, z, southwestSpur),
+  );
+  const easternRelief = sampleRidgeline(x, z, northeastMassif);
+  const southernRelief = sampleRidgeline(x, z, southernRange);
+  const divideRelief = sampleRidgeline(x, z, centralDivide);
+  const dominantRelief = Math.max(westernRelief, easternRelief, southernRelief, divideRelief);
   const connectedRelief = dominantRelief
     + Math.min(westernRelief, southernRelief) * 0.18
-    + Math.min(easternRelief, southernRelief) * 0.18;
-  const mountainRelief = terraceRelief(connectedRelief, 7.2, 0.32);
+    + Math.min(easternRelief, southernRelief) * 0.18
+    + Math.min(westernRelief + easternRelief, divideRelief) * 0.12;
+  const rangeScale = 0.82 + clamp01(fbm(x * 0.009, z * 0.009, seed ^ 0x2c71a56d) * 0.5 + 0.5) * 0.34;
+  const mountainRelief = terraceRelief(connectedRelief * rangeScale * 0.78, 8.8, 0.16);
   const routeMountainBlend = THREE.MathUtils.lerp(1, 0.43, clamp01(masks.route));
   height += land * routeMountainBlend * mountainRelief;
 
@@ -372,33 +422,35 @@ function sampleMonsoonHeightDesign(
   // irregular spacing and unequal scale avoid the repeated peak cadence of the
   // previous six-ridge composition while preserving wide traversable shelves.
   const escarpments = (
-    17 * orientedGaussian(x, z, -174, 87, -0.9, 58, 13)
-    + 11 * orientedGaussian(x, z, -91, 137, 0.18, 49, 14)
-    + 20 * orientedGaussian(x, z, 166, 72, 0.74, 61, 14)
-    + 18 * orientedGaussian(x, z, 166, -92, -1.02, 54, 13)
-    + 12 * orientedGaussian(x, z, -78, -151, 0.03, 68, 15)
+    27 * orientedGaussian(x, z, -164, 113, -0.68, 57, 10)
+    + 18 * orientedGaussian(x, z, -181, -101, 0.72, 64, 13)
+    + 24 * orientedGaussian(x, z, -25, 7, -0.5, 69, 11)
+    + 31 * orientedGaussian(x, z, 132, 111, 0.92, 49, 10)
+    + 25 * orientedGaussian(x, z, 168, -91, -0.96, 66, 12)
+    + 17 * orientedGaussian(x, z, 18, -154, 0.16, 78, 15)
   );
-  height += land * THREE.MathUtils.lerp(1, 0.12, masks.route) * escarpments;
+  height += land * THREE.MathUtils.lerp(1, 0.12, masks.route) * escarpments * 0.72;
 
   // Low-frequency ridged folds add depth to the mountain faces while leaving
   // the broad race lines calm enough for skiing and capsule contact.
   const mountainMask = smoothstep(7, 30, mountainRelief + escarpments);
   const ridgeNoise = 1 - Math.abs(fbm(x * 0.012, z * 0.012, seed ^ 0x43a1c92d));
-  const alpineFold = Math.pow(clamp01(ridgeNoise), 3) * 3.4
-    + fbm(x * 0.018, z * 0.018, seed ^ 0x71b94f2a) * 1.15;
+  const alpineFold = Math.pow(clamp01(ridgeNoise), 3) * 7.1
+    + fbm(x * 0.018, z * 0.018, seed ^ 0x71b94f2a) * 2.15;
   height += land * mountainMask * THREE.MathUtils.lerp(1, 0.18, masks.route) * alpineFold;
 
-  // Broad negative landforms cut deep valleys and saddles between the three
-  // spines. Positive shelves are deliberately off-axis, breaking radial
-  // symmetry without adding noisy high-frequency bumps.
+  // Broad negative landforms cut branching glacial valleys between the open
+  // chains. No radial term is used here: the center is a long playable divide,
+  // not the bottom of a circular crater.
   const macroRelief = (
-    7.2 * orientedGaussian(x, z, -104, 32, -0.42, 82, 54)
-    + 5.8 * orientedGaussian(x, z, 103, -28, 0.5, 78, 57)
-    + 6.4 * orientedGaussian(x, z, 9, 132, 0.04, 94, 39)
-    - 9.4 * orientedGaussian(x, z, -58, -73, -0.58, 91, 34)
-    - 8.2 * orientedGaussian(x, z, 67, 83, -0.65, 83, 31)
-    - 7.8 * gaussian(x, z, -148, -2, 39, 35)
-    - 7.2 * gaussian(x, z, 148, -13, 41, 38)
+    9.2 * orientedGaussian(x, z, -119, 84, -0.34, 91, 51)
+    + 7.4 * orientedGaussian(x, z, 111, -79, -0.42, 88, 55)
+    + 6.8 * orientedGaussian(x, z, 78, 126, 0.5, 73, 42)
+    - 16.5 * orientedGaussian(x, z, -48, -56, -0.58, 112, 25)
+    - 14.8 * orientedGaussian(x, z, 58, 69, -0.74, 105, 24)
+    - 11.7 * orientedGaussian(x, z, -151, -2, 0.46, 58, 23)
+    - 10.9 * orientedGaussian(x, z, 161, 10, 0.62, 61, 22)
+    - 9.3 * orientedGaussian(x, z, 3, 137, 0.12, 67, 18)
   );
   const rollingRelief = (
     Math.sin(x * 0.018 + z * 0.006) * 3.2
@@ -407,19 +459,20 @@ function sampleMonsoonHeightDesign(
   );
   height += land * (1 - masks.route * 0.58) * (macroRelief + rollingRelief);
 
-  const craterRadius = Math.hypot(x / 76, z / 62);
-  height += land * (
-    5.5 * Math.exp(-Math.pow((craterRadius - 1) / 0.23, 2))
-    - 18 * gaussian(x, z, 0, 0, 73, 59)
+  height -= land * (
+    12.5 * orientedGaussian(x, z, -24, 12, -0.48, 126, 35)
+    + 6.2 * orientedGaussian(x, z, 91, 22, -0.7, 71, 24)
   );
   height -= land * 7.2 * masks.route;
-  // A subdued, irregular coastal shelf echoes the larger geological steps
-  // without drawing a perfect ring around the island.
-  const coastalShelf = (
-    Math.exp(-Math.pow((radius - 0.68) / 0.075, 2))
-    * (0.58 + 0.42 * Math.sin(Math.atan2(z, x) * 3 + 0.7))
-  );
-  height -= land * 3.2 * coastalShelf;
+  // Keep only discontinuous coastal benches; a complete contour would make
+  // the playable continent read as another circular arena wall.
+  const coastalShelf = Math.exp(-Math.pow((radius - 0.7) / 0.07, 2))
+    * clamp01(
+      orientedGaussian(x, z, -198, -18, -0.2, 58, 42)
+      + orientedGaussian(x, z, 201, -62, 0.5, 51, 38)
+      + orientedGaussian(x, z, 12, 184, 0.1, 69, 31),
+    );
+  height -= land * 2.4 * coastalShelf;
 
   const routeCalm = THREE.MathUtils.lerp(1, 0.18, clamp01(masks.route * 1.25));
   const craterCalm = THREE.MathUtils.lerp(1, 0.42, masks.crater);
@@ -427,6 +480,19 @@ function sampleMonsoonHeightDesign(
     fbm(x * 0.021, z * 0.021, seed) * 1.28
     + valueNoise(x * 0.075, z * 0.075, seed ^ 0x6ac690c5) * 0.34
   );
+
+  // Two large, naturally shouldered base mesas establish unmistakable CTF
+  // territories. The inner pads are calm enough for structures and spawns;
+  // the outer blend preserves the surrounding skiable geology.
+  for (const [baseX, baseZ, baseY, tiltX, tiltZ] of [
+    [-85, 130, 42.5, 0.008, -0.006],
+    [95, -120, 38.5, -0.007, 0.007],
+  ] as const) {
+    const plateauRadius = Math.hypot((x - baseX) / 60, (z - baseZ) / 51);
+    const plateauBlend = 1 - smoothstep(0.46, 1.12, plateauRadius);
+    const plateauHeight = baseY + (x - baseX) * tiltX + (z - baseZ) * tiltZ;
+    height = THREE.MathUtils.lerp(height, plateauHeight, plateauBlend * 0.94 * land);
+  }
 
   // Bank the primary mountain lines toward authored longitudinal grades. The
   // partial blend keeps natural shoulders and rock folds at their edges while
@@ -492,6 +558,60 @@ export function sampleMonsoonMeshHeight(
     : a * (1 - tx) + c * tz + b * (tx - tz);
 }
 
+/**
+ * Samples the exact upward normal of the same piecewise-linear terrain
+ * triangle used by {@link sampleMonsoonMeshHeight}. Gameplay support and
+ * rendered/projectile collision therefore agree even between grid vertices.
+ */
+export function sampleMonsoonMeshNormal(
+  x: number,
+  z: number,
+  target = new THREE.Vector3(),
+  seed: number = MONSOON_DIVIDE.seed,
+): THREE.Vector3 {
+  const stepX = MONSOON_DIVIDE.width / MONSOON_DIVIDE.segmentsX;
+  const stepZ = MONSOON_DIVIDE.depth / MONSOON_DIVIDE.segmentsZ;
+  const gridX = THREE.MathUtils.clamp(
+    (x + MONSOON_DIVIDE.width * 0.5) / stepX,
+    0,
+    MONSOON_DIVIDE.segmentsX,
+  );
+  const gridZ = THREE.MathUtils.clamp(
+    (z + MONSOON_DIVIDE.depth * 0.5) / stepZ,
+    0,
+    MONSOON_DIVIDE.segmentsZ,
+  );
+  const ix = Math.min(MONSOON_DIVIDE.segmentsX - 1, Math.floor(gridX));
+  const iz = Math.min(MONSOON_DIVIDE.segmentsZ - 1, Math.floor(gridZ));
+  const tx = gridX - ix;
+  const tz = gridZ - iz;
+  const x0 = ix * stepX - MONSOON_DIVIDE.width * 0.5;
+  const z0 = iz * stepZ - MONSOON_DIVIDE.depth * 0.5;
+  const a = sampleMonsoonHeight(x0, z0, seed);
+  const b = sampleMonsoonHeight(x0 + stepX, z0, seed);
+  const d = sampleMonsoonHeight(x0, z0 + stepZ, seed);
+  const c = sampleMonsoonHeight(x0 + stepX, z0 + stepZ, seed);
+
+  let slopeX: number;
+  let slopeZ: number;
+  if ((ix + iz) % 2 === 0) {
+    if (tx + tz <= 1) {
+      slopeX = (b - a) / stepX;
+      slopeZ = (d - a) / stepZ;
+    } else {
+      slopeX = (c - d) / stepX;
+      slopeZ = (c - b) / stepZ;
+    }
+  } else if (tz >= tx) {
+    slopeX = (c - d) / stepX;
+    slopeZ = (d - a) / stepZ;
+  } else {
+    slopeX = (b - a) / stepX;
+    slopeZ = (c - b) / stepZ;
+  }
+  return target.set(-slopeX, 1, -slopeZ).normalize();
+}
+
 export function sampleMonsoonNormal(
   x: number,
   z: number,
@@ -514,22 +634,23 @@ function paletteColor(x: number, z: number, y: number, normalY: number, seed: nu
   // mossy highland greens, pale storm-washed stone, and warm compacted soil.
   // The tiled PBR detail map supplies the small scale breakup; vertex color
   // owns the large, readable terrain regions.
-  const color = new THREE.Color(0x233832).lerp(
-    new THREE.Color(0x46573f),
+  const color = new THREE.Color(0x345149).lerp(
+    new THREE.Color(0x71805f),
     smoothstep(24, 43, designY),
   );
   // Route masks are intentionally broad for terrain shaping and ski flow;
   // expose soil gradually only near their centers so the surrounding shoulders
   // remain mossy like the green plateaus in the source panorama.
-  color.lerp(new THREE.Color(0x493f34), smoothstep(0.5, 0.88, masks.route) * 0.76);
-  color.lerp(new THREE.Color(0x304754), smoothstep(0.28, 0.8, masks.crater) * 0.74);
+  color.lerp(new THREE.Color(0x765b43), smoothstep(0.5, 0.88, masks.route) * 0.8);
+  color.lerp(new THREE.Color(0x385d6c), smoothstep(0.28, 0.8, masks.crater) * 0.74);
   const slopeRock = 1 - smoothstep(0.46, 0.73, normalY);
+  const alpineRock = smoothstep(48, 74, designY) * (1 - smoothstep(0.72, 0.94, normalY));
   const coastRock = smoothstep(0.7, 0.96, masks.coast) * 0.88;
-  color.lerp(new THREE.Color(0x2c424f), Math.max(slopeRock, coastRock));
+  color.lerp(new THREE.Color(0x405766), Math.max(slopeRock, coastRock, alpineRock * 0.82));
   const shoreSoil = 1 - smoothstep(MONSOON_DESIGN_WATER_Y + 0.5, MONSOON_DESIGN_WATER_Y + 3.4, designY);
-  color.lerp(new THREE.Color(0x484337), shoreSoil * 0.76);
+  color.lerp(new THREE.Color(0x685c49), shoreSoil * 0.76);
 
-  const variation = 0.84 + hash2(Math.round(design.x * 0.5), Math.round(design.z * 0.5), seed) * 0.18;
+  const variation = 0.9 + hash2(Math.round(design.x * 0.5), Math.round(design.z * 0.5), seed) * 0.16;
   color.multiplyScalar(variation);
   return color;
 }

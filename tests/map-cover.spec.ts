@@ -56,12 +56,8 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
   const shelf = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const west = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
-    ));
-    const east = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
-    ));
+    const west = spawns[4];
+    const east = spawns[5];
     return {
       span: Math.hypot(east.x - west.x, east.z - west.z),
       clear: hooks.sampleLineOfSight(
@@ -70,18 +66,14 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
       ),
     };
   });
-  expect(shelf.span, 'west-ridge → east-ridge spawn pair is still the long shelf').toBeGreaterThan(280);
+  expect(shelf.span, 'west-ridge → east-ridge spawn pair is still the long shelf').toBeGreaterThan(560);
   expect(shelf.clear, 'eye-height LOS along spawn (−158, 90) → (153, 79) must hit cover').toBe(false);
   const eastSlope = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const west = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
-    ));
-    const east = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 320, spawn.z - (-80)) < Math.hypot(best.x - 320, spawn.z - (-80)) ? spawn : best
-    ));
-    const skiLinePad = spawns.find((spawn) => Math.hypot(spawn.x - 125, spawn.z - (-104)) < 12);
+    const west = spawns[4];
+    const east = spawns[7];
+    const skiLinePad = spawns.find((spawn) => Math.hypot(spawn.x - 250, spawn.z - (-208)) < 24);
     return {
       span: Math.hypot(east.x - west.x, east.z - west.z),
       eastX: east.x,
@@ -94,17 +86,13 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     };
   });
   expect(eastSlope.skiLinePad, 'SE spawn must sit off ski corridor 1, not at (125, −104)').toBeNull();
-  expect(eastSlope.span, 'west-ridge → east-slope spawn pair is still a long chord').toBeGreaterThan(280);
+  expect(eastSlope.span, 'west-ridge → east-slope spawn pair is still a long chord').toBeGreaterThan(560);
   expect(eastSlope.clear, 'eye-height LOS along spawn (−158, 90) → (160, −40) must hit terrain').toBe(false);
   const corridorTwo = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const northEast = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
-    ));
-    const southWest = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-260), spawn.z - (-202)) < Math.hypot(best.x - (-260), best.z - (-202)) ? spawn : best
-    ));
+    const northEast = spawns[5];
+    const southWest = spawns[6];
     return {
       span: Math.hypot(southWest.x - northEast.x, southWest.z - northEast.z),
       clear: hooks.sampleLineOfSight(
@@ -113,17 +101,13 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
       ),
     };
   });
-  expect(corridorTwo.span, 'NE-ridge → SW-ridge spawn pair is still the long corridor-2 rail').toBeGreaterThan(300);
+  expect(corridorTwo.span, 'NE-ridge → SW-ridge spawn pair is still the long corridor-2 rail').toBeGreaterThan(600);
   expect(corridorTwo.clear, 'eye-height LOS along spawn (153, 79) → (−130, −101) must hit the in-lane nunatak').toBe(false);
   const northRim = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const north = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 150, spawn.z - 260) < Math.hypot(best.x - 150, best.z - 260) ? spawn : best
-    ));
-    const southWest = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-260), spawn.z - (-202)) < Math.hypot(best.x - (-260), best.z - (-202)) ? spawn : best
-    ));
+    const north = spawns[9];
+    const southWest = spawns[6];
     return {
       span: Math.hypot(southWest.x - north.x, southWest.z - north.z),
       clear: hooks.sampleLineOfSight(
@@ -132,17 +116,13 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
       ),
     };
   });
-  expect(northRim.span, 'north-rim → SW-ridge spawn pair is still the long 309 m rail').toBeGreaterThan(280);
+  expect(northRim.span, 'north-rim → SW-ridge spawn pair is still the long rail').toBeGreaterThan(560);
   expect(northRim.clear, 'eye-height LOS along spawn (75, 130) → (−130, −101) must hit the north-rim cubby').toBe(false);
   const innerWest = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const northEast = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
-    ));
-    const inner = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-218), spawn.z - (-44)) < Math.hypot(best.x - (-218), best.z - (-44)) ? spawn : best
-    ));
+    const northEast = spawns[5];
+    const inner = spawns[14];
     const start = { x: northEast.x, y: northEast.y + 1.5, z: northEast.z };
     const end = { x: inner.x, y: inner.y + 1.5, z: inner.z };
     return {
@@ -150,18 +130,14 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
       clear: hooks.sampleLineOfSight(start, end),
     };
   });
-  expect(innerWest.span, 'NE-ridge → inner-west spawn pair is still the long 281 m rail').toBeGreaterThan(250);
+  expect(innerWest.span, 'NE-ridge → inner-west spawn pair is still the long rail').toBeGreaterThan(500);
   expect(innerWest.clear, 'eye-height LOS along spawn (153, 79) → (−109, −22) must hit the inner-west cubby').toBe(false);
   const innerEast = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const inner = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 178, spawn.z - 136) < Math.hypot(best.x - 178, best.z - 136) ? spawn : best
-    ));
-    const southWest = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-260), spawn.z - (-202)) < Math.hypot(best.x - (-260), best.z - (-202)) ? spawn : best
-    ));
-    const onGradePad = spawns.find((spawn) => Math.hypot(spawn.x - 89, spawn.z - 55) < 12);
+    const inner = spawns[1];
+    const southWest = spawns[6];
+    const onGradePad = spawns.find((spawn) => Math.hypot(spawn.x - 178, spawn.z - 110) < 24);
     return {
       span: Math.hypot(inner.x - southWest.x, inner.z - southWest.z),
       innerX: inner.x,
@@ -174,17 +150,13 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     };
   });
   expect(innerEast.onGradePad, 'inner-east spawn must sit off ski corridor 2, not at (89, 55)').toBeNull();
-  expect(innerEast.span, 'inner-east → SW-ridge spawn pair is still the long 269 m rail').toBeGreaterThan(250);
+  expect(innerEast.span, 'inner-east → SW-ridge spawn pair is still the long rail').toBeGreaterThan(500);
   expect(innerEast.clear, 'eye-height LOS along spawn (89, 68) → (−130, −101) must hit the inner-east cubby').toBe(false);
   const innerSouth = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const south = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 102, spawn.z - (-146)) < Math.hypot(best.x - 102, best.z - (-146)) ? spawn : best
-    ));
-    const westRidge = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
-    ));
+    const south = spawns[3];
+    const westRidge = spawns[4];
     return {
       span: Math.hypot(westRidge.x - south.x, westRidge.z - south.z),
       clear: hooks.sampleLineOfSight(
@@ -193,17 +165,13 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
       ),
     };
   });
-  expect(innerSouth.span, 'inner-south → west-ridge spawn pair is still the long 265 m rail').toBeGreaterThan(250);
+  expect(innerSouth.span, 'inner-south → west-ridge spawn pair is still the long rail').toBeGreaterThan(500);
   expect(innerSouth.clear, 'eye-height LOS along spawn (51, −73) → (−158, 90) must hit the inner-south cubby').toBe(false);
   const northwest = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const west = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-198), spawn.z - 128) < Math.hypot(best.x - (-198), best.z - 128) ? spawn : best
-    ));
-    const east = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
-    ));
+    const west = spawns[0];
+    const east = spawns[5];
     return {
       span: Math.hypot(east.x - west.x, east.z - west.z),
       clear: hooks.sampleLineOfSight(
@@ -212,17 +180,13 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
       ),
     };
   });
-  expect(northwest.span, 'northwest → east-ridge spawn pair is still the long 252 m rail').toBeGreaterThan(250);
+  expect(northwest.span, 'northwest → east-ridge spawn pair is still the long rail').toBeGreaterThan(500);
   expect(northwest.clear, 'eye-height LOS along spawn (−99, 64) → (153, 79) must hit the northwest cubby').toBe(false);
   const innerEastRidge = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
-    const inner = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 178, spawn.z - 136) < Math.hypot(best.x - 178, best.z - 136) ? spawn : best
-    ));
-    const westRidge = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
-    ));
+    const inner = spawns[1];
+    const westRidge = spawns[4];
     return {
       span: Math.hypot(westRidge.x - inner.x, westRidge.z - inner.z),
       clear: hooks.sampleLineOfSight(
@@ -231,7 +195,7 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
       ),
     };
   });
-  expect(innerEastRidge.span, 'inner-east → west-ridge spawn pair is still the long 248 m rail').toBeGreaterThan(240);
+  expect(innerEastRidge.span, 'inner-east → west-ridge spawn pair is still the long rail').toBeGreaterThan(480);
   expect(innerEastRidge.clear, 'eye-height LOS along spawn (89, 68) → (−158, 90) must hit the inner-east ridge cubby').toBe(false);
   const bunkers = await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.getSpawnCubbyBunkerAudit());
   expect(bunkers?.count).toBe(6);
@@ -307,8 +271,8 @@ test('Monsoon rocket-to-sniper and rail-to-sniper chords are blocked at eye heig
     };
   });
   expect(result.missing, 'rocket, rail, and sniper pickups must exist').toBe(false);
-  expect(result.rocketSpan, 'the authored rocket chord is still the long diagonal').toBeGreaterThan(300);
-  expect(result.railSpan, 'the authored rail chord is still the long east-west').toBeGreaterThan(280);
+  expect(result.rocketSpan, 'the authored rocket chord is still the long diagonal').toBeGreaterThan(600);
+  expect(result.railSpan, 'the authored rail chord is still the long east-west').toBeGreaterThan(560);
   expect(result.rocketClear, 'eye-height LOS along rocket → sniper must hit cover').toBe(false);
   expect(result.railClear, 'eye-height LOS along rail → sniper must hit cover').toBe(false);
 });

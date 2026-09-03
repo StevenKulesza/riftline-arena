@@ -68,22 +68,22 @@ const IDENTITY_QUATERNION = new THREE.Quaternion();
 const PROFILES = {
   monsoon: {
     ambientColor: 0x6f8792,
-    ambientIntensity: 0.055,
-    environmentIntensity: 0.58,
-    exposure: 0.95,
+    ambientIntensity: 0.075,
+    environmentIntensity: 0.7,
+    exposure: 1.03,
     fillColor: 0x78a9c4,
-    fillIntensity: 0.23,
-    fillPosition: [-125, 92, -165],
+    fillIntensity: 0.31,
+    fillPosition: [-250, 184, -330],
     groundColor: 0x1f3126,
     keyColor: 0xffe1b7,
-    keyIntensity: 3.45,
-    keyPosition: [155, 228, 118],
+    keyIntensity: 3.65,
+    keyPosition: [310, 456, 236],
     normalBias: 0.032,
     rimColor: 0x70b7e8,
-    rimIntensity: 0.38,
-    rimPosition: [-105, 82, -145],
+    rimIntensity: 0.48,
+    rimPosition: [-210, 164, -290],
     skyColor: 0xb8dce8,
-    skyIntensity: 0.65,
+    skyIntensity: 0.76,
   },
   quicksense: {
     ambientColor: 0x526a78,
@@ -145,6 +145,7 @@ export class MapLightingRig {
 
   private readonly profileName: 'monsoon' | 'quicksense';
   private readonly profile: LightingProfile;
+  private readonly hemisphere: THREE.HemisphereLight;
   private readonly fill: THREE.DirectionalLight;
   private readonly rim: THREE.DirectionalLight;
   private readonly shadowExtent: number;
@@ -174,12 +175,12 @@ export class MapLightingRig {
 
     const ambient = new THREE.AmbientLight(this.profile.ambientColor, this.profile.ambientIntensity);
     ambient.name = `${mapName} low-frequency ambient`;
-    const hemisphere = new THREE.HemisphereLight(
+    this.hemisphere = new THREE.HemisphereLight(
       this.profile.skyColor,
       this.profile.groundColor,
       this.profile.skyIntensity,
     );
-    hemisphere.name = `${mapName} sky and terrain bounce`;
+    this.hemisphere.name = `${mapName} sky and terrain bounce`;
 
     this.key = new THREE.DirectionalLight(this.profile.keyColor, this.profile.keyIntensity);
     this.key.name = `${mapName} authored sun key`;
@@ -191,7 +192,7 @@ export class MapLightingRig {
     const shadowMapSize = mobileQuality ? 1024 : 2048;
     this.key.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     this.key.shadow.camera.near = 8;
-    this.key.shadow.camera.far = this.profileName === 'quicksense' ? 1140 : 1220;
+    this.key.shadow.camera.far = this.profileName === 'quicksense' ? 1140 : 5000;
     // Cover the full authored play bounds with only a small guard band. The
     // previous oversized frustum diluted texel density and hid contact detail.
     this.shadowExtent = Math.max(bounds.width, bounds.depth) * 0.52;
@@ -242,13 +243,23 @@ export class MapLightingRig {
 
     this.root.add(
       ambient,
-      hemisphere,
+      this.hemisphere,
       this.key,
       this.key.target,
       this.fill,
       this.rim,
       this.contactMesh,
     );
+  }
+
+  setWeatherSeverity(severity: number): void {
+    const storm = this.profileName === 'monsoon'
+      ? THREE.MathUtils.clamp(severity, 0, 1)
+      : 0;
+    this.key.intensity = this.profile.keyIntensity * THREE.MathUtils.lerp(1, 0.62, storm);
+    this.fill.intensity = this.profile.fillIntensity * THREE.MathUtils.lerp(1, 0.72, storm);
+    this.rim.intensity = this.profile.rimIntensity * THREE.MathUtils.lerp(1, 1.32, storm);
+    this.hemisphere.intensity = this.profile.skyIntensity * THREE.MathUtils.lerp(1, 0.68, storm);
   }
 
   addGroundingShadow(source: GroundingShadowSource): void {

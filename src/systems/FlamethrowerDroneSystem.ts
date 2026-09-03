@@ -22,6 +22,10 @@ export const FLAMETHROWER_DRONE_TUNING = Object.freeze({
   jumpAnticipationSeconds: 0.42,
   jumpHorizontalSpeed: 12.5,
   jumpVerticalSpeed: 11.8,
+  targetMemorySeconds: 2.6,
+  obstacleLookAheadSeconds: 0.42,
+  obstacleAvoidanceSeconds: 0.9,
+  collisionSkin: 0.08,
   respawnSeconds: 21,
 });
 
@@ -41,6 +45,8 @@ export type FlamethrowerDroneRuntime = {
   state: FlamethrowerDroneMotionState;
   stateElapsed: number;
   targetOwner: DroneTargetOwner | null;
+  targetLostSeconds: number;
+  readonly lastSeenPosition: THREE.Vector3;
   fireCooldown: number;
   jumpCooldown: number;
   respawnRemaining: number;
@@ -49,6 +55,11 @@ export type FlamethrowerDroneRuntime = {
   landings: number;
   distanceWalked: number;
   collisionHits: number;
+  readonly avoidanceDirection: THREE.Vector3;
+  avoidanceSeconds: number;
+  avoidanceActivations: number;
+  readonly lastCollisionNormal: THREE.Vector3;
+  acquireCooldown: number;
   patrolStep: number;
   forcedTargetOwner: DroneTargetOwner | null;
   forcedTargetSeconds: number;
@@ -91,6 +102,15 @@ export class FlamethrowerDroneSystem {
   private readonly muzzle = new THREE.Vector3();
   private readonly awarenessFacing = new THREE.Vector3();
   private readonly awarenessToTarget = new THREE.Vector3();
+  private readonly groundProbeStart = new THREE.Vector3();
+  private readonly groundProbeEnd = new THREE.Vector3();
+  private readonly groundProbeOffset = new THREE.Vector3();
+  private readonly groundWallNormal = new THREE.Vector3();
+  private readonly groundTangent = new THREE.Vector3();
+  private readonly groundCandidate = new THREE.Vector3();
+  private readonly groundAlternative = new THREE.Vector3();
+  private readonly groundMotion = new THREE.Vector3();
+  private readonly groundPrevious = new THREE.Vector3();
   private readonly ray = new THREE.Ray();
   private readonly sphere = new THREE.Sphere();
   private readonly hitPoint = new THREE.Vector3();
@@ -116,6 +136,8 @@ export class FlamethrowerDroneSystem {
         state: 'patrol',
         stateElapsed: 0,
         targetOwner: null,
+        targetLostSeconds: 0,
+        lastSeenPosition: spawn.clone(),
         fireCooldown: 1.4 + index * 0.55,
         jumpCooldown: 5.5 + index * 1.7,
         respawnRemaining: 0,
@@ -124,6 +146,11 @@ export class FlamethrowerDroneSystem {
         landings: 0,
         distanceWalked: 0,
         collisionHits: 0,
+        avoidanceDirection: new THREE.Vector3(),
+        avoidanceSeconds: 0,
+        avoidanceActivations: 0,
+        lastCollisionNormal: new THREE.Vector3(),
+        acquireCooldown: 0,
         patrolStep: index * 2,
         forcedTargetOwner: null,
         forcedTargetSeconds: 0,
@@ -157,8 +184,29 @@ export class FlamethrowerDroneSystem {
         drone.forcedTargetOwner = null;
         drone.forcedTargetSnapshot = null;
       }
-      const target = this.selectTarget(drone, targets);
-      drone.targetOwner = target?.owner ?? null;
+      drone.avoidanceSeconds = Math.max(0, drone.avoidanceSeconds - delta);
+      drone.acquireCooldown -= delta;
+      let target: DroneTargetSnapshot | null = null;
+      if (drone.acquireCooldown <= 0) {
+        const acquired = this.selectTarget(drone, targets);
+        if (acquired) {
+          target = acquired;
+          drone.targetOwner = acquired.owner;
+          drone.lastSeenPosition.copy(acquired.position);
+          drone.targetLostSeconds = 0;
+        }
+        drone.acquireCooldown = 0.18 + drone.index * 0.025;
+      }
+      if (!target && drone.targetOwner !== null && drone.targetLostSeconds <= 0.001) {
+        target = targets.find((candidate) => candidate.owner === drone.targetOwner && candidate.alive) ?? null;
+      }
+      if (!target && drone.targetOwner !== null) {
+        drone.targetLostSeconds += delta;
+        if (drone.targetLostSeconds > FLAMETHROWER_DRONE_TUNING.targetMemorySeconds) {
+          drone.targetOwner = null;
+          drone.targetLostSeconds = 0;
+        }
+      }
       this.updateState(drone, target, delta, onGrenade);
       this.updateMovement(drone, target, delta);
       const horizontalSpeed = Math.hypot(drone.velocity.x, drone.velocity.z);
@@ -204,15 +252,31 @@ export class FlamethrowerDroneSystem {
     return this.raycast(start, direction.multiplyScalar(1 / distance), distance, extraRadius);
   }
 
-  damage(drone: FlamethrowerDroneRuntime, amount: number): FlamethrowerDroneDamageResult {
+  damage(
+    drone: FlamethrowerDroneRuntime,
+    amount: number,
+    attacker: DroneTargetOwner | null = null,
+  ): FlamethrowerDroneDamageResult {
     if (!drone.alive || amount <= 0) return { applied: false, destroyed: false, position: drone.position.clone() };
     drone.health = Math.max(0, drone.health - amount);
     drone.visual.flashDamage();
+    if (attacker !== null) {
+      // A hit is an attention event even when the attacker is behind the
+      // drone. The next awareness pass can retain this lock without waiting
+      // for the forward cone to sweep back around.
+      drone.targetOwner = attacker;
+      drone.targetLostSeconds = 0;
+      drone.acquireCooldown = 0;
+      drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, 0.65);
+    }
     const destroyed = drone.health <= 0;
     if (destroyed) {
       drone.alive = false;
       drone.state = 'destroyed';
       drone.velocity.set(0, 0, 0);
+      drone.targetOwner = null;
+      drone.avoidanceSeconds = 0;
+      drone.lastCollisionNormal.set(0, 0, 0);
       drone.visual.root.visible = false;
       drone.respawnRemaining = FLAMETHROWER_DRONE_TUNING.respawnSeconds;
     }
@@ -237,9 +301,15 @@ export class FlamethrowerDroneSystem {
     const drone = this.drones.find((candidate) => candidate.id === id);
     if (!drone || !target.alive) return false;
     let staged: THREE.Vector3 | null = null;
-    for (let attempt = 0; attempt < 24; attempt += 1) {
-      const angle = (attempt % 12) / 12 * Math.PI * 2 + drone.index * 0.37;
-      const radius = attempt < 12 ? 20 : 30;
+    // Monsoon's capture plaza has a much denser obstacle ring than
+    // QuickSense. Search several map-scaled rings so the QA encounter (and
+    // any future authored encounter using this helper) never depends on a
+    // lucky 20 m patch of walkable ground.
+    const stagingRadii = [20, 30, 44, 64, 88, 120];
+    const samplesPerRing = 16;
+    for (let attempt = 0; attempt < stagingRadii.length * samplesPerRing; attempt += 1) {
+      const angle = (attempt % samplesPerRing) / samplesPerRing * Math.PI * 2 + drone.index * 0.37;
+      const radius = stagingRadii[Math.floor(attempt / samplesPerRing)];
       const candidate = target.position.clone().add(new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius));
       const safe = this.arena.safeSpawnPoint(candidate, drone.collisionRadius, FLAMETHROWER_DRONE_TUNING.collisionHeight);
       if (!safe) continue;
@@ -276,6 +346,9 @@ export class FlamethrowerDroneSystem {
     this.aim.subVectors(target.position, staged).setY(0);
     drone.visual.face(this.aim, 1);
     drone.targetOwner = target.owner;
+    drone.targetLostSeconds = 0;
+    drone.lastSeenPosition.copy(target.position);
+    drone.acquireCooldown = 0;
     drone.forcedTargetOwner = target.owner;
     drone.forcedTargetSeconds = 2.2;
     drone.forcedTargetSnapshot = {
@@ -371,6 +444,9 @@ export class FlamethrowerDroneSystem {
       }
       return;
     }
+    const hasSearchMemory = !target
+      && drone.targetOwner !== null
+      && drone.targetLostSeconds <= FLAMETHROWER_DRONE_TUNING.targetMemorySeconds;
     const distance = target ? target.position.distanceTo(drone.position) : Number.POSITIVE_INFINITY;
     if (target && drone.jumpCooldown <= 0 && distance > 9 && distance < 45) {
       this.setState(drone, 'jump-anticipation');
@@ -384,7 +460,7 @@ export class FlamethrowerDroneSystem {
       drone.velocity.multiplyScalar(Math.exp(-delta * 8));
       return;
     }
-    this.setState(drone, target ? 'stalk' : 'patrol');
+    this.setState(drone, target || hasSearchMemory ? 'stalk' : 'patrol');
   }
 
   private updateMovement(drone: FlamethrowerDroneRuntime, target: DroneTargetSnapshot | null, delta: number): void {
@@ -449,11 +525,15 @@ export class FlamethrowerDroneSystem {
       return;
     }
 
-    if (target) {
-      this.desired.copy(target.position);
+    const hasSearchMemory = !target
+      && drone.targetOwner !== null
+      && drone.targetLostSeconds <= FLAMETHROWER_DRONE_TUNING.targetMemorySeconds;
+    if (target || hasSearchMemory) {
+      const targetPosition = target?.position ?? drone.lastSeenPosition;
+      this.desired.copy(targetPosition);
       const distance = this.desired.distanceTo(drone.position);
       if (distance < 19) {
-        this.movement.subVectors(drone.position, target.position).setY(0);
+        this.movement.subVectors(drone.position, targetPosition).setY(0);
         if (this.movement.lengthSq() > 1e-5) this.desired.copy(drone.position).addScaledVector(this.movement.normalize(), 12);
       }
     } else {
@@ -461,7 +541,9 @@ export class FlamethrowerDroneSystem {
       this.desired.copy(drone.patrolCenter).add(new THREE.Vector3(Math.cos(angle) * 17, 0, Math.sin(angle) * 17));
       if (drone.position.distanceToSquared(this.desired) < 5) drone.patrolStep += 1;
     }
-    const speed = target ? FLAMETHROWER_DRONE_TUNING.stalkSpeed : FLAMETHROWER_DRONE_TUNING.patrolSpeed;
+    const speed = target || hasSearchMemory
+      ? FLAMETHROWER_DRONE_TUNING.stalkSpeed
+      : FLAMETHROWER_DRONE_TUNING.patrolSpeed;
     this.movement.subVectors(this.desired, drone.position).setY(0);
     if (this.movement.lengthSq() > 1e-5) this.movement.normalize().multiplyScalar(speed);
     this.steering.subVectors(this.movement, drone.velocity).setY(0);
@@ -469,7 +551,8 @@ export class FlamethrowerDroneSystem {
       this.steering.setLength(FLAMETHROWER_DRONE_TUNING.acceleration);
     }
     drone.velocity.addScaledVector(this.steering, delta);
-    const previous = drone.position.clone();
+    this.applyGroundObstacleAvoidance(drone, speed, delta);
+    this.groundPrevious.copy(drone.position);
     drone.position.addScaledVector(drone.velocity, delta);
     const contact = this.arena.resolveCapsule(
       drone.position,
@@ -477,9 +560,151 @@ export class FlamethrowerDroneSystem {
       drone.collisionRadius,
       FLAMETHROWER_DRONE_TUNING.collisionHeight,
     );
-    if (contact.wallContact) drone.collisionHits += 1;
-    drone.distanceWalked += previous.distanceTo(drone.position);
+    if (contact.wallContact) {
+      drone.collisionHits += 1;
+      this.groundWallNormal.copy(contact.wallNormal).setY(0);
+      if (this.groundWallNormal.lengthSq() > 0.04) {
+        this.groundWallNormal.normalize();
+        drone.lastCollisionNormal.copy(this.groundWallNormal);
+        drone.position.addScaledVector(
+          this.groundWallNormal,
+          FLAMETHROWER_DRONE_TUNING.collisionSkin,
+        );
+        this.groundTangent.copy(drone.velocity)
+          .addScaledVector(this.groundWallNormal, -drone.velocity.dot(this.groundWallNormal))
+          .setY(0);
+        if (this.groundTangent.lengthSq() < 0.25) {
+          this.chooseGroundAvoidance(drone, this.groundWallNormal, speed);
+          this.groundTangent.copy(drone.avoidanceDirection).multiplyScalar(speed * 0.72);
+        } else {
+          this.groundTangent.normalize().multiplyScalar(Math.min(speed, this.groundTangent.length()));
+          drone.avoidanceDirection.copy(this.groundTangent).normalize();
+          drone.avoidanceSeconds = Math.max(
+            drone.avoidanceSeconds,
+            FLAMETHROWER_DRONE_TUNING.obstacleAvoidanceSeconds,
+          );
+        }
+        drone.velocity.x = this.groundTangent.x;
+        drone.velocity.z = this.groundTangent.z;
+      }
+    }
+    this.enforceGroundBounds(drone, speed);
+    drone.distanceWalked += this.groundPrevious.distanceTo(drone.position);
     if (drone.velocity.lengthSq() > 0.2) drone.visual.face(drone.velocity, delta);
+  }
+
+  /** Bias before contact, then turn along the wall after capsule resolution. */
+  private applyGroundObstacleAvoidance(
+    drone: FlamethrowerDroneRuntime,
+    speed: number,
+    delta: number,
+  ): void {
+    this.groundMotion.copy(drone.velocity).setY(0);
+    if (this.groundMotion.lengthSq() < 0.04) return;
+    this.groundMotion.normalize();
+    const probeDistance = Math.max(
+      drone.collisionRadius * 2.2,
+      speed * FLAMETHROWER_DRONE_TUNING.obstacleLookAheadSeconds,
+    );
+    this.groundProbeStart.set(
+      drone.position.x,
+      drone.position.y + FLAMETHROWER_DRONE_TUNING.collisionHeight * 0.48,
+      drone.position.z,
+    );
+    this.groundProbeEnd.copy(this.groundProbeStart).addScaledVector(this.groundMotion, probeDistance);
+    this.groundWallNormal.set(0, 0, 0);
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    const probeOffsets = [
+      [0, 0],
+      [drone.collisionRadius * 0.72, 0],
+      [-drone.collisionRadius * 0.72, 0],
+      [0, drone.collisionRadius * 0.72],
+      [0, -drone.collisionRadius * 0.72],
+    ];
+    for (const [offsetX, offsetZ] of probeOffsets) {
+      this.groundProbeOffset.set(offsetX, 0, offsetZ);
+      const hit = this.arena.movementSegmentHitDetails(
+        this.groundProbeStart.clone().add(this.groundProbeOffset),
+        this.groundProbeEnd.clone().add(this.groundProbeOffset),
+      );
+      if (!hit || hit.distance >= nearestDistance) continue;
+      nearestDistance = hit.distance;
+      this.groundWallNormal.copy(hit.normal).setY(0);
+    }
+    if (this.groundWallNormal.lengthSq() < 0.04) {
+      if (drone.avoidanceSeconds <= 0) return;
+      this.groundMotion.copy(drone.avoidanceDirection).setY(0);
+      if (this.groundMotion.lengthSq() < 0.04) return;
+      this.groundMotion.normalize();
+      this.groundTangent.setLength(0);
+      drone.velocity.lerp(
+        this.groundMotion.multiplyScalar(speed),
+        1 - Math.exp(-delta * 8),
+      );
+      drone.velocity.y = 0;
+      return;
+    }
+    this.groundWallNormal.normalize();
+    drone.lastCollisionNormal.copy(this.groundWallNormal);
+    this.chooseGroundAvoidance(drone, this.groundWallNormal, speed);
+    drone.velocity.lerp(
+      this.groundMotion.copy(drone.avoidanceDirection).multiplyScalar(speed * 0.92),
+      1 - Math.exp(-delta * 12),
+    );
+    drone.velocity.y = 0;
+  }
+
+  private chooseGroundAvoidance(
+    drone: FlamethrowerDroneRuntime,
+    wallNormal: THREE.Vector3,
+    speed: number,
+  ): void {
+    this.groundCandidate.set(-wallNormal.z, 0, wallNormal.x).normalize();
+    this.groundAlternative.copy(this.groundCandidate).multiplyScalar(-1);
+    const towardDesired = this.groundMotion.copy(this.movement).setY(0);
+    const first = drone.index % 2 === 0 ? this.groundCandidate : this.groundAlternative;
+    const second = drone.index % 2 === 0 ? this.groundAlternative : this.groundCandidate;
+    const firstScore = first.dot(towardDesired);
+    const secondScore = second.dot(towardDesired);
+    drone.avoidanceDirection.copy(firstScore >= secondScore ? first : second);
+    drone.avoidanceSeconds = Math.max(
+      drone.avoidanceSeconds,
+      FLAMETHROWER_DRONE_TUNING.obstacleAvoidanceSeconds,
+    );
+    drone.avoidanceActivations += 1;
+    drone.velocity.x = drone.avoidanceDirection.x * Math.max(3.5, speed * 0.72);
+    drone.velocity.z = drone.avoidanceDirection.z * Math.max(3.5, speed * 0.72);
+  }
+
+  private enforceGroundBounds(drone: FlamethrowerDroneRuntime, speed: number): void {
+    const maxX = this.arena.mapInfo.bounds.width * 0.47 - drone.collisionRadius;
+    const maxZ = this.arena.mapInfo.bounds.depth * 0.47 - drone.collisionRadius;
+    if (drone.position.x < -maxX) {
+      drone.position.x = -maxX;
+      drone.velocity.x = Math.max(2.5, speed * 0.45);
+      drone.lastCollisionNormal.set(1, 0, 0);
+      drone.avoidanceDirection.set(0, 0, drone.index % 2 === 0 ? 1 : -1);
+      drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, FLAMETHROWER_DRONE_TUNING.obstacleAvoidanceSeconds);
+    } else if (drone.position.x > maxX) {
+      drone.position.x = maxX;
+      drone.velocity.x = -Math.max(2.5, speed * 0.45);
+      drone.lastCollisionNormal.set(-1, 0, 0);
+      drone.avoidanceDirection.set(0, 0, drone.index % 2 === 0 ? 1 : -1);
+      drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, FLAMETHROWER_DRONE_TUNING.obstacleAvoidanceSeconds);
+    }
+    if (drone.position.z < -maxZ) {
+      drone.position.z = -maxZ;
+      drone.velocity.z = Math.max(2.5, speed * 0.45);
+      drone.lastCollisionNormal.set(0, 0, 1);
+      drone.avoidanceDirection.set(drone.index % 2 === 0 ? 1 : -1, 0, 0);
+      drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, FLAMETHROWER_DRONE_TUNING.obstacleAvoidanceSeconds);
+    } else if (drone.position.z > maxZ) {
+      drone.position.z = maxZ;
+      drone.velocity.z = -Math.max(2.5, speed * 0.45);
+      drone.lastCollisionNormal.set(0, 0, -1);
+      drone.avoidanceDirection.set(drone.index % 2 === 0 ? 1 : -1, 0, 0);
+      drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, FLAMETHROWER_DRONE_TUNING.obstacleAvoidanceSeconds);
+    }
   }
 
   private launchGrenade(
@@ -547,6 +772,13 @@ export class FlamethrowerDroneSystem {
     drone.state = 'patrol';
     drone.stateElapsed = 0;
     drone.targetOwner = null;
+    drone.targetLostSeconds = 0;
+    drone.lastSeenPosition.copy(drone.position);
+    drone.acquireCooldown = 0;
+    drone.avoidanceDirection.set(0, 0, 0);
+    drone.avoidanceSeconds = 0;
+    drone.avoidanceActivations = 0;
+    drone.lastCollisionNormal.set(0, 0, 0);
     drone.forcedTargetOwner = null;
     drone.forcedTargetSeconds = 0;
     drone.forcedTargetSnapshot = null;

@@ -158,25 +158,29 @@ export type FighterFlightTuning = Readonly<{
  */
 export const FIGHTER_FLIGHT_TUNING = {
   fixedStep: FIGHTER_FIXED_STEP,
-  inputResponse: 15,
-  pitchAcceleration: 8.2,
-  yawAcceleration: 7.4,
-  rollAcceleration: 11.5,
-  maxPitchRate: 2.05,
-  maxYawRate: 2.2,
-  maxRollRate: 3.2,
-  angularDamping: 2.7,
-  autoBankAngle: 0.72,
-  autoBankStrength: 8.5,
-  forwardAcceleration: 58,
-  reverseAcceleration: 20,
-  strafeAcceleration: 32,
-  liftAcceleration: 55,
+  // A fast input settle plus damped angular rates keeps the reticle precise
+  // without making the craft snap to a new heading.
+  inputResponse: 18,
+  pitchAcceleration: 10.5,
+  yawAcceleration: 9.4,
+  rollAcceleration: 13.5,
+  maxPitchRate: 2.3,
+  maxYawRate: 2.5,
+  maxRollRate: 3.6,
+  angularDamping: 4.6,
+  autoBankAngle: 0.62,
+  autoBankStrength: 10,
+  // Forward speed is now an assisted envelope (see updateLinearMotion), so
+  // these are response rates rather than an unbounded thrust accumulator.
+  forwardAcceleration: 66,
+  reverseAcceleration: 30,
+  strafeAcceleration: 16,
+  liftAcceleration: 64,
   gravity: 11.5,
-  forwardDrag: 0.2,
-  lateralDrag: 1.85,
-  verticalDrag: 0.72,
-  groundDrag: 5.5,
+  forwardDrag: 0.65,
+  lateralDrag: 4.2,
+  verticalDrag: 1.8,
+  groundDrag: 8,
   cruiseSpeed: 78,
   afterburnerSpeed: 126,
   boostSpeed: 172,
@@ -215,10 +219,12 @@ export const FIGHTER_FLIGHT_TUNING = {
   hardLandingDamageScale: 0.62,
   colliderSkin: 0.025,
   collisionIterations: 3,
-  collisionRestitution: 0.16,
-  collisionSlideRetention: 0.82,
-  collisionAngularRetention: 0.62,
-  collisionSpinTransfer: 0.014,
+  // A wall should scrub the nose velocity and stabilize the craft into a
+  // recoverable slide, not turn a glancing hit into a pinball spin.
+  collisionRestitution: 0.06,
+  collisionSlideRetention: 0.72,
+  collisionAngularRetention: 0.36,
+  collisionSpinTransfer: 0.003,
   collisionDamageThreshold: 9,
   collisionDamageScale: 0.2,
   bounds: {
@@ -732,14 +738,9 @@ function updateLinearMotion(
   const forward = scratch.forward.set(0, 0, -1).applyQuaternion(state.orientation);
   const right = scratch.right.set(1, 0, 0).applyQuaternion(state.orientation);
   const up = scratch.up.set(0, 1, 0).applyQuaternion(state.orientation);
-  const throttleAcceleration = state.controlThrottle >= 0
-    ? tuning.forwardAcceleration * state.controlThrottle
-    : tuning.reverseAcceleration * state.controlThrottle;
   const afterburnerScale = state.afterburnerActive ? tuning.afterburnerAccelerationMultiplier : 1;
-  state.velocity.addScaledVector(forward, throttleAcceleration * afterburnerScale * delta);
   state.velocity.addScaledVector(right, state.controlStrafe * tuning.strafeAcceleration * delta);
   state.velocity.addScaledVector(up, state.controlLift * tuning.liftAcceleration * delta);
-  if (state.boostActive) state.velocity.addScaledVector(forward, tuning.boostAcceleration * delta);
   state.velocity.y -= tuning.gravity * delta;
 
   const relativeSupportVelocity = scratch.relativeVelocity.copy(state.velocity).sub(state.supportVelocity);
@@ -760,7 +761,23 @@ function updateLinearMotion(
     state.velocity.addScaledVector(state.supportNormal, hoverAcceleration * delta);
   }
 
-  const forwardSpeed = state.velocity.dot(forward) * Math.exp(-tuning.forwardDrag * delta);
+  const speedLimit = state.boostActive
+    ? tuning.boostSpeed
+    : state.afterburnerActive
+      ? tuning.afterburnerSpeed
+      : tuning.cruiseSpeed;
+  const targetForwardSpeed = state.controlThrottle >= 0
+    ? speedLimit * state.controlThrottle
+    : -Math.min(tuning.cruiseSpeed * 0.38, tuning.reverseAcceleration) * Math.abs(state.controlThrottle);
+  const currentForwardSpeed = state.velocity.dot(forward) * Math.exp(-tuning.forwardDrag * delta);
+  const forwardResponse = state.boostActive
+    ? tuning.boostAcceleration
+    : tuning.forwardAcceleration * afterburnerScale;
+  const forwardSpeed = approach(
+    currentForwardSpeed,
+    targetForwardSpeed,
+    Math.max(tuning.reverseAcceleration, forwardResponse) * delta,
+  );
   const lateralSpeed = state.velocity.dot(right) * Math.exp(-tuning.lateralDrag * delta);
   const verticalSpeed = state.velocity.dot(up) * Math.exp(-tuning.verticalDrag * delta);
   state.velocity.copy(forward).multiplyScalar(forwardSpeed)
@@ -773,11 +790,6 @@ function updateLinearMotion(
     state.velocity.addScaledVector(scratch.tangentVelocity, groundRetention - 1);
   }
 
-  const speedLimit = state.boostActive
-    ? tuning.boostSpeed
-    : state.afterburnerActive
-      ? tuning.afterburnerSpeed
-      : tuning.cruiseSpeed;
   const speedSq = state.velocity.lengthSq();
   if (speedSq > speedLimit * speedLimit) state.velocity.multiplyScalar(speedLimit / Math.sqrt(speedSq));
 }
@@ -1040,9 +1052,11 @@ export function stepFighterFlight(
   scratch.startOrientation.copy(state.orientation);
   updateAngularMotion(state, tuning, delta);
   scratch.targetOrientation.copy(state.orientation);
+  // Preserve the incoming velocity for landing-speed and impact telemetry.
+  // It must be captured before thrust, gravity, and collision response modify
+  // the state for this tick.
   scratch.preMoveVelocity.copy(state.velocity);
   updateLinearMotion(state, tuning, delta, hadSupportBeforeMove);
-  scratch.preMoveVelocity.copy(state.velocity);
   resolveSweptMotion(state, collisionQuery, tuning, delta);
   resolveWorldBounds(state, tuning);
   const hadSupportAfterMove = updateSupport(state, collisionQuery, tuning);

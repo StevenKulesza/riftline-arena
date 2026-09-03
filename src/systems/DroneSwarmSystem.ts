@@ -21,6 +21,10 @@ export const DRONE_TUNING = Object.freeze({
   targetRadiusBot: 0.62,
   respawnSeconds: 18,
   visualDiameter: 3.4,
+  targetMemorySeconds: 2.6,
+  obstacleLookAheadSeconds: 0.42,
+  obstacleAvoidanceSeconds: 0.9,
+  collisionSkin: 0.12,
 });
 
 export const BUSTER_DRONE_TUNING = Object.freeze({
@@ -51,6 +55,10 @@ export const BUSTER_DRONE_TUNING = Object.freeze({
   burstCooldownSeconds: 1.85,
   respawnSeconds: 22,
   deploymentDamageMultiplier: 0.25,
+  targetMemorySeconds: 3.2,
+  obstacleLookAheadSeconds: 0.5,
+  obstacleAvoidanceSeconds: 1.15,
+  collisionSkin: 0.16,
 });
 
 export type DroneTargetOwner = 'player' | number;
@@ -84,6 +92,7 @@ export type CombatDroneKind = 'sentinel' | 'buster';
 export type CombatDroneState =
   | 'patrol'
   | 'engage'
+  | 'search'
   | 'evade'
   | BusterVisualFlightState;
 
@@ -108,6 +117,14 @@ const COLLISION_OFFSETS = [
   new THREE.Vector3(0, -1, 0),
   new THREE.Vector3(0, 0, 1),
   new THREE.Vector3(0, 0, -1),
+  new THREE.Vector3(0.7071, 0.7071, 0),
+  new THREE.Vector3(-0.7071, 0.7071, 0),
+  new THREE.Vector3(0.7071, -0.7071, 0),
+  new THREE.Vector3(-0.7071, -0.7071, 0),
+  new THREE.Vector3(0, 0.7071, 0.7071),
+  new THREE.Vector3(0, -0.7071, 0.7071),
+  new THREE.Vector3(0, 0.7071, -0.7071),
+  new THREE.Vector3(0, -0.7071, -0.7071),
 ] as const;
 
 class CombatDroneVisual {
@@ -355,6 +372,11 @@ export class CombatDroneRuntime {
   takeoffs = 0;
   landings = 0;
   targetLostSeconds = 0;
+  readonly lastSeenPosition = new THREE.Vector3();
+  readonly avoidanceDirection = new THREE.Vector3();
+  avoidanceSeconds = 0;
+  avoidanceActivations = 0;
+  readonly lastCollisionNormal = new THREE.Vector3();
 
   constructor(
     readonly id: string,
@@ -428,6 +450,15 @@ export class DroneSwarmSystem {
   private readonly shardDesiredHeading = new THREE.Vector3();
   private readonly awarenessFacing = new THREE.Vector3();
   private readonly awarenessToTarget = new THREE.Vector3();
+  private readonly collisionNormal = new THREE.Vector3();
+  private readonly collisionSlide = new THREE.Vector3();
+  private readonly collisionMotion = new THREE.Vector3();
+  private readonly avoidanceCandidate = new THREE.Vector3();
+  private readonly avoidanceTangent = new THREE.Vector3();
+  private readonly avoidanceAlternative = new THREE.Vector3();
+  private readonly avoidanceUp = new THREE.Vector3();
+  private readonly flightOffset = new THREE.Vector3();
+  private collisionDistance = Number.POSITIVE_INFINITY;
   private readonly shardRoot = new THREE.Group();
   private readonly shardGeometry = new THREE.OctahedronGeometry(0.15, 0);
   private readonly shardCoreMaterial = new THREE.MeshBasicMaterial({
@@ -489,8 +520,23 @@ export class DroneSwarmSystem {
       }
       drone.acquireCooldown -= delta;
       drone.evadeSeconds = Math.max(0, drone.evadeSeconds - delta);
+      drone.avoidanceSeconds = Math.max(0, drone.avoidanceSeconds - delta);
       if (drone.acquireCooldown <= 0) {
-        drone.targetOwner = this.chooseTarget(drone, targets)?.owner ?? null;
+        const acquired = this.chooseTarget(drone, targets);
+        if (acquired) {
+          drone.targetOwner = acquired.owner;
+          drone.lastSeenPosition.copy(acquired.position);
+          drone.targetLostSeconds = 0;
+        } else if (drone.targetOwner !== null) {
+          const remembered = targets.find((candidate) => (
+            candidate.owner === drone.targetOwner && candidate.alive
+          ));
+          drone.targetLostSeconds += 0.18 + drone.index * 0.025;
+          if (!remembered || drone.targetLostSeconds > this.targetMemorySeconds(drone)) {
+            drone.targetOwner = null;
+            drone.targetLostSeconds = 0;
+          }
+        }
         drone.acquireCooldown = 0.18 + drone.index * 0.025;
       }
       const target = drone.targetOwner === null
@@ -553,7 +599,11 @@ export class DroneSwarmSystem {
     return this.raycast(start, direction, distance, extraRadius);
   }
 
-  damage(drone: CombatDroneRuntime, amount: number): DroneDamageResult {
+  damage(
+    drone: CombatDroneRuntime,
+    amount: number,
+    attacker: DroneTargetOwner | null = null,
+  ): DroneDamageResult {
     if (!drone.alive || amount <= 0) {
       return { applied: false, destroyed: false, position: drone.position.clone() };
     }
@@ -562,6 +612,15 @@ export class DroneSwarmSystem {
       : 1;
     drone.health = Math.max(0, drone.health - amount * deploymentArmor);
     drone.evadeSeconds = Math.max(drone.evadeSeconds, 1.25);
+    if (attacker !== null) {
+      // Damage is an authoritative attention event. A target that just fired
+      // is allowed to reacquire outside the normal forward cone, which makes
+      // hits from the rear produce a readable turn/jink instead of a drone
+      // continuing its old patrol heading.
+      drone.targetOwner = attacker;
+      drone.acquireCooldown = 0;
+      drone.targetLostSeconds = 0;
+    }
     const destroyed = drone.health <= 0;
     if (destroyed) {
       drone.alive = false;
@@ -578,6 +637,9 @@ export class DroneSwarmSystem {
       drone.beamStartPending = false;
       drone.beamOnTarget = false;
       drone.aimErrorDegrees = 0;
+      drone.avoidanceSeconds = 0;
+      drone.avoidanceDirection.set(0, 0, 0);
+      drone.lastCollisionNormal.set(0, 0, 0);
       drone.explosions += 1;
     }
     return { applied: true, destroyed, position: drone.position.clone() };
@@ -615,6 +677,12 @@ export class DroneSwarmSystem {
       drone.beamOnTarget = false;
       drone.aimErrorDegrees = 0;
       drone.targetOwner = null;
+      drone.lastSeenPosition.copy(drone.position);
+      drone.targetLostSeconds = 0;
+      drone.avoidanceSeconds = 0;
+      drone.avoidanceActivations = 0;
+      drone.avoidanceDirection.set(0, 0, 0);
+      drone.lastCollisionNormal.set(0, 0, 0);
       drone.state = 'patrol';
       drone.visual.root.visible = true;
       drone.visual.root.position.copy(drone.position);
@@ -641,6 +709,11 @@ export class DroneSwarmSystem {
       drone.stateElapsed = 0;
       drone.takeoffElapsed = 0;
       drone.targetLostSeconds = 0;
+      drone.lastSeenPosition.copy(drone.position);
+      drone.avoidanceSeconds = 0;
+      drone.avoidanceActivations = 0;
+      drone.avoidanceDirection.set(0, 0, 0);
+      drone.lastCollisionNormal.set(0, 0, 0);
       drone.acquireCooldown = 0;
       drone.evadeSeconds = 0;
       drone.fireCooldown = 0;
@@ -759,6 +832,7 @@ export class DroneSwarmSystem {
     drone.position.copy(drone.spawnPosition);
     drone.velocity.set(0, 0, 0);
     drone.targetOwner = null;
+    drone.lastSeenPosition.copy(drone.position);
     drone.state = drone.kind === 'buster' ? 'spool' : 'patrol';
     drone.beamActive = false;
     drone.beamDamageAccumulator = 0;
@@ -768,6 +842,10 @@ export class DroneSwarmSystem {
     drone.stateElapsed = 0;
     drone.takeoffElapsed = 0;
     drone.targetLostSeconds = 0;
+    drone.avoidanceSeconds = 0;
+    drone.avoidanceActivations = 0;
+    drone.avoidanceDirection.set(0, 0, 0);
+    drone.lastCollisionNormal.set(0, 0, 0);
     drone.fireCooldown = 0;
     drone.burstRemaining = 0;
     drone.gazeDot = -1;
@@ -831,6 +909,12 @@ export class DroneSwarmSystem {
     return best;
   }
 
+  private targetMemorySeconds(drone: CombatDroneRuntime): number {
+    return drone.kind === 'buster'
+      ? BUSTER_DRONE_TUNING.targetMemorySeconds
+      : DRONE_TUNING.targetMemorySeconds;
+  }
+
   private updateFlight(
     drone: CombatDroneRuntime,
     target: DroneTargetSnapshot | null,
@@ -838,20 +922,34 @@ export class DroneSwarmSystem {
     elapsed: number,
   ): void {
     const orbit = elapsed * (target ? 0.52 : 0.24) + drone.index * 2.37;
-    if (target) {
+    const targetIsFresh = target !== null && drone.targetLostSeconds <= 0.001;
+    if (target && targetIsFresh) {
       const orbitRadius = 21 + drone.index * 3.5;
-      this.desiredPoint.copy(target.position).add(new THREE.Vector3(
+      this.flightOffset.set(
         Math.cos(orbit) * orbitRadius,
         10.5 + Math.sin(orbit * 1.7) * 4.2,
         Math.sin(orbit) * orbitRadius,
-      ));
+      );
+      this.desiredPoint.copy(target.position).add(this.flightOffset);
       drone.state = drone.evadeSeconds > 0 ? 'evade' : 'engage';
+    } else if (target) {
+      // Keep a short-lived last-seen memory so a wall breaks line of sight into
+      // a search rather than an immediate amnesia/patrol reset. The collision
+      // solver below owns the actual route around the cover.
+      this.flightOffset.set(
+        Math.cos(orbit * 0.64) * 8,
+        4 + Math.sin(orbit) * 2,
+        Math.sin(orbit * 0.64) * 8,
+      );
+      this.desiredPoint.copy(drone.lastSeenPosition).add(this.flightOffset);
+      drone.state = drone.evadeSeconds > 0 ? 'evade' : 'search';
     } else {
-      this.desiredPoint.copy(drone.patrolCenter).add(new THREE.Vector3(
+      this.flightOffset.set(
         Math.cos(orbit) * (15 + drone.index * 2.5),
         Math.sin(orbit * 1.4) * 4,
         Math.sin(orbit) * (15 + drone.index * 2.5),
-      ));
+      );
+      this.desiredPoint.copy(drone.patrolCenter).add(this.flightOffset);
       drone.state = 'patrol';
     }
     const halfWidth = this.arena.mapInfo.bounds.width * 0.47;
@@ -881,6 +979,16 @@ export class DroneSwarmSystem {
       this.separation.addScaledVector(this.steering.normalize(), (7.5 - Math.sqrt(distanceSq)) * 1.8);
     }
     this.desiredVelocity.add(this.separation);
+    this.applyFlightBoundsSteering(drone, this.desiredVelocity, speed, halfWidth, halfDepth);
+    this.applyObstacleAvoidance(
+      drone,
+      this.desiredVelocity,
+      speed,
+      delta,
+      drone.collisionRadius,
+      DRONE_TUNING.obstacleLookAheadSeconds,
+      DRONE_TUNING.obstacleAvoidanceSeconds,
+    );
     this.steering.subVectors(this.desiredVelocity, drone.velocity);
     const steeringLength = this.steering.length();
     if (steeringLength > DRONE_TUNING.acceleration) this.steering.multiplyScalar(DRONE_TUNING.acceleration / steeringLength);
@@ -889,14 +997,13 @@ export class DroneSwarmSystem {
     const maxSpeed = speed * 1.16;
     if (drone.velocity.lengthSq() > maxSpeed * maxSpeed) drone.velocity.setLength(maxSpeed);
 
-    this.intendedPosition.copy(drone.position).addScaledVector(drone.velocity, delta);
-    if (this.sweepWorld(drone.position, this.intendedPosition, drone.collisionRadius * 0.72)) {
-      drone.velocity.reflect(this.steering).multiplyScalar(0.42).addScaledVector(this.steering, 7.5);
-      drone.position.addScaledVector(this.steering, delta * 1.2);
-      drone.collisionHits += 1;
-    } else {
-      drone.position.copy(this.intendedPosition);
-    }
+    this.moveWithWorldCollision(
+      drone,
+      delta,
+      drone.collisionRadius,
+      DRONE_TUNING.obstacleAvoidanceSeconds,
+      DRONE_TUNING.collisionSkin,
+    );
     const floor = this.arena.floorHeightAt(drone.position.x, drone.position.z, drone.position.y + 9);
     if (floor !== null) {
       const minimumY = floor + DRONE_TUNING.minimumClearance;
@@ -905,10 +1012,7 @@ export class DroneSwarmSystem {
         drone.velocity.y = Math.max(3.5, Math.abs(drone.velocity.y) * 0.4);
       }
     }
-    if (Math.abs(drone.position.x) >= halfWidth) drone.velocity.x *= -0.6;
-    if (Math.abs(drone.position.z) >= halfDepth) drone.velocity.z *= -0.6;
-    drone.position.x = THREE.MathUtils.clamp(drone.position.x, -halfWidth, halfWidth);
-    drone.position.z = THREE.MathUtils.clamp(drone.position.z, -halfDepth, halfDepth);
+    this.enforceFlightBounds(drone, halfWidth, halfDepth, speed, DRONE_TUNING.obstacleAvoidanceSeconds);
   }
 
   private updateBusterFlight(
@@ -1082,6 +1186,16 @@ export class DroneSwarmSystem {
       this.separation.addScaledVector(this.steering, (safeDistance - Math.sqrt(distanceSq)) * 2.2);
     }
     this.desiredVelocity.add(this.separation);
+    this.applyFlightBoundsSteering(drone, this.desiredVelocity, speed, halfWidth, halfDepth);
+    this.applyObstacleAvoidance(
+      drone,
+      this.desiredVelocity,
+      speed,
+      delta,
+      drone.collisionRadius,
+      BUSTER_DRONE_TUNING.obstacleLookAheadSeconds,
+      BUSTER_DRONE_TUNING.obstacleAvoidanceSeconds,
+    );
     this.steering.subVectors(this.desiredVelocity, drone.velocity);
     const acceleration = drone.state === 'jink'
       ? BUSTER_DRONE_TUNING.acceleration * 1.45
@@ -1091,20 +1205,24 @@ export class DroneSwarmSystem {
     drone.velocity.multiplyScalar(Math.exp(-delta * 0.14));
     if (drone.velocity.lengthSq() > speed * speed) drone.velocity.setLength(speed);
 
-    this.intendedPosition.copy(drone.position).addScaledVector(drone.velocity, delta);
     const inLandingColumn = drone.state === 'landing-approach'
       && Math.hypot(
         drone.position.x - drone.spawnPosition.x,
         drone.position.z - drone.spawnPosition.z,
       ) <= 1.25;
-    if (!inLandingColumn && this.sweepWorld(drone.position, this.intendedPosition, drone.collisionRadius * 0.78)) {
-      drone.velocity.reflect(this.steering).multiplyScalar(0.36).addScaledVector(this.steering, 9);
-      drone.position.addScaledVector(this.steering, delta * 1.4);
-      drone.collisionHits += 1;
-      this.setBusterState(drone, 'jink');
-      drone.evadeSeconds = Math.max(drone.evadeSeconds, 0.9);
+    if (!inLandingColumn) {
+      if (this.moveWithWorldCollision(
+        drone,
+        delta,
+        drone.collisionRadius,
+        BUSTER_DRONE_TUNING.obstacleAvoidanceSeconds,
+        BUSTER_DRONE_TUNING.collisionSkin,
+      )) {
+        this.setBusterState(drone, 'jink');
+        drone.evadeSeconds = Math.max(drone.evadeSeconds, 0.9);
+      }
     } else {
-      drone.position.copy(this.intendedPosition);
+      drone.position.addScaledVector(drone.velocity, delta);
     }
     const floor = this.arena.floorHeightAt(drone.position.x, drone.position.z, drone.position.y + 15);
     if (drone.state === 'landing-approach') {
@@ -1120,8 +1238,7 @@ export class DroneSwarmSystem {
         drone.velocity.y = Math.max(4.5, Math.abs(drone.velocity.y) * 0.45);
       }
     }
-    drone.position.x = THREE.MathUtils.clamp(drone.position.x, -halfWidth, halfWidth);
-    drone.position.z = THREE.MathUtils.clamp(drone.position.z, -halfDepth, halfDepth);
+    this.enforceFlightBounds(drone, halfWidth, halfDepth, speed, BUSTER_DRONE_TUNING.obstacleAvoidanceSeconds);
 
     if (drone.state === 'landing-approach') {
       const horizontalDistance = Math.hypot(
@@ -1476,19 +1593,240 @@ export class DroneSwarmSystem {
     this.lastShardWorldImpact = worldImpact;
   }
 
+  /**
+   * Bias the desired velocity inward before acceleration. Clamping only after
+   * the move leaves an agent with an outward target and creates the familiar
+   * "buzzing against the invisible wall" failure.
+   */
+  private applyFlightBoundsSteering(
+    drone: CombatDroneRuntime,
+    desiredVelocity: THREE.Vector3,
+    speed: number,
+    halfWidth: number,
+    halfDepth: number,
+  ): void {
+    const margin = drone.collisionRadius + 2.8;
+    const maxX = halfWidth - drone.collisionRadius * 0.72;
+    const maxZ = halfDepth - drone.collisionRadius * 0.72;
+    const xDistance = maxX - Math.abs(drone.position.x);
+    const zDistance = maxZ - Math.abs(drone.position.z);
+    if (xDistance < margin && Math.sign(drone.position.x) * desiredVelocity.x > 0) {
+      const inward = -Math.sign(drone.position.x) * speed * THREE.MathUtils.clamp(
+        1 - xDistance / margin,
+        0.4,
+        1,
+      );
+      desiredVelocity.x = drone.position.x > 0
+        ? Math.min(desiredVelocity.x, inward)
+        : Math.max(desiredVelocity.x, inward);
+    }
+    if (zDistance < margin && Math.sign(drone.position.z) * desiredVelocity.z > 0) {
+      const inward = -Math.sign(drone.position.z) * speed * THREE.MathUtils.clamp(
+        1 - zDistance / margin,
+        0.4,
+        1,
+      );
+      desiredVelocity.z = drone.position.z > 0
+        ? Math.min(desiredVelocity.z, inward)
+        : Math.max(desiredVelocity.z, inward);
+    }
+  }
+
+  /**
+   * Look ahead far enough to choose a side before the hull touches cover.
+   * The selected direction is retained briefly so a corner is rounded rather
+   * than re-planned every frame into the same face.
+   */
+  private applyObstacleAvoidance(
+    drone: CombatDroneRuntime,
+    desiredVelocity: THREE.Vector3,
+    speed: number,
+    delta: number,
+    radius: number,
+    lookAheadSeconds: number,
+    avoidanceDuration: number,
+  ): void {
+    if (desiredVelocity.lengthSq() <= 0.01 || speed <= 0) return;
+    this.collisionMotion.copy(desiredVelocity).normalize();
+    const lookAheadDistance = Math.max(radius * 3.2, speed * lookAheadSeconds);
+    this.intendedPosition.copy(drone.position).addScaledVector(this.collisionMotion, lookAheadDistance);
+    const blockedByWorld = this.sweepWorld(drone.position, this.intendedPosition, radius * 0.92);
+    // A low flying hull naturally overlaps the ground probe. Horizontal
+    // movement should not choose a lateral wall route just because the lower
+    // offset ray sees the floor; the floor reseat below owns that contact.
+    const blocked = blockedByWorld
+      && !(this.collisionNormal.y > 0.72 && Math.abs(this.collisionMotion.y) < 0.2);
+    if (blocked) {
+      // Hold the selected side long enough to round the obstacle. Replanning
+      // every render tick makes an agent alternate around the same face and
+      // looks like indecision even when the collision solver is correct.
+      if (
+        drone.avoidanceSeconds <= 0
+        || drone.avoidanceDirection.lengthSq() <= 0.01
+      ) {
+        this.chooseAvoidanceDirection(drone, desiredVelocity, radius, lookAheadDistance);
+      }
+      desiredVelocity.copy(drone.avoidanceDirection).multiplyScalar(speed);
+      drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, avoidanceDuration);
+      return;
+    }
+    if (drone.avoidanceSeconds <= 0 || drone.avoidanceDirection.lengthSq() <= 0.01) return;
+    this.avoidanceCandidate.copy(drone.avoidanceDirection).multiplyScalar(speed);
+    // Ease back to the actual goal only after the forward corridor is clear.
+    desiredVelocity.lerp(this.avoidanceCandidate, Math.min(0.7, delta * 10));
+    drone.avoidanceSeconds = Math.max(0, drone.avoidanceSeconds - delta * 1.8);
+  }
+
+  private chooseAvoidanceDirection(
+    drone: CombatDroneRuntime,
+    desiredVelocity: THREE.Vector3,
+    radius: number,
+    probeDistance: number,
+  ): void {
+    const normal = this.collisionSlide.copy(this.collisionNormal);
+    if (normal.lengthSq() < 0.25) normal.set(0, 1, 0);
+    else normal.normalize();
+    const desiredDirection = this.collisionMotion.copy(desiredVelocity);
+    if (desiredDirection.lengthSq() < 0.01) desiredDirection.set(0, 0, 1);
+    else desiredDirection.normalize();
+
+    this.avoidanceTangent.copy(desiredDirection)
+      .addScaledVector(normal, -desiredDirection.dot(normal));
+    if (this.avoidanceTangent.lengthSq() < 0.01) {
+      this.avoidanceTangent.crossVectors(THREE.Object3D.DEFAULT_UP, normal);
+      if (this.avoidanceTangent.lengthSq() < 0.01) this.avoidanceTangent.set(1, 0, 0);
+    }
+    this.avoidanceTangent.normalize();
+    this.avoidanceAlternative.copy(this.avoidanceTangent).multiplyScalar(-1);
+    this.avoidanceUp.set(0, normal.y < -0.45 ? -1 : 1, 0);
+    const first = drone.index % 2 === 0 ? this.avoidanceTangent : this.avoidanceAlternative;
+    const second = drone.index % 2 === 0 ? this.avoidanceAlternative : this.avoidanceTangent;
+    const testDistance = Math.max(radius * 2.5, Math.min(probeDistance, 8));
+    if (this.avoidancePathIsClear(drone, first, testDistance, radius)) {
+      this.avoidanceCandidate.copy(first);
+    } else if (this.avoidancePathIsClear(drone, second, testDistance, radius)) {
+      this.avoidanceCandidate.copy(second);
+    } else if (this.avoidancePathIsClear(drone, this.avoidanceUp, testDistance * 0.7, radius)) {
+      this.avoidanceCandidate.copy(this.avoidanceUp);
+    } else {
+      this.avoidanceCandidate.copy(normal).multiplyScalar(0.72).add(this.avoidanceUp);
+      if (this.avoidanceCandidate.lengthSq() < 0.01) this.avoidanceCandidate.set(0, 1, 0);
+    }
+    drone.avoidanceDirection.copy(this.avoidanceCandidate).normalize();
+    drone.avoidanceActivations += 1;
+  }
+
+  private avoidancePathIsClear(
+    drone: CombatDroneRuntime,
+    direction: THREE.Vector3,
+    distance: number,
+    radius: number,
+  ): boolean {
+    this.intendedPosition.copy(drone.position).addScaledVector(direction, distance);
+    return !this.sweepWorld(drone.position, this.intendedPosition, radius * 0.92);
+  }
+
+  /** Move with up to three swept-sphere slide iterations, not endpoint bounce. */
+  private moveWithWorldCollision(
+    drone: CombatDroneRuntime,
+    delta: number,
+    radius: number,
+    avoidanceDuration: number,
+    skin = radius * 0.08,
+  ): boolean {
+    let remainingDelta = delta;
+    let collided = false;
+    for (let iteration = 0; iteration < 3 && remainingDelta > 1e-5; iteration += 1) {
+      this.collisionMotion.copy(drone.velocity).multiplyScalar(remainingDelta);
+      const travelDistance = this.collisionMotion.length();
+      if (travelDistance <= 1e-5) break;
+      this.intendedPosition.copy(drone.position).add(this.collisionMotion);
+      if (!this.sweepWorld(drone.position, this.intendedPosition, radius * 0.92)) {
+        drone.position.copy(this.intendedPosition);
+        break;
+      }
+
+      collided = true;
+      drone.collisionHits += 1;
+      drone.lastCollisionNormal.copy(this.collisionNormal);
+      const fraction = THREE.MathUtils.clamp(
+        (this.collisionDistance - skin) / travelDistance,
+        0,
+        0.86,
+      );
+      drone.position.addScaledVector(this.collisionMotion, fraction);
+      drone.position.addScaledVector(this.collisionNormal, skin);
+
+      const intoSurface = drone.velocity.dot(this.collisionNormal);
+      if (intoSurface < 0) drone.velocity.addScaledVector(this.collisionNormal, -intoSurface);
+      this.collisionSlide.copy(drone.velocity);
+      if (this.collisionSlide.lengthSq() < 1.5) {
+        this.chooseAvoidanceDirection(drone, this.desiredVelocity, radius, Math.max(radius * 3, 6));
+        this.collisionSlide.copy(drone.avoidanceDirection).multiplyScalar(Math.max(4, drone.velocity.length()));
+        drone.velocity.lerp(this.collisionSlide, 0.68);
+      } else {
+        drone.avoidanceDirection.copy(this.collisionSlide).normalize();
+      }
+      drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, avoidanceDuration);
+      remainingDelta *= Math.max(0.08, 1 - fraction);
+      if (fraction < 0.02) remainingDelta *= 0.5;
+    }
+    return collided;
+  }
+
+  private enforceFlightBounds(
+    drone: CombatDroneRuntime,
+    halfWidth: number,
+    halfDepth: number,
+    speed: number,
+    avoidanceDuration: number,
+  ): void {
+    const maxX = halfWidth - drone.collisionRadius * 0.72;
+    const maxZ = halfDepth - drone.collisionRadius * 0.72;
+    let contacted = false;
+    this.collisionNormal.set(0, 0, 0);
+    if (drone.position.x < -maxX) {
+      drone.position.x = -maxX;
+      this.collisionNormal.x = 1;
+      if (drone.velocity.x < 0) drone.velocity.x = Math.max(2.5, speed * 0.42);
+      contacted = true;
+    } else if (drone.position.x > maxX) {
+      drone.position.x = maxX;
+      this.collisionNormal.x = -1;
+      if (drone.velocity.x > 0) drone.velocity.x = -Math.max(2.5, speed * 0.42);
+      contacted = true;
+    }
+    if (drone.position.z < -maxZ) {
+      drone.position.z = -maxZ;
+      this.collisionNormal.z = 1;
+      if (drone.velocity.z < 0) drone.velocity.z = Math.max(2.5, speed * 0.42);
+      contacted = true;
+    } else if (drone.position.z > maxZ) {
+      drone.position.z = maxZ;
+      this.collisionNormal.z = -1;
+      if (drone.velocity.z > 0) drone.velocity.z = -Math.max(2.5, speed * 0.42);
+      contacted = true;
+    }
+    if (!contacted) return;
+    drone.lastCollisionNormal.copy(this.collisionNormal).normalize();
+    drone.avoidanceDirection.copy(drone.lastCollisionNormal);
+    drone.avoidanceSeconds = Math.max(drone.avoidanceSeconds, avoidanceDuration);
+  }
+
   private sweepWorld(start: THREE.Vector3, end: THREE.Vector3, radius: number): boolean {
     let bestDistance = Number.POSITIVE_INFINITY;
     let found = false;
-    this.steering.set(0, 1, 0);
+    this.collisionNormal.set(0, 1, 0);
     for (const unitOffset of COLLISION_OFFSETS) {
       this.collisionStart.copy(start).addScaledVector(unitOffset, radius);
       this.collisionEnd.copy(end).addScaledVector(unitOffset, radius);
       const hit = this.arena.movementSegmentHitDetails(this.collisionStart, this.collisionEnd);
       if (!hit || hit.distance >= bestDistance) continue;
       bestDistance = hit.distance;
-      this.steering.copy(hit.normal).normalize();
+      this.collisionNormal.copy(hit.normal).normalize();
       found = true;
     }
+    this.collisionDistance = bestDistance;
     return found;
   }
 }

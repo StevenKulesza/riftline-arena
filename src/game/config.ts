@@ -70,6 +70,9 @@ export const METERS_PER_SECOND_PER_MPH = 1609.344 / 3600;
 /** Hard player ceiling: ski lines and air safety clamp at this speed. */
 export const PLAYER_MAX_SPEED_MPH = 250;
 
+/** Maximum 120 Hz simulation ticks spent by one render frame. */
+export const MAX_FIXED_STEPS_PER_FRAME = 4;
+
 export const MOVEMENT = {
   fixedStep: 1 / 120,
   maxSubstepDistance: 0.2,

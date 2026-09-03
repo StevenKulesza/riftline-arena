@@ -5,8 +5,8 @@ const MAPS = [
     name: 'Monsoon Divide',
     query: '',
     color: '#86a2aa',
-    near: 260,
-    far: 1300,
+    near: 920,
+    far: 5200,
   },
   {
     name: 'QuickSense',
@@ -42,7 +42,7 @@ for (const map of MAPS) {
     });
     expect(result.fog!.near).toBeGreaterThanOrEqual(100);
     expect(result.fog!.far).toBeGreaterThan(result.fog!.near * 4);
-    expect(result.fog!.far).toBeLessThan(1_400);
+    expect(result.fog!.far).toBeLessThan(map.name === 'Monsoon Divide' ? 5_300 : 1_400);
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });

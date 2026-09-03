@@ -261,7 +261,9 @@ test('southwest concrete launch ramp is traversable at race speed and produces a
   await page.keyboard.down('KeyW');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.stepSimulation(0.45));
   await page.keyboard.down('ShiftLeft');
-  const samples = await fixedSamples(page, 52, 0.1);
+  // The release map is twice the original linear footprint. Preserve the
+  // full shoulder-to-lip proof window rather than sampling only half the run.
+  const samples = await fixedSamples(page, 112, 0.1);
   await page.keyboard.up('ShiftLeft');
   await page.keyboard.up('KeyW');
 
@@ -332,7 +334,8 @@ test('enterable bunker walls contain dash-speed movement and release cleanly', a
   const minimumX = Math.min(...impactSamples.map((sample) => sample.x));
   expectFiniteRunning([start, ...impactSamples], 'west bunker wall impact');
   expect(wallOccludes, 'the authored bunker back wall must exist in the static collision BVH').toBe(false);
-  expect(minimumX, 'capsule center must remain inside the west bunker back wall').toBeGreaterThan(-287.64);
+  const westInteriorLimit = (-132 - 12.5 + 0.55) * MONSOON_WORLD_SCALE + 0.26;
+  expect(minimumX, 'capsule center must remain inside the west bunker back wall').toBeGreaterThan(westInteriorLimit);
 
   await setAimAlong(page, { x: 1, z: 0 });
   const blocked = await samplePlayer(page);

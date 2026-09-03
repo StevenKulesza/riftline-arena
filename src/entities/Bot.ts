@@ -6,6 +6,7 @@ import { JetpackRig } from '../assets/JetpackRig';
 import type { ArenaRuntime } from '../game/Arena';
 import { GRAPPLE, GRENADE, MOVEMENT, POWERUP, WEAPONS, type WeaponId } from '../game/config';
 import { JetpackEnergy } from '../game/JetpackEnergy';
+import { skiCarveBlend, skiMomentumCurve, type SkiMomentumCurve } from '../game/SkiMomentum';
 import {
   BotNavigationGrid,
   NAV_LINK_JUMP,
@@ -99,6 +100,82 @@ const COMBAT_RANGE = 48;
 const STUCK_RELOCATE_SECONDS = 6;
 const NAVIGATION_STALL_RELOCATE_SECONDS = 9;
 const PAD_LAUNCH_COOLDOWN = 0.7;
+const BOT_SKI_SLOPE_COSINE = 0.965;
+const BOT_SKI_MIN_SPEED = 8;
+
+export type BotSkiMovementScratch = {
+  tangentGravity: THREE.Vector3;
+  tangentVelocity: THREE.Vector3;
+  tangentWish: THREE.Vector3;
+  momentum: SkiMomentumCurve;
+};
+
+/**
+ * Deterministic bot ski step matching the player's tangent-gravity, carve,
+ * drag, and low-authority surface push. Scratch storage is supplied by the
+ * caller so the fixed-step bot path remains allocation-free.
+ */
+export function applyBotSkiMovement(
+  velocity: THREE.Vector3,
+  wishDirection: THREE.Vector3,
+  floorNormal: THREE.Vector3,
+  delta: number,
+  scratch: BotSkiMovementScratch,
+  pushWishSpeed: number = MOVEMENT.skiPushWishSpeed,
+): void {
+  if (delta <= 0 || floorNormal.y <= 0.05) return;
+
+  // Preserve horizontal momentum while seating it on the current surface.
+  velocity.y = -(
+    floorNormal.x * velocity.x
+    + floorNormal.z * velocity.z
+  ) / floorNormal.y;
+  const horizontalSpeed = Math.hypot(velocity.x, velocity.z);
+  const momentum = skiMomentumCurve(horizontalSpeed, scratch.momentum);
+
+  // Gravity contributes only the component parallel to the skiable surface.
+  const tangentGravity = scratch.tangentGravity.set(0, -MOVEMENT.gravity, 0)
+    .addScaledVector(floorNormal, MOVEMENT.gravity * floorNormal.y)
+    .multiplyScalar(MOVEMENT.skiGravityScale);
+  velocity.addScaledVector(tangentGravity, delta);
+
+  // Carve by rotating the tangent heading without replacing its speed.
+  const tangentVelocity = scratch.tangentVelocity.copy(velocity)
+    .addScaledVector(floorNormal, -velocity.dot(floorNormal));
+  const tangentSpeed = tangentVelocity.length();
+  if (tangentSpeed >= 0.25 && wishDirection.lengthSq() >= 0.0001) {
+    const tangentWish = scratch.tangentWish.copy(wishDirection)
+      .addScaledVector(floorNormal, -wishDirection.dot(floorNormal));
+    if (tangentWish.lengthSq() >= 0.0001) {
+      tangentWish.normalize();
+      tangentVelocity.multiplyScalar(1 / tangentSpeed)
+        .lerp(tangentWish, skiCarveBlend(tangentSpeed, delta))
+        .normalize()
+        .multiplyScalar(tangentSpeed);
+      velocity.copy(tangentVelocity);
+    }
+  }
+
+  const speed = velocity.length();
+  if (speed > 0.001) {
+    const nextSpeed = Math.max(0, speed - momentum.dragAcceleration * delta);
+    velocity.multiplyScalar(nextSpeed / speed);
+  }
+
+  // Navigation input is a small tangent shove, not ground acceleration that
+  // can overwrite a fast downhill line.
+  if (wishDirection.lengthSq() < 0.0001) return;
+  const tangentWish = scratch.tangentWish.copy(wishDirection)
+    .addScaledVector(floorNormal, -wishDirection.dot(floorNormal));
+  if (tangentWish.lengthSq() < 0.0001) return;
+  tangentWish.normalize();
+  const currentAlong = velocity.dot(tangentWish);
+  const add = Math.min(
+    MOVEMENT.skiPushAcceleration * pushWishSpeed * delta,
+    pushWishSpeed - currentAlong,
+  );
+  if (add > 0) velocity.addScaledVector(tangentWish, add);
+}
 
 export type BotPathState = 'none' | 'following' | 'direct' | 'blocked';
 
@@ -268,6 +345,12 @@ export class Bot {
   private readonly scratchForward = new THREE.Vector3();
   private readonly scratchRight = new THREE.Vector3();
   private readonly scratchProbe = new THREE.Vector3();
+  private readonly skiMovementScratch: BotSkiMovementScratch = {
+    tangentGravity: new THREE.Vector3(),
+    tangentVelocity: new THREE.Vector3(),
+    tangentWish: new THREE.Vector3(),
+    momentum: { resistance: 0, dragAcceleration: 0 },
+  };
   private readonly awarenessDot: number;
   private readonly grenadeCooldownDuration: number;
   private readonly strafeScale: number;
@@ -463,21 +546,32 @@ export class Bot {
     // ---- Locomotion physics, every tick (Quake friction + Q3 acceleration) ----
     const jumpedThisTick = this.tryJump();
     this.tryDash();
-    if (this.grounded && !jumpedThisTick && horizontalSpeed > 0 && this.knockbackLockout <= 0) {
-      const skiing = this.floorNormal.y < 0.965 && horizontalSpeed > 8;
-      if (skiing) {
-        const friction = Math.max(0, 1 - MOVEMENT.skiFriction * delta);
-        this.velocity.x *= friction;
-        this.velocity.z *= friction;
-      } else {
-        const control = Math.max(MOVEMENT.stopSpeed, horizontalSpeed);
-        const nextSpeed = Math.max(0, horizontalSpeed - control * MOVEMENT.groundFriction * delta);
-        const scale = nextSpeed / horizontalSpeed;
+    const locomotionSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    const skiing = this.grounded
+      && !jumpedThisTick
+      && this.knockbackLockout <= 0
+      && this.floorNormal.y > 0.05
+      && this.floorNormal.y < BOT_SKI_SLOPE_COSINE
+      && locomotionSpeed > BOT_SKI_MIN_SPEED;
+    if (skiing) {
+      applyBotSkiMovement(
+        this.velocity,
+        this.wishDirection,
+        this.floorNormal,
+        delta,
+        this.skiMovementScratch,
+        MOVEMENT.skiPushWishSpeed * (this.speedBoost > 0 ? 1.2 : 1),
+      );
+    } else {
+      if (this.grounded && !jumpedThisTick && locomotionSpeed > 0 && this.knockbackLockout <= 0) {
+        const control = Math.max(MOVEMENT.stopSpeed, locomotionSpeed);
+        const nextSpeed = Math.max(0, locomotionSpeed - control * MOVEMENT.groundFriction * delta);
+        const scale = nextSpeed / locomotionSpeed;
         this.velocity.x *= scale;
         this.velocity.z *= scale;
       }
+      this.accelerate(delta);
     }
-    this.accelerate(delta);
 
     if (this.grappleActive) {
       const anchorEye = this.scratchDirectionB.copy(this.group.position);
@@ -521,7 +615,8 @@ export class Bot {
       );
     }
 
-    this.velocity.y -= MOVEMENT.gravity * delta;
+    // Grounded skiing already received gravity projected onto the surface.
+    if (!skiing) this.velocity.y -= MOVEMENT.gravity * delta;
     const speed = this.velocity.length();
     const cap = this.grappleActive ? GRAPPLE.maxSpeed : MOVEMENT.maxSpeed;
     if (speed > cap) this.velocity.multiplyScalar(cap / speed);

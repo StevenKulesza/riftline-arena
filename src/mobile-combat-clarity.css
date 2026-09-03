@@ -1,0 +1,68 @@
+/* Loaded last so portrait touch play retains a clear central target corridor. */
+@media (pointer: coarse) and (orientation: portrait), (max-width: 480px) {
+  .touch-button--view,
+  .touch-button--vehicle {
+    display: none;
+  }
+
+  #touch-controls {
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+    left: max(10px, env(safe-area-inset-left));
+    gap: 8px;
+  }
+
+  #touch-stick {
+    width: 82px;
+  }
+
+  .touch-actions {
+    grid-template-columns: repeat(4, 42px);
+    gap: 5px;
+  }
+
+  .touch-button {
+    width: 42px;
+    min-height: 42px;
+    font-size: 0.47rem;
+  }
+
+  .vitals-cluster,
+  .weapon-cluster {
+    bottom: max(108px, calc(env(safe-area-inset-bottom) + 98px));
+    min-height: 44px;
+    backdrop-filter: blur(2px);
+  }
+
+  .vitals-cluster {
+    width: min(150px, calc(44vw - 12px));
+    padding: 5px 8px 6px 7px;
+  }
+
+  .vital {
+    min-height: 26px;
+    padding-bottom: 2px;
+  }
+
+  .vital-reading strong {
+    font-size: 0.92rem;
+  }
+
+  .weapon-cluster {
+    width: min(158px, calc(46vw - 12px));
+    padding: 5px 7px 5px 8px;
+  }
+
+  .weapon-copy strong {
+    max-width: 10ch;
+    font-size: 0.61rem;
+  }
+
+  .ammo-lockup strong {
+    font-size: 0.88rem;
+  }
+
+  #hud::after {
+    bottom: max(108px, calc(env(safe-area-inset-bottom) + 98px));
+  }
+}

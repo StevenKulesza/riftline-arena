@@ -132,7 +132,7 @@ interface ThreeGameDiagnostics {
     alive: boolean;
     health: number;
     maxHealth: number;
-    state: 'patrol' | 'engage' | 'evade' | 'destroyed' | 'spool' | 'takeoff' | 'survey' | 'attack-run' | 'breakaway' | 'jink' | 'landing-approach' | 'landed';
+    state: 'patrol' | 'engage' | 'search' | 'evade' | 'destroyed' | 'spool' | 'takeoff' | 'survey' | 'attack-run' | 'breakaway' | 'jink' | 'landing-approach' | 'landed';
     targetOwner: 'player' | number | null;
     respawnSeconds: number;
     shotsFired: number;
@@ -150,6 +150,10 @@ interface ThreeGameDiagnostics {
     respawns: number;
     collisionRadius: number;
     collisionHits: number;
+    targetLostSeconds: number;
+    avoidanceSeconds: number;
+    avoidanceActivations: number;
+    lastCollisionNormal: { x: number; y: number; z: number };
     modelReady: boolean;
     modelMeshCount: number;
     modelWidth: number;
@@ -177,6 +181,10 @@ interface ThreeGameDiagnostics {
     distanceWalked: number;
     collisionRadius: number;
     collisionHits: number;
+    targetLostSeconds: number;
+    avoidanceSeconds: number;
+    avoidanceActivations: number;
+    lastCollisionNormal: { x: number; y: number; z: number };
     modelReady: boolean;
     partCount: number;
     rigNodeCount: number;
@@ -207,12 +215,16 @@ interface ThreeGameDiagnostics {
     health: number;
     maxHealth: number;
     healthMultiplier: number;
-    state: 'patrol' | 'engage' | 'evade' | 'spool' | 'takeoff' | 'survey' | 'attack-run' | 'breakaway' | 'jink' | 'landing-approach' | 'landed' | 'destroyed';
+    state: 'patrol' | 'engage' | 'search' | 'evade' | 'spool' | 'takeoff' | 'survey' | 'attack-run' | 'breakaway' | 'jink' | 'landing-approach' | 'landed' | 'destroyed';
     flightPattern: 'figure-eight' | 'vertical-sweep' | 'pincer' | 'sentinel-orbit';
     targetOwner: 'player' | number | null;
     respawnSeconds: number;
     collisionRadius: number;
     collisionHits: number;
+    targetLostSeconds: number;
+    avoidanceSeconds: number;
+    avoidanceActivations: number;
+    lastCollisionNormal: { x: number; y: number; z: number };
     shotsFired: number;
     shardsFired: number;
     shardHits: number;
@@ -567,6 +579,8 @@ interface ThreeGameTestHooks {
   setWeapon(weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc'): void;
   /** Set deterministic camera aim for muzzle/beam tests. */
   setAim(yaw: number, pitch: number): void;
+  /** Freeze the severe Monsoon wall without advancing unrelated match simulation. */
+  stageMonsoonWeather(): void;
   /** Place a frozen QA spectator camera without changing the selected default view. */
   setSpectatorCamera(
     position: { x: number; y: number; z: number },
@@ -646,6 +660,8 @@ interface ThreeGameTestHooks {
   /** Render the equipped procedural weapon as a centered side profile for visual QA. */
   setWeaponInspectionMode(enabled: boolean): void;
   setWeaponHandsVisible(visible: boolean): void;
+  /** Hide the entire first-person rig for unobstructed environment/reward captures. */
+  setFirstPersonWeaponVisible(visible: boolean): void;
   parkBotsForScreenshot(): void;
   resetWeaponCaptureState(): void;
   /** Freeze ambient/idle animation time so screenshots are stable. */
@@ -725,6 +741,56 @@ interface ThreeGameTestHooks {
       }>;
     };
   } | null;
+  /** Return Monsoon's two procedural traversal towers and authored review cameras. */
+  getMonsoonOutpostTowerAudit(): {
+    towerCount: 2;
+    expectedVisibleDrawCalls: number;
+    expectedShadowDrawCalls: number;
+    estimatedVisibleTriangles: number;
+    colliderBoxCount: number;
+    platformSurfaceCount: number;
+    stairRampCount: number;
+    towers: Array<{
+      name: string;
+      center: { x: number; y: number; z: number };
+      footprint: { width: number; depth: number };
+      architecturalHeight: number;
+      roofHeight: number;
+      entranceSide: 'north' | 'south';
+      doorwayWidth: number;
+      doorwayHeight: number;
+      stairWidth: number;
+      stairFlightCount: number;
+      intermediateLandingCount: number;
+    }>;
+    reviewViews: Array<{
+      name: string;
+      camera: { x: number; y: number; z: number };
+      target: { x: number; y: number; z: number };
+    }>;
+    stairRamps: Array<{
+      name: string;
+      spec: {
+        origin: { x: number; y: number; z: number };
+        heading: number;
+        length: number;
+        width: number;
+        rise: number;
+      };
+    }>;
+    integrationClearanceConflicts: Array<{ stair: string; collider: string }>;
+  } | null;
+  /** Return deterministic biome-family, density-zone, scale, and gameplay-clearance diagnostics. */
+  getMonsoonBiomeVegetationAudit(): {
+    deterministic: boolean;
+    familyCounts: { boulder: number; fern: number; shrub: number; tree: number };
+    requestedCounts: { rock: number; grass: number; weed: number; fern: number; shrub: number; tree: number };
+    placedCounts: { grass: number; weed: number; fern: number[]; shrub: number[]; tree: number[] };
+    routeLimits: { grass: number; weed: number; fern: number; shrub: number; tree: number };
+    baseClearance: { grass: number; weed: number; fern: number; shrub: number; tree: number };
+    densityZoneCounts: { grass: number; weed: number; fern: number; shrub: number; tree: number };
+    scaleRanges: { fern: number[]; shrub: number[]; tree: number[]; boulder: number[] };
+  } | null;
   /** Deterministic player-eye screenshots covering every major tower section. */
   getOutpostTowerReviewStates(): string[];
   /** Visibility diagnostics for the imported tower hierarchy and mesh materials. */
@@ -752,6 +818,12 @@ interface ThreeGameTestHooks {
     shadowDraws: number;
     triangles: number;
     instances: number;
+  }>;
+  pickSceneAtNdc(x: number, y: number): Array<{
+    name: string;
+    parents: string[];
+    material: string | null;
+    distance: number;
   }>;
   /** Authored spawn-cubby bunker kit: hull/trim/signal instance counts and collider names. */
   getSpawnCubbyBunkerAudit(): {

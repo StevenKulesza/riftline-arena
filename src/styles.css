@@ -1270,8 +1270,11 @@ body[data-piloting-fighter="true"] .mobility-cluster {
 .fighter-canopy > span {
   position: absolute;
   display: block;
-  background: linear-gradient(90deg, rgba(1, 7, 11, 0.97), rgba(24, 40, 47, 0.94) 56%, rgba(75, 104, 111, 0.72));
-  box-shadow: inset 0 0 0 1px rgba(142, 202, 213, 0.18), 0 0 24px rgba(0, 0, 0, 0.62);
+  /* Keep the cockpit frame as a hairline HUD accent. Filled canopy polygons
+     read as a dark vignette over the game world, especially on OLED screens. */
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(142, 202, 213, 0.18), 0 0 8px rgba(74, 224, 241, 0.035);
+  opacity: 0.62;
 }
 
 .fighter-canopy > i {
@@ -1297,7 +1300,7 @@ body[data-piloting-fighter="true"] .mobility-cluster {
   left: 26vw;
   height: clamp(34px, 6vh, 58px);
   clip-path: polygon(6% 0, 94% 0, 100% 100%, 0 100%);
-  background: linear-gradient(180deg, rgba(40, 60, 67, 0.97), rgba(1, 7, 10, 0.99));
+  background: transparent;
 }
 
 .fighter-ident {
@@ -1355,7 +1358,7 @@ body[data-piloting-fighter="true"] .mobility-cluster {
 .fighter-heading-tape strong { color: #f4feff; font-size: 0.78rem; }
 
 .fighter-flight-cue {
-  top: 47%;
+  top: 50%;
   left: 50%;
   width: min(390px, 42vw);
   height: min(300px, 44vh);

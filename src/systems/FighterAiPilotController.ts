@@ -1274,9 +1274,12 @@ export class FighterAiPilotController {
     }
     const yaw = dx * vehicle.right.x + dy * vehicle.right.y + dz * vehicle.right.z;
     const pitch = dx * vehicle.up.x + dy * vehicle.up.y + dz * vehicle.up.z;
-    this.intent.yaw = yaw * 1.8;
-    this.intent.pitch = pitch * 1.7;
-    this.intent.roll = -yaw * 1.35;
+    // The flight model supplies coordinated bank and slip damping. AI only
+    // needs a measured steering request; the old saturated values caused
+    // oscillating S-turns when a target crossed the nose.
+    this.intent.yaw = yaw * 1.45;
+    this.intent.pitch = pitch * 1.35;
+    this.intent.roll = -yaw * 0.86;
     this.intent.throttle = throttle;
 
     const speed = Math.sqrt(

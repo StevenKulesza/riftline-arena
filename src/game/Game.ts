@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
@@ -72,7 +73,12 @@ import {
 import { createSeededRandom } from '../utils/random';
 import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact, type SurfaceHit } from './Arena';
 import { MONSOON_WORLD_SCALE } from './maps/MonsoonDivide';
-import { COMBAT, GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
+import {
+  MonsoonRewardVisualKit,
+  type MonsoonRewardVisual,
+  type MonsoonRewardKind,
+} from './maps/MonsoonRewardVisuals';
+import { COMBAT, GRAPPLE, GRENADE, MATCH_DURATION, MAX_FIXED_STEPS_PER_FRAME, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
 import { JetpackEnergy } from './JetpackEnergy';
 import {
   FIGHTER_FIXED_STEP,
@@ -198,6 +204,7 @@ type GrenadeEntity = {
 type PickupState = {
   kind: PickupKind;
   group: THREE.Group;
+  visual?: MonsoonRewardVisual;
   active: boolean;
   cooldown: number;
   respawn: number;
@@ -223,13 +230,16 @@ const MATCH_COUNTDOWN_DURATION = 4;
 const MATCH_COUNTDOWN_CUES: readonly CountdownCue[] = ['READY', '3', '2', '1'];
 // qfusion's standing view is origin + 30; origin sits 24 units above ground.
 const PLAYER_EYE = 54 / 56;
-const MAX_FIXED_STEPS_PER_FRAME = 2;
 // Player movement/projectiles retain the authored 120 Hz step. Bot decisions
 // and locomotion do not benefit perceptibly above 60 Hz and were doubling LOS,
 // navigation, and capsule work on every render frame.
 const BOT_FIXED_STEP = 1 / 60;
 const HUD_UPDATE_INTERVAL = 1 / 15;
-const DIAGNOSTICS_UPDATE_INTERVAL = 1 / 4;
+// The full diagnostics object is intentionally rich and allocation-heavy.
+// Publishing it at 4 Hz created a repeatable young-generation GC hitch about
+// every 2.5 seconds during otherwise 2-6 ms frames. Runtime telemetry and all
+// explicit QA hooks remain responsive at 1 Hz without taxing active combat.
+const DIAGNOSTICS_UPDATE_INTERVAL = 1;
 const BASE_GAME_FOV = 80;
 const THIRD_PERSON_FOV = 62;
 const MAX_SPEED_FOV = 98;
@@ -243,8 +253,8 @@ const MAP_FOG_PROFILES = Object.freeze({
   }),
   monsoon: Object.freeze({
     color: 0x86a2aa,
-    near: 260,
-    far: 1300,
+    near: 920,
+    far: 5200,
   }),
 });
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
@@ -320,7 +330,7 @@ export class Game {
   private inkPass!: ShaderPass;
   private readonly scene = new THREE.Scene();
   private readonly speedTrails = new SpeedTrailSystem(this.scene, 4);
-  private readonly camera = new THREE.PerspectiveCamera(BASE_GAME_FOV, 1, 0.08, 2800);
+  private readonly camera = new THREE.PerspectiveCamera(BASE_GAME_FOV, 1, 0.08, 10_000);
   private readonly input: InputController;
   private readonly arena: ArenaRuntime;
   private readonly audio = new AudioSystem();
@@ -379,6 +389,7 @@ export class Game {
     surface: 'metal',
   };
   private readonly pickups: PickupState[] = [];
+  private readonly monsoonRewardVisuals: MonsoonRewardVisualKit | null;
   private readonly botTargets = new Map<number, Owner>();
   private readonly botObjectives = new Map<number, BotObjectiveCommitment>();
   private botNavigation: BotNavigationGrid | null = null;
@@ -684,8 +695,13 @@ export class Game {
     grenadeAsset: THREE.Group,
   ) {
     this.arena = arena;
+    this.monsoonRewardVisuals = arena.mapInfo.name === 'Monsoon Divide'
+      ? new MonsoonRewardVisualKit()
+      : null;
     this.botNavigation = new BotNavigationGrid(arena, {
-      cellSize: 2,
+      // Monsoon's 2x release footprint retains its original design-space nav
+      // density without quadrupling node memory or A* search area.
+      cellSize: arena.mapInfo.name === 'Monsoon Divide' ? 4 : 2,
       capsuleRadius: MOVEMENT.playerRadius,
       capsuleHeight: MOVEMENT.playerHeight,
     });
@@ -1019,7 +1035,11 @@ export class Game {
     for (const fighter of this.fighters) fighter.visual.dispose();
     for (const projectile of this.projectiles) this.disposeObject(projectile.root);
     for (const grenade of this.grenades) this.disposeObject(grenade.root);
-    for (const pickup of this.pickups) this.disposeObject(pickup.group);
+    for (const pickup of this.pickups) {
+      if (pickup.visual) pickup.group.removeFromParent();
+      else this.disposeObject(pickup.group);
+    }
+    this.monsoonRewardVisuals?.dispose();
     this.disposeObject(this.coreGroup);
     // These clones share the first-person cache's GPU resources. Detach them
     // before the owning visuals are disposed so shared textures and geometry
@@ -1228,9 +1248,8 @@ export class Game {
 
     if (!this.pausedForScreenshot) {
       // Bound catch-up work so one slow render cannot trigger a spiral of
-      // increasingly expensive simulation frames. At 60 FPS this still runs
-      // the authored 120 Hz simulation twice per render; only overload debt is
-      // discarded.
+      // increasingly expensive simulation frames. Four authored 120 Hz steps
+      // cover the supported 30 FPS floor; only deeper overload debt is dropped.
       this.accumulator = Math.min(
         this.accumulator + Math.min(delta, 0.05),
         MOVEMENT.fixedStep * MAX_FIXED_STEPS_PER_FRAME,
@@ -1246,6 +1265,10 @@ export class Game {
     this.arena.setPlayerInfluence(this.playerPosition);
     this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
     this.arena.update(this.pausedForScreenshot ? this.screenshotArenaTime : elapsed, this.reducedMotion);
+    this.mapLighting.setWeatherSeverity(this.weatherSnapshot.severity);
+    if (this.arena.mapInfo.name !== 'QuickSense') {
+      this.scene.backgroundIntensity = 0.78 * THREE.MathUtils.lerp(1, 0.58, this.weatherSnapshot.severity);
+    }
     this.updatePickupVisuals(delta, elapsed);
     this.updateEffects(this.pausedForScreenshot ? 0 : delta);
     this.playerJetpack.update(this.jetpackActive && !this.playerFighter, this.pausedForScreenshot ? 0 : delta, elapsed, this.reducedMotion);
@@ -1566,14 +1589,23 @@ export class Game {
         const up = this.fighterUpScratch.set(0, 1, 0).applyQuaternion(fighter.flight.orientation);
         const desired = this.viewDirection(this.fighterAimScratch);
         intent.throttle = this.moveInput.y;
-        intent.strafe = this.moveInput.x;
+        // A/D are aircraft roll inputs. Keep a small amount of lateral
+        // translation for VTOL-style correction, but do not fly the craft as
+        // a sideways-moving hovercraft.
+        intent.strafe = this.moveInput.x * 0.18;
         intent.lift = this.input.isJumpHeld() ? 1 : this.input.isFighterDescendHeld() ? -0.55 : 0;
         if (fighter.flight.grounded && (intent.throttle > 0.1 || this.input.isJumpHeld())) {
           intent.lift = Math.max(intent.lift, 0.72);
         }
-        intent.pitch = THREE.MathUtils.clamp(desired.dot(up) * 2.4, -1, 1);
-        intent.yaw = THREE.MathUtils.clamp(desired.dot(right) * 2.6, -1, 1);
-        intent.roll = THREE.MathUtils.clamp(intent.yaw * 0.68 + this.moveInput.x * 0.22, -1, 1);
+        const pitchError = desired.dot(up);
+        const yawError = desired.dot(right);
+        intent.pitch = THREE.MathUtils.clamp(pitchError * 1.55, -1, 1);
+        // Mouse aim supplies the fine target-heading correction; A/D adds a
+        // deliberate coarse turn so a pilot can carve a corner without
+        // dragging the reticle first. The accompanying roll sells the turn
+        // without leaving the aircraft stuck in a banked straight line.
+        intent.yaw = THREE.MathUtils.clamp(yawError * 1.7 + this.moveInput.x * 0.34, -1, 1);
+        intent.roll = THREE.MathUtils.clamp(intent.yaw * 0.28 + this.moveInput.x * 0.64, -1, 1);
         intent.afterburner = this.input.isSkiHeld() && intent.throttle > 0.1;
         intent.boost = this.fighterBoostQueued;
         // Keep camera/aim stable if a hard collision rotates the craft through
@@ -1654,10 +1686,21 @@ export class Game {
       ? sockets[fighter.weaponAlternator % sockets.length]
       : null;
     fighter.visual.root.updateMatrixWorld(true);
-    const origin = socket
+    const socketOrigin = socket
       ? socket.getWorldPosition(this.fighterMuzzleScratch)
       : this.fighterMuzzleScratch.copy(fighter.flight.position)
         .addScaledVector(this.fighterForwardScratch.set(0, 0, -1).applyQuaternion(fighter.flight.orientation), 3.4);
+    const forward = this.fighterForwardScratch.set(0, 0, -1).applyQuaternion(fighter.flight.orientation);
+    const up = this.fighterUpScratch.set(0, 1, 0).applyQuaternion(fighter.flight.orientation);
+    // Player guns use a centerline launch point so the projectile trajectory
+    // is optically aligned with the cockpit reticle at every range. The
+    // imported hardpoints remain the visual/audio socket path for AI craft;
+    // wing-offset player launches made the round visibly miss center aim.
+    const origin = owner === 'player'
+      ? this.fighterMuzzleScratch.copy(fighter.flight.position)
+        .addScaledVector(forward, 4.2)
+        .addScaledVector(up, 0.15)
+      : socketOrigin;
     const aimPoint = explicitAimPoint ?? (owner === 'player'
       ? this.playerFighterAimPoint(fighter, FIGHTER_AIM_RANGE)
       : this.fighterAimPointScratch.copy(fighter.flight.position)
@@ -2370,6 +2413,14 @@ export class Game {
     this.grounded = contact.grounded && this.playerVelocity.y <= MOVEMENT.rampUngroundSpeed;
     if (this.grounded) {
       this.terrainNormal.copy(contact.contactNormal);
+      if (this.jetpackActive) {
+        // A thrust tick can reach the floor before the next fixed update. Cut
+        // the pack at the actual contact so landing cannot leave a burning
+        // jetpack state bleeding into the held-jump bunny-hop transition.
+        this.jetpackActive = false;
+        this.jetpackArmed = false;
+        this.jetpackEnergy.update(0, false, true);
+      }
       if (impact > 7 && this.lastGroundImpact <= 0) {
         this.trauma = Math.min(1, this.trauma + Math.min(0.34, impact * 0.012));
         this.audio.land(impact);
@@ -3068,7 +3119,9 @@ export class Game {
       const canSeeTarget = (targetOwner !== null || droneTarget !== null)
         && botEye.distanceToSquared(target) <= visibilityRange * visibilityRange
         && this.arena.hasLineOfSight(botEye, target, 0.3);
-      const objective = fighterAi.groundTarget ?? this.chooseBotObjective(bot);
+      const objective = fighterAi.groundTarget ?? (bot.movementLocked
+        ? bot.navigationTarget
+        : this.chooseBotObjective(bot));
       this.botUpdateContext.hasTarget = targetOwner !== null || droneTarget !== null;
       this.botUpdateContext.retreat = this.botObjectives.get(bot.id)?.retreat === true;
       this.botUpdateContext.targetGrounded = droneTarget
@@ -3518,8 +3571,10 @@ export class Game {
         if (!pickup.active || (pickup.kind !== 'health' && pickup.kind !== 'armor')) continue;
         if (pickup.kind === 'health' && bot.health >= 95) continue;
         if (pickup.kind === 'armor' && bot.armor >= 95) continue;
-        const pathCost = this.botNavigation?.pathCost(bot.group.position, pickup.group.position)
-          ?? bot.group.position.distanceTo(pickup.group.position);
+        // Objective ranking runs for every candidate. A full A* here repeated
+        // dozens of whole-grid searches in one frame every 2.5 seconds; the
+        // selected destination still receives a real A* route in Bot.update.
+        const pathCost = bot.group.position.distanceTo(pickup.group.position);
         const need = pickup.kind === 'health'
           ? 1.1 - (bot.health / 100) ** 2
           : 1.1 - (bot.armor / 150) ** 2;
@@ -3561,16 +3616,14 @@ export class Game {
         weight = 0.55 + bot.getPickupUtility(pickup.kind);
       }
       weight *= 0.55 + bot.getPickupUtility(pickup.kind);
-      const pathCost = this.botNavigation?.pathCost(bot.group.position, pickup.group.position)
-        ?? bot.group.position.distanceTo(pickup.group.position);
+      const pathCost = bot.group.position.distanceTo(pickup.group.position);
       const score = 1000 * weight / Math.max(0.5 * pathCost, 1);
       if (!bestPickup || score > bestPickup.score) {
         bestPickup = { point: pickup.group.position, score, pickup, kind };
       }
     }
     if (this.coreActive) {
-      const pathCost = this.botNavigation?.pathCost(bot.group.position, this.arena.corePosition)
-        ?? bot.group.position.distanceTo(this.arena.corePosition);
+      const pathCost = bot.group.position.distanceTo(this.arena.corePosition);
       const score = 1000 * corePressure / Math.max(0.5 * pathCost, 1);
       if (!bestPickup || score > bestPickup.score) {
         bestPickup = { point: this.arena.corePosition, score, pickup: null, kind: 'core' };
@@ -4837,7 +4890,11 @@ export class Game {
     owner: DamageSource,
     weaponName: string,
   ): boolean {
-    const result = this.flamethrowerDrones.damage(drone, damage);
+    const result = this.flamethrowerDrones.damage(
+      drone,
+      damage,
+      owner === 'drone' ? null : owner,
+    );
     if (!result.applied) return false;
     this.spawnBurst(result.position, result.destroyed ? 0xffb13d : 0xff4130, result.destroyed ? 34 : 5);
     if (owner === 'player') {
@@ -4869,7 +4926,11 @@ export class Game {
     owner: DamageSource,
     weaponName: string,
   ): boolean {
-    const result = this.droneSwarm.damage(drone, damage);
+    const result = this.droneSwarm.damage(
+      drone,
+      damage,
+      owner === 'drone' ? null : owner,
+    );
     if (!result.applied) return false;
     this.spawnBurst(result.position, result.destroyed ? 0xffb33c : 0xff3155, result.destroyed ? 28 : 4);
     if (owner === 'player') {
@@ -4912,6 +4973,16 @@ export class Game {
     const coreDenial = this.coreActive && this.coreOwner === bot.id && this.coreProgress >= 0.25;
     const eliminationDistance = this.playerPosition.distanceTo(bot.group.position);
     const eliminationSpeed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
+    // Capture traversal state before hit knockback mutates the victim. A grounded
+    // longshot must not be mislabeled as an air-frag because its lethal impact
+    // launched the bot on the same frame.
+    const hasAirClearance = (position: THREE.Vector3, grounded: boolean): boolean => {
+      if (grounded) return false;
+      const floor = this.arena.floorHeightAt(position.x, position.z, position.y + 0.3);
+      return floor === null || position.y - floor > 0.32;
+    };
+    const eliminationAirborne = hasAirClearance(this.playerPosition, this.grounded)
+      || hasAirClearance(bot.group.position, bot.grounded);
     const killed = bot.takeDamage(damage);
     if (knockback && knockback > 0) {
       const origin = hitOrigin ?? this.playerPosition;
@@ -4941,7 +5012,7 @@ export class Game {
       this.score += 1;
       if (!this.grounded) this.airborneKills += 1;
       this.awardEliminationStyle({
-        airborne: !this.grounded || !bot.grounded,
+        airborne: eliminationAirborne,
         coreDenial,
         distance: eliminationDistance,
         grappled: this.grappleActive,
@@ -5047,7 +5118,8 @@ export class Game {
         pickup.cooldown -= delta;
         if (pickup.cooldown <= 0) {
           pickup.active = true;
-          pickup.group.visible = true;
+          if (pickup.visual) this.monsoonRewardVisuals?.beginRespawn(pickup.visual);
+          else pickup.group.visible = true;
         }
         continue;
       }
@@ -5086,7 +5158,8 @@ export class Game {
       }
     }
     pickup.active = false;
-    pickup.group.visible = false;
+    if (pickup.visual) this.monsoonRewardVisuals?.beginCollect(pickup.visual);
+    else pickup.group.visible = false;
     pickup.cooldown = pickup.respawn;
     if (
       pickup.kind === 'rail'
@@ -5109,7 +5182,8 @@ export class Game {
   private collectBotPickup(pickup: PickupState, bot: Bot): void {
     bot.collectPickup(pickup.kind);
     pickup.active = false;
-    pickup.group.visible = false;
+    if (pickup.visual) this.monsoonRewardVisuals?.beginCollect(pickup.visual);
+    else pickup.group.visible = false;
     pickup.cooldown = pickup.respawn;
     this.audio.pickup(pickup.kind === 'rail' || pickup.kind === 'rocket' || pickup.kind === 'plasma'
       || pickup.kind === 'shotgun' || pickup.kind === 'sniper' || pickup.kind === 'laser' || pickup.kind === 'disc' ? 'core' : pickup.kind);
@@ -5198,7 +5272,21 @@ export class Game {
   }
 
   private updatePickupVisuals(delta: number, elapsed: number): void {
-    if (this.mobileQuality) {
+    if (this.monsoonRewardVisuals) {
+      const mobilePickupDetailDistanceSq = 36 * 36;
+      for (const pickup of this.pickups) {
+        if (!pickup.visual) continue;
+        const distanceSq = pickup.group.position.distanceToSquared(this.playerPosition);
+        this.monsoonRewardVisuals.update(pickup.visual, {
+          delta,
+          elapsed,
+          active: pickup.active,
+          distanceSq,
+          renderable: !this.mobileQuality || distanceSq <= mobilePickupDetailDistanceSq,
+          reducedMotion: this.reducedMotion,
+        });
+      }
+    } else if (this.mobileQuality) {
       const mobilePickupDetailDistanceSq = 34 * 34;
       for (const pickup of this.pickups) {
         if (!pickup.active) continue;
@@ -5209,18 +5297,20 @@ export class Game {
       }
     }
     if (!this.reducedMotion) {
-      for (const pickup of this.pickups) {
-        // Pickups are physical props seated on their floor racks. Only small
-        // internal identification hardware animates; the item never hovers.
-        const rotor = pickup.group.getObjectByName('pickup-id-rotor');
-        if (rotor) rotor.rotation.y += delta * 0.65;
-        const pulse = 0.82 + Math.sin(elapsed * 2.4 + pickup.group.userData.phase) * 0.16;
-        pickup.group.traverse((object) => {
-          const mesh = object as THREE.Mesh;
-          if (!mesh.isMesh || !mesh.userData.pickupGlow) return;
-          const material = mesh.material as THREE.MeshStandardMaterial;
-          material.emissiveIntensity = pulse;
-        });
+      if (!this.monsoonRewardVisuals) {
+        for (const pickup of this.pickups) {
+          // Pickups are physical props seated on their floor racks. Only small
+          // internal identification hardware animates; the item never hovers.
+          const rotor = pickup.group.getObjectByName('pickup-id-rotor');
+          if (rotor) rotor.rotation.y += delta * 0.65;
+          const pulse = 0.82 + Math.sin(elapsed * 2.4 + pickup.group.userData.phase) * 0.16;
+          pickup.group.traverse((object) => {
+            const mesh = object as THREE.Mesh;
+            if (!mesh.isMesh || !mesh.userData.pickupGlow) return;
+            const material = mesh.material as THREE.MeshStandardMaterial;
+            material.emissiveIntensity = pulse;
+          });
+        }
       }
       this.coreGroup.rotation.y += delta * 1.1;
       this.coreGroup.position.y = this.arena.corePosition.y + 2.4 + Math.sin(elapsed * 2.7) * 0.18;
@@ -5242,11 +5332,13 @@ export class Game {
     // At full obstruction the parent crosses behind the camera while the
     // visible nose folds out of the lower viewport. This range is large enough
     // to clear the longest launcher, rather than merely nudging its receiver.
+    const viewModelScale = this.mobileQuality ? 0.56 : 1;
+    this.weaponModel.scale.setScalar(viewModelScale);
     this.weaponModel.position.set(
-      0.3 + this.weaponTurnSway.x + walkSwayX,
-      -0.54 - this.recoil * 0.08 - this.weaponTuck * 0.52 - this.scopeBlend * 1.25
+      (this.mobileQuality ? 0.48 : 0.3) + this.weaponTurnSway.x + walkSwayX,
+      (this.mobileQuality ? -0.7 : -0.54) - this.recoil * 0.08 - this.weaponTuck * 0.52 - this.scopeBlend * 1.25
         + this.weaponTurnSway.y + walkSwayY + jumpLag,
-      -0.5 + this.recoil * 0.1 + this.weaponTuck * WEAPON_VIEW_RETRACT_DISTANCE,
+      (this.mobileQuality ? -0.76 : -0.5) + this.recoil * 0.1 + this.weaponTuck * WEAPON_VIEW_RETRACT_DISTANCE,
     );
     const boreDirection = this.weaponBoreScratch.copy(aimPointLocal).sub(this.weaponModel.position).normalize();
     const boreYaw = Math.atan2(-boreDirection.x, -boreDirection.z);
@@ -5970,7 +6062,8 @@ export class Game {
     for (const pickup of this.pickups) {
       pickup.active = true;
       pickup.cooldown = 0;
-      pickup.group.visible = true;
+      if (pickup.visual) this.monsoonRewardVisuals?.reset(pickup.visual);
+      else pickup.group.visible = true;
     }
     for (const bot of this.bots) {
       bot.score = 0;
@@ -6108,6 +6201,34 @@ export class Game {
     this.scene.fog.far = profile.near + (profile.far - profile.near) * visibility;
   }
 
+  /**
+   * Freeze the authored Monsoon wall at a reviewable combat intensity. This is
+   * deliberately separate from advancing the match clock: screenshot and
+   * accessibility QA need to compare the exact same encounter in calm and
+   * severe weather without also spawning 55 seconds of unrelated combat.
+   */
+  private stageMonsoonWeatherForQa(): void {
+    this.screenshotArenaTime = 65;
+    this.weatherSnapshot = Object.freeze({
+      ...this.weatherSnapshot,
+      eventLabel: 'MONSOON WALL',
+      phase: 'monsoon',
+      phaseProgress: 0.58,
+      severity: 1,
+      windDirection: Object.freeze({ x: 0.88, z: 0.47 }),
+      windStrength: 1.35,
+      label: 'MONSOON WALL',
+      multipliers: Object.freeze({
+        ...this.weatherSnapshot.multipliers,
+        visibilityMultiplier: 0.82,
+      }),
+    });
+    this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
+    this.mapLighting.setWeatherSeverity(1);
+    this.updateMapFog(0.82);
+    this.updateHud();
+  }
+
   private createPostProcessing(): EffectComposer {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
     const composer = new EffectComposer(this.renderer);
@@ -6128,15 +6249,15 @@ export class Game {
       uniforms: {
         tDiffuse: { value: null },
         resolution: { value: new THREE.Vector2(1, 1) },
-        edgeStrength: { value: quickSense ? (this.mobileQuality ? 0.035 : 0.05) : (this.mobileQuality ? 0.08 : 0.115) },
-        vignette: { value: quickSense ? 0.07 : 0.16 },
+        edgeStrength: { value: quickSense ? (this.mobileQuality ? 0.035 : 0.05) : (this.mobileQuality ? 0.055 : 0.075) },
+        vignette: { value: quickSense ? 0.07 : 0.09 },
         gradeStrength: { value: quickSense ? 1 : 0 },
         gradeContrast: { value: quickSense ? 1.055 : 1 },
         neutralDarken: { value: quickSense ? 0.05 : 0 },
         shadowCool: { value: quickSense ? 0.18 : 0 },
         shadowLift: { value: quickSense ? 0.018 : 0 },
         routeHueSeparation: { value: quickSense ? 1 : 0 },
-        saturation: { value: quickSense ? 1.09 : 1.065 },
+        saturation: { value: quickSense ? 1.09 : 1.035 },
         speedBlur: { value: 0 },
       },
       vertexShader: `varying vec2 vUv;
@@ -6214,6 +6335,7 @@ export class Game {
     });
     composer.addPass(this.inkPass);
     composer.addPass(new OutputPass());
+    composer.addPass(new SMAAPass());
     return composer;
   }
 
@@ -6343,7 +6465,11 @@ export class Game {
       ['laser', 'laser', 25],
     ];
     definitions.forEach(([kind, point, respawn, offset], index) => {
-      const group = this.createPickupModel(kind);
+      const visual = this.monsoonRewardVisuals?.create(
+        kind as MonsoonRewardKind,
+        this.weaponColorForPickup(kind),
+      );
+      const group = visual?.root ?? this.createPickupModel(kind);
       const authored = this.arena.itemPoints[point].clone();
       if (offset) authored.add(new THREE.Vector3(offset[0], 0, offset[1]));
       // Honour the authored height band. A few metres of upward snap seats
@@ -6358,7 +6484,7 @@ export class Game {
       }
       group.userData.phase = index * 0.73;
       this.scene.add(group);
-      this.pickups.push({ kind, group, active: true, cooldown: 0, respawn });
+      this.pickups.push({ kind, group, visual, active: true, cooldown: 0, respawn });
     });
   }
 
@@ -7061,7 +7187,17 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(false);
           this.hud.hideStart();
-          this.playerPosition.copy(this.arena.spawnPoints[Math.min(13, this.arena.spawnPoints.length - 1)]);
+          // Keep movement QA on a genuinely level, unobstructed shelf. The
+          // Monsoon release footprint is scaled independently from player
+          // movement, so the old spawn-13 point is now a steep ridge; a
+          // stationary bunny-hop test would otherwise slide onto a different
+          // terrace and miss the short landing contact between samples.
+          const movementFlatSpawn = new THREE.Vector3(
+            -100 * MONSOON_WORLD_SCALE,
+            0,
+            132 * MONSOON_WORLD_SCALE,
+          );
+          this.playerPosition.copy(movementFlatSpawn);
           const floor = this.arena.floorHeightAt(this.playerPosition.x, this.playerPosition.z, this.playerPosition.y + 3);
           if (floor !== null) this.playerPosition.y = floor;
           this.playerVelocity.set(0, 0, 0);
@@ -7104,6 +7240,9 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(false);
           this.hud.hideStart();
+          this.weatherSnapshot = this.weatherSystem.reset();
+          this.arena.setWeatherGameplaySnapshot(this.weatherSnapshot);
+          this.updateMapFog(this.weatherSnapshot.multipliers.visibilityMultiplier);
           this.selectedWeapon = WEAPONS.findIndex((weapon) => weapon.id === 'machine');
           this.weaponCooldown = 0;
           this.ammo.set('machine', this.weapon('machine').ammo);
@@ -7204,7 +7343,11 @@ export class Game {
           this.hud.hideStart();
           this.health = 100;
           this.armor = 50;
-          const spawn = this.arena.spawnPoints[0];
+          const spawn = this.arena.mapInfo.name === 'Monsoon Divide'
+            ? new THREE.Vector3(0, 0, 100)
+            : this.arena.spawnPoints[0].clone();
+          const authoredSupportY = this.arena.floorHeightAt(spawn.x, spawn.z, Number.POSITIVE_INFINITY);
+          if (authoredSupportY !== null) spawn.y = authoredSupportY;
           this.playerPosition.copy(spawn);
           const supportY = this.arena.floorHeightAt(spawn.x, spawn.z, spawn.y + 4);
           if (supportY !== null) this.playerPosition.y = supportY;
@@ -7293,9 +7436,15 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(true);
           this.hud.hideStart();
-          this.playerPosition.set(-168 * MONSOON_WORLD_SCALE, 84 * MONSOON_WORLD_SCALE, 166 * MONSOON_WORLD_SCALE);
+          // Deliberately clear every terrain peak: this QA/marketing view must
+          // judge the entire irregular continent, not accidentally sit inside
+          // a massif after terrain revisions.
+          this.screenshotCameraFov = 58;
+          this.playerPosition.set(-150 * MONSOON_WORLD_SCALE, 150 * MONSOON_WORLD_SCALE, 185 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
-          const toCore = this.arena.corePosition.clone().sub(this.playerPosition).normalize();
+          this.screenshotLookTarget.copy(this.arena.corePosition);
+          this.screenshotLookTargetActive = true;
+          const toCore = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-toCore.x, -toCore.z);
           this.pitch = Math.asin(toCore.y);
           this.grounded = false;
@@ -7304,14 +7453,16 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(true);
           const target = new THREE.Vector3(
-            -158 * MONSOON_WORLD_SCALE,
-            this.arena.floorHeightAt(-158 * MONSOON_WORLD_SCALE, 10 * MONSOON_WORLD_SCALE) ?? 0,
-            10 * MONSOON_WORLD_SCALE,
+            -112 * MONSOON_WORLD_SCALE,
+            this.arena.floorHeightAt(-112 * MONSOON_WORLD_SCALE, 18 * MONSOON_WORLD_SCALE) ?? 0,
+            18 * MONSOON_WORLD_SCALE,
           );
-          const floor = this.arena.floorHeightAt(-149 * MONSOON_WORLD_SCALE, 18 * MONSOON_WORLD_SCALE) ?? target.y;
-          this.playerPosition.set(-149 * MONSOON_WORLD_SCALE, floor + 0.04, 18 * MONSOON_WORLD_SCALE);
+          const floor = this.arena.floorHeightAt(-122 * MONSOON_WORLD_SCALE, 2 * MONSOON_WORLD_SCALE) ?? target.y;
+          this.playerPosition.set(-122 * MONSOON_WORLD_SCALE, floor + 2.8, 2 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
-          const view = target.clone().add(new THREE.Vector3(0, 1.05, 0)).sub(
+          this.screenshotLookTarget.copy(target).add(new THREE.Vector3(0, 1.05, 0));
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(
             this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)),
           ).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
@@ -7321,15 +7472,17 @@ export class Game {
         } else if (name === 'monsoon-structure') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          const floor = this.arena.floorHeightAt(-101 * MONSOON_WORLD_SCALE, 108 * MONSOON_WORLD_SCALE) ?? 0;
-          this.playerPosition.set(-101 * MONSOON_WORLD_SCALE, floor + 0.04, 108 * MONSOON_WORLD_SCALE);
+          const floor = this.arena.floorHeightAt(-10 * MONSOON_WORLD_SCALE, 0) ?? 0;
+          this.playerPosition.set(-10 * MONSOON_WORLD_SCALE, floor + 22, 0);
           this.playerVelocity.set(0, 0, 0);
           const target = new THREE.Vector3(
-            -132 * MONSOON_WORLD_SCALE,
-            (this.arena.floorHeightAt(-132 * MONSOON_WORLD_SCALE, 111 * MONSOON_WORLD_SCALE) ?? floor) + 3.2,
-            111 * MONSOON_WORLD_SCALE,
+            110 * MONSOON_WORLD_SCALE,
+            (this.arena.floorHeightAt(110 * MONSOON_WORLD_SCALE, 75 * MONSOON_WORLD_SCALE) ?? floor) + 32,
+            75 * MONSOON_WORLD_SCALE,
           );
-          const view = target.sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
+          this.screenshotLookTarget.copy(target);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -7345,7 +7498,9 @@ export class Game {
             (this.arena.floorHeightAt(-98 * MONSOON_WORLD_SCALE, 45 * MONSOON_WORLD_SCALE) ?? floor) + 2.1,
             45 * MONSOON_WORLD_SCALE,
           );
-          const view = target.sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
+          this.screenshotLookTarget.copy(target);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -7376,11 +7531,15 @@ export class Game {
         } else if (name === 'monsoon-weather') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          this.screenshotArenaTime = 65;
-          this.playerPosition.set(-176 * MONSOON_WORLD_SCALE, 68 * MONSOON_WORLD_SCALE, -142 * MONSOON_WORLD_SCALE);
+          this.stageMonsoonWeatherForQa();
+          const floor = this.arena.floorHeightAt(-78 * MONSOON_WORLD_SCALE, -8 * MONSOON_WORLD_SCALE) ?? 0;
+          this.playerPosition.set(-78 * MONSOON_WORLD_SCALE, floor + 4.5, -8 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
-          const target = new THREE.Vector3(-55 * MONSOON_WORLD_SCALE, 18 * MONSOON_WORLD_SCALE, -42 * MONSOON_WORLD_SCALE);
-          const view = target.sub(this.playerPosition).normalize();
+          const targetFloor = this.arena.floorHeightAt(20 * MONSOON_WORLD_SCALE, 18 * MONSOON_WORLD_SCALE) ?? 0;
+          const target = new THREE.Vector3(20 * MONSOON_WORLD_SCALE, targetFloor + 8, 18 * MONSOON_WORLD_SCALE);
+          this.screenshotLookTarget.copy(target);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
           this.grounded = false;
@@ -7835,6 +7994,10 @@ export class Game {
         this.updateCamera(0);
         this.publishDiagnostics();
       },
+      stageMonsoonWeather: () => {
+        this.stageMonsoonWeatherForQa();
+        this.publishDiagnostics();
+      },
       setSpectatorCamera: (position, target, fov = 58) => {
         this.screenshotCameraFov = THREE.MathUtils.clamp(fov, 35, 90);
         this.playerPosition.set(position.x, position.y, position.z);
@@ -7901,7 +8064,8 @@ export class Game {
         bot.respawn(new THREE.Vector3(botPosition.x, botPosition.y, botPosition.z), false);
         bot.movementLocked = lockBot;
         bot.targetOwner = 'player';
-        this.arena.resolvePlayerCapsule(bot.group.position, bot.velocity);
+        const botContact = this.arena.resolvePlayerCapsule(bot.group.position, bot.velocity);
+        bot.grounded = botContact.grounded;
         const facing = this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE * 0.72, 0))
           .sub(bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0)))
           .normalize();
@@ -8122,6 +8286,9 @@ export class Game {
         const armature = this.weaponVisual?.root.getObjectByName('first-person-armature');
         if (armature) armature.visible = visible;
       },
+      setFirstPersonWeaponVisible: (visible: boolean) => {
+        this.weaponModel.visible = visible;
+      },
       parkBotsForScreenshot: () => {
         const spawns = [...this.arena.spawnPoints]
           .sort((left, right) => right.distanceToSquared(this.playerPosition) - left.distanceToSquared(this.playerPosition));
@@ -8332,6 +8499,16 @@ export class Game {
       getOutpostTowerAudit: () => (
         this.arena.group.userData.outpostTowerAudit as QuickSenseOutpostTowerAudit | undefined
       ) ?? null,
+      getMonsoonOutpostTowerAudit: () => (
+        this.arena.group.userData.outpostTowers as ReturnType<
+          NonNullable<Window['__THREE_GAME_TEST_HOOKS__']>['getMonsoonOutpostTowerAudit']
+        > | undefined
+      ) ?? null,
+      getMonsoonBiomeVegetationAudit: () => (
+        this.arena.group.getObjectByName('MonsoonAuthoredHighlandBiome')?.userData.biomeVegetation as ReturnType<
+          NonNullable<Window['__THREE_GAME_TEST_HOOKS__']>['getMonsoonBiomeVegetationAudit']
+        > | undefined
+      ) ?? null,
       getOutpostTowerReviewStates: () => [
         'quicksense-tower-exterior-south',
         'quicksense-tower-exterior-east',
@@ -8444,6 +8621,26 @@ export class Game {
         return [...rows.values()].sort((left, right) => (
           right.draws + right.shadowDraws - left.draws - left.shadowDraws
         ));
+      },
+      pickSceneAtNdc: (x: number, y: number) => {
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(x, y), this.camera);
+        return raycaster.intersectObject(this.scene, true).slice(0, 8).map((hit) => {
+          const mesh = hit.object as THREE.Mesh;
+          const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+          const parents: string[] = [];
+          let parent = hit.object.parent;
+          while (parent && parents.length < 4) {
+            if (parent.name) parents.push(parent.name);
+            parent = parent.parent;
+          }
+          return {
+            name: hit.object.name,
+            parents,
+            material: material?.name ?? null,
+            distance: hit.distance,
+          };
+        });
       },
       getSpawnCubbyBunkerAudit: () => (
         this.arena.group.userData.spawnCubbyBunkers as {
@@ -8611,6 +8808,14 @@ export class Game {
         respawns: drone.respawns,
         collisionRadius: drone.collisionRadius,
         collisionHits: drone.collisionHits,
+        targetLostSeconds: drone.targetLostSeconds,
+        avoidanceSeconds: drone.avoidanceSeconds,
+        avoidanceActivations: drone.avoidanceActivations,
+        lastCollisionNormal: {
+          x: drone.lastCollisionNormal.x,
+          y: drone.lastCollisionNormal.y,
+          z: drone.lastCollisionNormal.z,
+        },
         modelReady: drone.visual.isReady,
         modelMeshCount: drone.visual.modelMeshCount,
         modelWidth: drone.visual.modelWidth,
@@ -8638,6 +8843,14 @@ export class Game {
         distanceWalked: drone.distanceWalked,
         collisionRadius: drone.collisionRadius,
         collisionHits: drone.collisionHits,
+        targetLostSeconds: drone.targetLostSeconds,
+        avoidanceSeconds: drone.avoidanceSeconds,
+        avoidanceActivations: drone.avoidanceActivations,
+        lastCollisionNormal: {
+          x: drone.lastCollisionNormal.x,
+          y: drone.lastCollisionNormal.y,
+          z: drone.lastCollisionNormal.z,
+        },
         modelReady: drone.visual.isReady,
         partCount: drone.visual.partCount,
         rigNodeCount: drone.visual.rigNodeCount,
@@ -8686,6 +8899,14 @@ export class Game {
         respawnSeconds: drone.respawnSeconds,
         collisionRadius: drone.collisionRadius,
         collisionHits: drone.collisionHits,
+        targetLostSeconds: drone.targetLostSeconds,
+        avoidanceSeconds: drone.avoidanceSeconds,
+        avoidanceActivations: drone.avoidanceActivations,
+        lastCollisionNormal: {
+          x: drone.lastCollisionNormal.x,
+          y: drone.lastCollisionNormal.y,
+          z: drone.lastCollisionNormal.z,
+        },
         shotsFired: drone.shotsFired,
         shardsFired: drone.shardsFired,
         shardHits: drone.shardHits,
@@ -8767,7 +8988,13 @@ export class Game {
       pickups: this.pickups.map((pickup) => ({
         kind: pickup.kind,
         active: pickup.active,
+        visible: pickup.group.visible,
         modelName: pickup.group.name,
+        silhouette: pickup.visual?.silhouette ?? 'legacy-authored',
+        visualState: pickup.visual?.state ?? (pickup.active ? 'idle' : 'cooldown'),
+        steadyDrawCalls: Number(pickup.group.userData.rewardSteadyDrawCalls ?? 0),
+        transientCollectDrawCalls: Number(pickup.group.userData.rewardCollectDrawCalls ?? 0),
+        sharedResources: Boolean(pickup.group.userData.rewardSharedResources),
         groundOffset: pickup.group.position.y - Number(pickup.group.userData.baseY ?? pickup.group.position.y),
         position: {
           x: pickup.group.position.x,

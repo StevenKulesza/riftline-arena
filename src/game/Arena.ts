@@ -8,14 +8,12 @@ import { MOVEMENT } from './config';
 import {
   MONSOON_DIVIDE,
   MONSOON_INNER_LOOP_SAMPLES,
-  MONSOON_ROUTE_SEGMENTS,
   MONSOON_WORLD_SCALE,
   buildMonsoonTerrainGeometry,
   mapSeedFromLocation,
-  sampleMonsoonHeight,
   sampleMonsoonMeshHeight,
+  sampleMonsoonMeshNormal,
   sampleMonsoonMasks,
-  sampleMonsoonNormal,
 } from './maps/MonsoonDivide';
 import {
   buildLaunchRamp,
@@ -24,6 +22,16 @@ import {
   type LaunchRampSpec,
 } from './maps/FlowGeometry';
 import { QuickSenseArena } from './maps/QuickSenseArena';
+import { buildMonsoonDistantWorld } from './maps/MonsoonDistantWorld';
+import { buildMonsoonEncounterArt } from './maps/MonsoonEncounterArt';
+import { buildMonsoonOutpostTowers } from './maps/MonsoonOutpostTowers';
+import { buildMonsoonRouteInfrastructure } from './maps/MonsoonRouteInfrastructure';
+import { buildMonsoonWorldArt } from './maps/MonsoonWorldArt';
+
+// Runtime placement, traversal, and support all use the exact rendered
+// triangles. The analytic field remains the terrain generator's source only.
+const sampleMonsoonHeight = sampleMonsoonMeshHeight;
+const sampleMonsoonNormal = sampleMonsoonMeshNormal;
 
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
@@ -141,6 +149,7 @@ type RampSurface = {
   yaw: number;
   spec: LaunchRampSpec;
   flow: FlowSurfaceBuild;
+  renderWithConcreteKit: boolean;
 };
 
 type PlatformSurface = {
@@ -230,6 +239,9 @@ const GROUND_MARK_UPDATE_INTERVAL_SECONDS = 1 / 12;
 const VEGETATION_CHUNK_COLUMNS = 6;
 const VEGETATION_CHUNK_ROWS = 5;
 const VEGETATION_CHUNK_COUNT = VEGETATION_CHUNK_COLUMNS * VEGETATION_CHUNK_ROWS;
+// Player-scale interactables stay at the proven release dimensions even
+// though Monsoon's horizontal/vertical world footprint is now doubled.
+const MONSOON_PLAYER_ART_SCALE = 2;
 
 function mw(value: number): number {
   return value * MONSOON_WORLD_SCALE;
@@ -262,7 +274,10 @@ function ballisticPad(
 ): JumpPad {
   const position = placedPoint(x, z, seed, 0.12);
   const target = placedPoint(targetX, targetZ, seed, 1.1);
-  const scaledFlightTime = flightTime * MONSOON_WORLD_SCALE;
+  // Keep the original airtime while covering the doubled route distance.
+  // Scaling time with the enlarged world made pads nearly vertical and left
+  // them short of their authored landing shelves.
+  const scaledFlightTime = flightTime * MONSOON_PLAYER_ART_SCALE;
   const velocity = new THREE.Vector3(
     (target.x - position.x) / scaledFlightTime,
     (target.y - position.y + 0.5 * MOVEMENT.gravity * scaledFlightTime * scaledFlightTime) / scaledFlightTime,
@@ -271,7 +286,7 @@ function ballisticPad(
   return {
     position,
     direction: velocity.clone().normalize(),
-    radius: mw(4.2),
+    radius: 4.2 * MONSOON_PLAYER_ART_SCALE,
     launchSpeed: velocity.length(),
   };
 }
@@ -302,6 +317,11 @@ export class Arena implements ArenaRuntime {
   readonly mapInfo: ArenaMapInfo;
 
   private readonly materials: THREE.Material[] = [];
+  private readonly weatherResponsiveMaterials: Array<{
+    material: THREE.MeshStandardMaterial;
+    dryRoughness: number;
+    wetRoughness: number;
+  }> = [];
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly textures: THREE.Texture[] = [];
   private readonly colliders: ArenaCollider[] = [];
@@ -339,9 +359,9 @@ export class Arena implements ArenaRuntime {
   private readonly floorSurface = { height: 0, normal: this.floorSurfaceNormal };
   private readonly waterUniforms = {
     uTime: { value: 0 },
-    uDeep: { value: new THREE.Color(0x0b5278) },
-    uShallow: { value: new THREE.Color(0x36a8c8) },
-    uSun: { value: new THREE.Color(0xffe1a6) },
+    uDeep: { value: new THREE.Color(0x103f58) },
+    uShallow: { value: new THREE.Color(0x43869a) },
+    uSun: { value: new THREE.Color(0xb9d7d3) },
   };
   private readonly weatherUniforms = {
     uTime: { value: 0 },
@@ -377,6 +397,11 @@ export class Arena implements ArenaRuntime {
     visibilityMultiplier: 1,
   };
   private readonly playerInfluence = new THREE.Vector3(0, -100, 0);
+  private rain?: THREE.LineSegments;
+  private lightning?: THREE.LineSegments;
+  private lightningMaterial?: THREE.LineBasicMaterial;
+  private distantWorldUpdate?: (deltaSeconds: number, weatherSeverity: number) => void;
+  private lastDistantWorldTime = 0;
   private readonly animalRoutes: AmbientAnimalRoute[] = [];
   private ambientLife?: AmbientLifeMeshes;
   private footprintMesh?: THREE.InstancedMesh;
@@ -445,13 +470,14 @@ export class Arena implements ArenaRuntime {
       vertexColors: true,
       map: terrainTextures.albedo,
       normalMap: terrainTextures.normal,
-      normalScale: new THREE.Vector2(0.28, 0.28),
+      normalScale: new THREE.Vector2(0.48, 0.48),
       roughnessMap: terrainTextures.roughness,
-      roughness: 0.96,
+      roughness: 0.92,
       metalness: 0.015,
     });
     terrainMaterial.name = 'MonsoonPanoramaMatchedTerrainPBR';
     this.materials.push(terrainMaterial);
+    this.weatherResponsiveMaterials.push({ material: terrainMaterial, dryRoughness: 0.92, wetRoughness: 0.5 });
     this.geometries.push(terrain.geometry);
     const terrainMesh = new THREE.Mesh(terrain.geometry, terrainMaterial);
     terrainMesh.name = 'MonsoonDivideTerrain';
@@ -462,6 +488,134 @@ export class Arena implements ArenaRuntime {
     this.registerConcreteTraversal();
     this.registerCoverLayout();
     this.registerRockField();
+    const worldArt = buildMonsoonWorldArt(seed);
+    this.group.add(worldArt.group);
+    this.geometries.push(...worldArt.geometries);
+    this.materials.push(...worldArt.materials);
+    for (const material of worldArt.materials) {
+      if (material instanceof THREE.MeshStandardMaterial) {
+        this.weatherResponsiveMaterials.push({
+          material,
+          dryRoughness: material.roughness,
+          wetRoughness: Math.max(0.18, material.roughness * 0.56),
+        });
+      }
+    }
+    this.textures.push(...worldArt.textures);
+    worldArt.colliderBoxes.forEach((box, index) => {
+      this.colliders.push({ name: `world-art-anchor-${index + 1}`, box });
+    });
+    this.group.userData.worldArt = worldArt.diagnostics;
+    const encounterArt = buildMonsoonEncounterArt(seed);
+    this.group.add(encounterArt.group);
+    this.geometries.push(...encounterArt.geometries);
+    this.materials.push(...encounterArt.materials);
+    for (const material of encounterArt.materials) {
+      if (material instanceof THREE.MeshStandardMaterial) {
+        this.weatherResponsiveMaterials.push({
+          material,
+          dryRoughness: material.roughness,
+          wetRoughness: Math.max(0.18, material.roughness * 0.56),
+        });
+      }
+    }
+    this.textures.push(...encounterArt.textures);
+    encounterArt.colliderBoxes.forEach((box, index) => {
+      this.colliders.push({ name: `encounter-art-${index + 1}`, box });
+    });
+    this.group.userData.encounterArt = encounterArt.diagnostics;
+    const routeInfrastructure = buildMonsoonRouteInfrastructure(seed);
+    this.group.add(routeInfrastructure.group);
+    this.geometries.push(...routeInfrastructure.geometries);
+    this.materials.push(...routeInfrastructure.materials);
+    for (const material of routeInfrastructure.materials) {
+      if (material instanceof THREE.MeshStandardMaterial) {
+        this.weatherResponsiveMaterials.push({
+          material,
+          dryRoughness: material.roughness,
+          wetRoughness: Math.max(0.16, material.roughness * 0.52),
+        });
+      }
+    }
+    this.textures.push(...routeInfrastructure.textures);
+    this.group.userData.routeInfrastructure = routeInfrastructure.diagnostics;
+    const preexistingOutpostColliders = this.colliders.slice();
+    const preexistingOutpostRamps = this.rampSurfaces.slice();
+    const outpostTowers = buildMonsoonOutpostTowers(seed);
+    this.group.add(outpostTowers.group);
+    this.geometries.push(...outpostTowers.geometries);
+    this.materials.push(...outpostTowers.materials);
+    for (const material of outpostTowers.materials) {
+      if (material instanceof THREE.MeshStandardMaterial) {
+        this.weatherResponsiveMaterials.push({
+          material,
+          dryRoughness: material.roughness,
+          wetRoughness: Math.max(0.14, material.roughness * 0.5),
+        });
+      }
+    }
+    this.textures.push(...outpostTowers.textures);
+    for (const collider of outpostTowers.colliderBoxes) {
+      this.colliders.push({ name: collider.name, box: collider.box });
+    }
+    this.platformSurfaces.push(...outpostTowers.platformSurfaces);
+    for (const stairRamp of outpostTowers.stairRamps) {
+      const spec = stairRamp.spec;
+      const forwardX = Math.sin(spec.heading);
+      const forwardZ = Math.cos(spec.heading);
+      this.rampSurfaces.push({
+        name: stairRamp.name,
+        centerX: spec.origin.x + forwardX * spec.length * 0.5,
+        centerZ: spec.origin.z + forwardZ * spec.length * 0.5,
+        startY: spec.origin.y,
+        length: spec.length,
+        width: spec.width,
+        rise: spec.rise,
+        yaw: spec.heading,
+        spec,
+        flow: buildLaunchRamp(spec),
+        // The tower factory supplies individual treads, stringers, rails, and
+        // route lights. The smooth surface is collision-only so the visible
+        // stairs retain their player-scale stepped silhouette.
+        renderWithConcreteKit: false,
+      });
+    }
+    const integrationClearanceConflicts = outpostTowers.stairRamps.flatMap(({ name, spec }) => {
+      if (!name.includes('internal switchback')) return [];
+      const x = spec.origin.x + Math.sin(spec.heading) * spec.length * 0.5;
+      const z = spec.origin.z + Math.cos(spec.heading) * spec.length * 0.5;
+      const y = spec.origin.y + spec.rise * 0.5;
+      const colliderConflicts = preexistingOutpostColliders
+        .filter(({ box }) => (
+          x + MOVEMENT.playerRadius > box.min.x && x - MOVEMENT.playerRadius < box.max.x
+          && z + MOVEMENT.playerRadius > box.min.z && z - MOVEMENT.playerRadius < box.max.z
+          && y + MOVEMENT.playerHeight > box.min.y && y < box.max.y
+        ))
+        .map(({ name: colliderName }) => ({ stair: name, collider: colliderName }));
+      const rampConflicts = preexistingOutpostRamps
+        .filter((ramp) => {
+          const rampY = ramp.flow.heightAt(x, z);
+          if (rampY === null) return false;
+          const bottomY = ramp.spec.origin.y
+            - (ramp.spec.collisionSkirtDepth ?? ramp.spec.skirtDepth ?? 0.8);
+          return y < rampY - 0.015 && y + MOVEMENT.playerHeight > bottomY + 0.01;
+        })
+        .map(({ name: rampName }) => ({ stair: name, collider: `ramp:${rampName}` }));
+      return [...colliderConflicts, ...rampConflicts];
+    });
+    this.group.userData.outpostTowers = {
+      ...outpostTowers.diagnostics,
+      reviewViews: outpostTowers.reviewViews,
+      stairRamps: outpostTowers.stairRamps.map(({ name, spec }) => ({ name, spec })),
+      integrationClearanceConflicts,
+    };
+    const distantWorld = buildMonsoonDistantWorld(seed);
+    this.group.add(distantWorld.group);
+    this.geometries.push(...distantWorld.geometries);
+    this.materials.push(...distantWorld.materials);
+    this.textures.push(...distantWorld.textures);
+    this.distantWorldUpdate = distantWorld.update;
+    this.group.userData.distantWorld = distantWorld.diagnostics;
     const collisionParts = [this.positionOnlyGeometry(terrain.geometry)];
     for (const collider of this.colliders) collisionParts.push(this.geometryFromBox(collider.box));
     for (const ramp of this.rampSurfaces) {
@@ -477,19 +631,17 @@ export class Arena implements ArenaRuntime {
     this.collisionTriangles = this.collisionGeometry.getAttribute('position').count / 3;
 
     this.createOcean();
-    this.createDistantIslands();
     this.createRouteGates(toonRamp);
     this.createJumpPadVisuals(toonRamp);
     this.createConcreteTraversal(toonRamp);
     this.createDetailedDirtRoutes(toonRamp);
+    this.createStormPuddles();
     this.createCoreReactor(toonRamp);
-    this.createLandmarkTower(-166, 91, 0xcf43ff, 1.16, toonRamp);
-    this.createLandmarkTower(-148, -112, 0xffb52b, 0.94, toonRamp);
-    this.createLandmarkTower(158, 78, 0x8dff35, 0.96, toonRamp);
     this.createVegetation(toonRamp);
     this.createGroundMarks();
     this.createAmbientLife(toonRamp);
     this.createStormRain();
+    this.createStormLightning();
 
     this.mapInfo = {
       name: MONSOON_DIVIDE.name,
@@ -556,12 +708,26 @@ export class Arena implements ArenaRuntime {
       this.weatherVisualDiagnostics.visibilityMultiplier = 1;
     }
 
-    const rainIntensity = 0.07 + shower * 0.82;
+    // CALM must read as genuinely calm. The old non-zero floor left pale
+    // streaks across every establishing shot even while the HUD said CALM;
+    // precipitation now ramps in with the authored storm severity.
+    const rainIntensity = THREE.MathUtils.smoothstep(shower, 0.08, 1) * 0.9;
     this.waterUniforms.uTime.value = time;
     this.weatherUniforms.uTime.value = time;
     this.weatherUniforms.uIntensity.value = rainIntensity;
     this.weatherUniforms.uWind.value = wind;
     this.weatherUniforms.uWindDirection.value.set(windDirectionX, windDirectionZ);
+    const distantWorldDelta = Math.max(0, time - this.lastDistantWorldTime);
+    this.lastDistantWorldTime = time;
+    this.distantWorldUpdate?.(distantWorldDelta, shower);
+    if (this.rain) this.rain.position.set(this.playerInfluence.x, this.playerInfluence.y - 20, this.playerInfluence.z);
+    if (this.lightning && this.lightningMaterial) {
+      const strike = shower > 0.72;
+      this.lightning.visible = strike;
+      this.lightningMaterial.opacity = strike
+        ? 0.42 + (reducedMotion ? 0.22 : Math.max(0, Math.sin(time * 17.3)) * 0.5)
+        : 0;
+    }
     this.grassUniforms.uTime.value = time;
     this.grassUniforms.uWind.value = wind;
     this.grassUniforms.uWindDirection.value.set(windDirectionX, windDirectionZ);
@@ -570,6 +736,13 @@ export class Arena implements ArenaRuntime {
     this.weatherVisualDiagnostics.visualWindStrength = wind;
     this.weatherVisualDiagnostics.windDirection.x = windDirectionX;
     this.weatherVisualDiagnostics.windDirection.z = windDirectionZ;
+    for (const responsive of this.weatherResponsiveMaterials) {
+      responsive.material.roughness = THREE.MathUtils.lerp(
+        responsive.dryRoughness,
+        responsive.wetRoughness,
+        shower,
+      );
+    }
     for (const prop of this.animatedProps) {
       prop.object.rotation.y = time * prop.spin + prop.phase;
       prop.object.position.y = prop.baseY + (reducedMotion ? 0 : Math.sin(time * 2.1 + prop.phase) * 0.18);
@@ -1056,6 +1229,7 @@ export class Arena implements ArenaRuntime {
     const random = randomFactory(this.seed ^ 0x7e227a1d);
     const raw = new Float32Array(size * size);
     const smooth = new Float32Array(size * size);
+    const relief = new Float32Array(size * size);
     const sample = (source: Float32Array, x: number, y: number): number => (
       source[((y + size) % size) * size + ((x + size) % size)]
     );
@@ -1069,6 +1243,15 @@ export class Arena implements ArenaRuntime {
         smooth[y * size + x] = value / 25;
       }
     }
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        const pixel = y * size + x;
+        const broad = smooth[pixel] - 0.5;
+        const strata = Math.sin(y * 0.31 + smooth[pixel] * 19 + Math.sin(x * 0.08) * 1.4);
+        const runoff = Math.pow(Math.max(0, Math.sin(x * 0.2 + smooth[pixel] * 15)), 7);
+        relief[pixel] = smooth[pixel] + (raw[pixel] - 0.5) * 0.055 + strata * 0.026 + runoff * 0.018 + broad * 0.04;
+      }
+    }
 
     const albedoData = new Uint8Array(size * size * 4);
     const normalData = new Uint8Array(size * size * 4);
@@ -1080,20 +1263,22 @@ export class Arena implements ArenaRuntime {
         const broad = smooth[pixel] - 0.5;
         const grain = raw[pixel] - 0.5;
         const lichen = Math.max(0, sample(smooth, x + 7, y - 11) - 0.56);
-        albedoData[channel] = THREE.MathUtils.clamp(205 + broad * 58 + grain * 18 - lichen * 42, 150, 238);
-        albedoData[channel + 1] = THREE.MathUtils.clamp(211 + broad * 52 + grain * 14 + lichen * 16, 156, 242);
-        albedoData[channel + 2] = THREE.MathUtils.clamp(210 + broad * 62 + grain * 12 - lichen * 8, 154, 242);
+        const strata = Math.sin(y * 0.31 + smooth[pixel] * 19 + Math.sin(x * 0.08) * 1.4);
+        const runoff = Math.pow(Math.max(0, Math.sin(x * 0.2 + smooth[pixel] * 15)), 7);
+        albedoData[channel] = THREE.MathUtils.clamp(190 + broad * 68 + grain * 17 + strata * 8 - runoff * 24 - lichen * 44, 126, 231);
+        albedoData[channel + 1] = THREE.MathUtils.clamp(201 + broad * 61 + grain * 13 + strata * 5 - runoff * 17 + lichen * 14, 136, 236);
+        albedoData[channel + 2] = THREE.MathUtils.clamp(197 + broad * 70 + grain * 11 - strata * 6 - runoff * 13 - lichen * 10, 132, 236);
         albedoData[channel + 3] = 255;
 
-        const dx = (sample(smooth, x - 1, y) - sample(smooth, x + 1, y)) * 2.4;
-        const dy = (sample(smooth, x, y - 1) - sample(smooth, x, y + 1)) * 2.4;
+        const dx = (sample(relief, x - 1, y) - sample(relief, x + 1, y)) * 4.8;
+        const dy = (sample(relief, x, y - 1) - sample(relief, x, y + 1)) * 4.8;
         const inverseLength = 1 / Math.hypot(dx, dy, 1);
         normalData[channel] = (dx * inverseLength * 0.5 + 0.5) * 255;
         normalData[channel + 1] = (dy * inverseLength * 0.5 + 0.5) * 255;
         normalData[channel + 2] = inverseLength * 255;
         normalData[channel + 3] = 255;
 
-        const roughness = THREE.MathUtils.clamp(222 + broad * 34 - grain * 12 + lichen * 80, 184, 252);
+        const roughness = THREE.MathUtils.clamp(214 + broad * 38 - grain * 13 + lichen * 72 - runoff * 48 + Math.abs(strata) * 8, 150, 250);
         roughnessData[channel] = roughness;
         roughnessData[channel + 1] = roughness;
         roughnessData[channel + 2] = roughness;
@@ -1106,7 +1291,7 @@ export class Arena implements ArenaRuntime {
       texture.colorSpace = colorSpace;
       texture.wrapS = THREE.RepeatWrapping;
       texture.wrapT = THREE.RepeatWrapping;
-      texture.repeat.set(42, 35);
+      texture.repeat.set(84, 70);
       texture.minFilter = THREE.LinearMipmapLinearFilter;
       texture.magFilter = THREE.LinearFilter;
       texture.generateMipmaps = true;
@@ -1181,9 +1366,6 @@ export class Arena implements ArenaRuntime {
       });
     };
     add('flux-core', 0, 0, 4.45, 8.5, 4.45);
-    add('purple-tower', -166, 91, 4.05, 10, 4.05);
-    add('amber-tower', -148, -112, 4.05, 9, 4.05);
-    add('lime-tower', 158, 78, 4.05, 9, 4.05);
     for (let index = 0; index < GATE_XZ.length; index += 1) {
       const [x, z] = GATE_XZ[index];
       const towardCore = new THREE.Vector2(-x, -z).normalize();
@@ -1203,14 +1385,38 @@ export class Arena implements ArenaRuntime {
 
   private registerRockField(): void {
     const random = randomFactory(this.seed ^ 0x71a55eed);
+    const talusCenters: ReadonlyArray<readonly [number, number, number, number]> = [
+      [-184, 82, 34, 20], [-151, -62, 39, 24], [-56, 151, 43, 18],
+      [132, 101, 38, 24], [169, -74, 44, 21], [24, -151, 48, 18],
+      [-193, -116, 31, 17], [196, 38, 30, 23], [-18, 24, 51, 19],
+    ];
+    const clearOfCtfBases = (x: number, z: number): boolean => (
+      Math.hypot(x - mw(-85), z - mw(130)) > 250
+      && Math.hypot(x - mw(95), z - mw(-120)) > 250
+    );
     const findPlacement = (): THREE.Vector3 => {
-      for (let attempt = 0; attempt < 80; attempt += 1) {
-        const x = (random() - 0.5) * mw(430);
-        const z = (random() - 0.5) * mw(350);
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        let x: number;
+        let z: number;
+        if (random() < 0.82) {
+          const [centerX, centerZ, radiusX, radiusZ] = talusCenters[Math.floor(random() * talusCenters.length)];
+          const angle = random() * Math.PI * 2;
+          const radius = Math.sqrt(random());
+          x = mw(centerX + Math.cos(angle) * radiusX * radius);
+          z = mw(centerZ + Math.sin(angle) * radiusZ * radius);
+        } else {
+          x = (random() - 0.5) * mw(440);
+          z = (random() - 0.5) * mw(370);
+        }
         const y = sampleMonsoonHeight(x, z, this.seed);
         const masks = sampleMonsoonMasks(x, z);
+        const normalY = sampleMonsoonNormal(x, z, new THREE.Vector3(), this.seed).y;
         if (
-          y > MONSOON_DIVIDE.waterY + 2.4 && masks.route < 0.46 && masks.crater < 0.62
+          y > MONSOON_DIVIDE.waterY + 3.5
+          && masks.route < 0.3
+          && masks.coast < 0.91
+          && normalY > 0.48
+          && clearOfCtfBases(x, z)
           && !this.isConcreteFootprint(x, z)
         ) {
           return new THREE.Vector3(x, y, z);
@@ -1218,27 +1424,32 @@ export class Arena implements ArenaRuntime {
       }
       return new THREE.Vector3(0, -100, 0);
     };
-    for (let index = 0; index < 240; index += 1) {
+    for (let index = 0; index < 760; index += 1) {
       const base = findPlacement();
       const quaternion = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(random() * 0.45, random() * Math.PI, random() * 0.35),
       );
-      const size = 0.38 + random() * 1.38;
+      const sizeRoll = random();
+      const size = sizeRoll > 0.95
+        ? 5.5 + random() * 7.5
+        : sizeRoll > 0.72
+          ? 2.1 + random() * 3.8
+          : 0.55 + random() * 1.9;
       const scale = new THREE.Vector3(
-        size,
-        size * (0.55 + random() * 0.8),
-        size * (0.7 + random() * 0.65),
+        size * (0.72 + random() * 0.72),
+        size * (0.55 + random() * 0.72),
+        size * (0.7 + random() * 0.68),
       );
-      const position = base.clone().add(new THREE.Vector3(0, size * 0.35, 0));
+      const position = base.clone().add(new THREE.Vector3(0, scale.y * 0.26, 0));
       this.scatteredRocks.push({ position, quaternion, scale });
-      if (base.y < -50 || size < 0.62) continue;
-      const halfX = Math.max(0.22, scale.x * 0.42);
-      const halfZ = Math.max(0.22, scale.z * 0.42);
+      if (base.y < -50 || size < 2.2) continue;
+      const halfX = Math.max(0.22, scale.x * 0.46);
+      const halfZ = Math.max(0.22, scale.z * 0.46);
       this.colliders.push({
-        name: `faceted-rock-${index}`,
+        name: `talus-boulder-${index}`,
         box: new THREE.Box3(
           new THREE.Vector3(position.x - halfX, base.y, position.z - halfZ),
-          new THREE.Vector3(position.x + halfX, base.y + Math.max(0.48, scale.y * 0.82), position.z + halfZ),
+          new THREE.Vector3(position.x + halfX, base.y + Math.max(0.48, scale.y * 0.86), position.z + halfZ),
         ),
       });
     }
@@ -1272,7 +1483,11 @@ export class Arena implements ArenaRuntime {
       let lowestSupportY = resolvedStartY;
       for (let alongIndex = 0; alongIndex <= 18; alongIndex += 1) {
         const along = alongIndex / 18;
-        for (const across of [-0.48, 0, 0.48]) {
+        // Sample beyond the visible side edge as well as beneath it. Mountain
+        // terrain can fall away sharply just outside a wide ramp; limiting the
+        // probe to the riding surface left a crouch-height walk-through gap
+        // below the fascia even though the authored ramp was marked solid.
+        for (const across of [-0.62, -0.48, 0, 0.48, 0.62]) {
           const x = THREE.MathUtils.lerp(startX, endX, along) + crossX * width * across;
           const z = THREE.MathUtils.lerp(startZ, endZ, along) + crossZ * width * across;
           lowestSupportY = Math.min(lowestSupportY, sampleMonsoonHeight(x, z, this.seed));
@@ -1305,6 +1520,7 @@ export class Arena implements ArenaRuntime {
         yaw,
         spec,
         flow: buildLaunchRamp(spec),
+        renderWithConcreteKit: true,
       });
     };
     const addConcreteBox = (name: string, box: THREE.Box3): void => {
@@ -1431,7 +1647,9 @@ export class Arena implements ArenaRuntime {
     // terrain and their raised lips create predictable race jumps at speed.
     addRamp('west-core-launch', mw(-119), mw(58), mw(-88), mw(39), mw(13), mw(7.2));
     addRamp('east-core-launch', mw(121), mw(53), mw(90), mw(37), mw(13), mw(7.4));
-    addRamp('southwest-launch', mw(-118), mw(-82), mw(-84), mw(-58), mw(14), mw(8.2));
+    // Keep the lip compact enough that a banked Katabatic-style approach
+    // converts speed into airtime instead of spending the whole run climbing.
+    addRamp('southwest-launch', mw(-118), mw(-82), mw(-92), mw(-62), mw(14), mw(8.2));
     addRamp('southeast-launch', mw(119), mw(-86), mw(84), mw(-60), mw(14), mw(8.4));
     addRamp('north-divide-launch', mw(0), mw(127), mw(0), mw(94), mw(16), mw(8.8));
     addRamp('south-divide-launch', mw(0), mw(-137), mw(0), mw(-102), mw(16), mw(9.2));
@@ -1704,15 +1922,10 @@ export class Arena implements ArenaRuntime {
       addGroundedBox(breaker.name, breaker.x, breaker.z, breaker.width, breaker.height, breaker.depth);
     }
 
-    const halfWidth = MONSOON_DIVIDE.width * 0.5 - 4;
-    const halfDepth = MONSOON_DIVIDE.depth * 0.5 - 4;
-    const bermThickness = 3.2;
-    const bermBottom = MONSOON_DIVIDE.waterY - 1.2;
-    const bermTop = MONSOON_DIVIDE.waterY + 2.4;
-    addWorldBox('perimeter-berm-north', 0, halfDepth - bermThickness * 0.5, halfWidth * 2, bermBottom, bermTop, bermThickness);
-    addWorldBox('perimeter-berm-south', 0, -(halfDepth - bermThickness * 0.5), halfWidth * 2, bermBottom, bermTop, bermThickness);
-    addWorldBox('perimeter-berm-east', halfWidth - bermThickness * 0.5, 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
-    addWorldBox('perimeter-berm-west', -(halfWidth - bermThickness * 0.5), 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
+    // The ocean and hard arena bounds already close the play space. A former
+    // rectangular concrete berm drew the implementation AABB across the water
+    // and fought the island silhouette, so the natural cliff edge owns the
+    // boundary presentation now.
   }
 
   private rampHeightAt(ramp: RampSurface, x: number, z: number): number | null {
@@ -1722,12 +1935,16 @@ export class Arena implements ArenaRuntime {
   private createConcreteTraversal(_toonRamp: THREE.Texture): void {
     const texture = this.createConcreteTexture();
     const concrete = new THREE.MeshStandardMaterial({
+      bumpMap: texture,
+      bumpScale: 0.09,
       color: 0x9aabad,
       map: texture,
       roughness: 0.88,
       metalness: 0.07,
     });
     const routeApron = new THREE.MeshStandardMaterial({
+      bumpMap: texture,
+      bumpScale: 0.055,
       color: 0x617579,
       map: texture,
       roughness: 0.96,
@@ -1752,12 +1969,26 @@ export class Arena implements ArenaRuntime {
       polygonOffsetUnits: -1,
     });
     this.materials.push(concrete, routeApron, signal, structuralDark);
+    this.weatherResponsiveMaterials.push(
+      { material: concrete, dryRoughness: 0.88, wetRoughness: 0.46 },
+      { material: routeApron, dryRoughness: 0.96, wetRoughness: 0.58 },
+    );
 
     const boxGeometry = new RoundedBoxGeometry(1, 1, 1, 1, 0.075);
     this.geometries.push(boxGeometry);
     const cubbyColliders = this.colliders.filter((collider) => collider.name.includes('cubby'));
     const cubbyBoxes = new Set(cubbyColliders.map((collider) => collider.box));
-    const structuralBoxes = this.concreteBoxes.filter((box) => !cubbyBoxes.has(box));
+    const wrappedStormwallBoxes = new Set(this.colliders
+      .filter((collider) => [
+        'midfield-rocket-sniper-breaker',
+        'midfield-rail-sniper-breaker',
+        'midfield-spawn-shelf-breaker',
+        'ski-corridor-2-nunatak',
+      ].includes(collider.name))
+      .map((collider) => collider.box));
+    const structuralBoxes = this.concreteBoxes.filter((box) => (
+      !cubbyBoxes.has(box) && !wrappedStormwallBoxes.has(box)
+    ));
     const boxes = new THREE.InstancedMesh(boxGeometry, concrete, structuralBoxes.length);
     boxes.name = 'MonsoonEnterableConcreteStructures';
     const matrix = new THREE.Matrix4();
@@ -1770,7 +2001,8 @@ export class Arena implements ArenaRuntime {
     boxes.castShadow = true;
     boxes.receiveShadow = true;
 
-    const rampParts = this.rampSurfaces.map((ramp) => ramp.flow.geometry);
+    const concreteKitRamps = this.rampSurfaces.filter((ramp) => ramp.renderWithConcreteKit);
+    const rampParts = concreteKitRamps.map((ramp) => ramp.flow.geometry);
     const rampGeometry = mergeGeometries(rampParts, false);
     if (!rampGeometry) throw new Error('Failed to merge Monsoon concrete traversal ramps.');
     this.geometries.push(rampGeometry);
@@ -1780,7 +2012,7 @@ export class Arena implements ArenaRuntime {
     ramps.receiveShadow = true;
 
     const apronParts: THREE.BufferGeometry[] = [];
-    for (const ramp of this.rampSurfaces) {
+    for (const ramp of concreteKitRamps) {
       // Terrain launches already emerge from an edge-sampled buried entry and
       // land back on the authored dirt route. A surface ribbon there reads as
       // exposed grey collision geometry on the low-poly ground. Structural
@@ -1923,16 +2155,16 @@ export class Arena implements ArenaRuntime {
       const middleY = (tunnelFloor.y + tunnelRoof.y) * 0.5;
       for (const end of [-1, 1]) {
         for (const side of [-1, 1]) {
-          addDetail(darkDetails, new THREE.Vector3(42 + side * 15.28, middleY, -96 + end * 15.9), new THREE.Vector3(0.7, tunnelRoof.y - tunnelFloor.y, 0.72));
-          addDetail(signalDetails, new THREE.Vector3(42 + side * 14.84, middleY, -96 + end * 16.28), new THREE.Vector3(0.11, 4.8, 0.12));
+          addDetail(darkDetails, new THREE.Vector3(mw(42 + side * 15.28), middleY, mw(-96 + end * 15.9)), new THREE.Vector3(mw(0.7), tunnelRoof.y - tunnelFloor.y, mw(0.72)));
+          addDetail(signalDetails, new THREE.Vector3(mw(42 + side * 14.84), middleY, mw(-96 + end * 16.28)), new THREE.Vector3(mw(0.11), mw(4.8), mw(0.12)));
         }
-        addDetail(darkDetails, new THREE.Vector3(42, tunnelRoof.y - 0.3, -96 + end * 15.9), new THREE.Vector3(30.2, 0.62, 0.72));
+        addDetail(darkDetails, new THREE.Vector3(mw(42), tunnelRoof.y - mw(0.3), mw(-96 + end * 15.9)), new THREE.Vector3(mw(30.2), mw(0.62), mw(0.72)));
       }
     }
 
     const rampDarkParts: THREE.BufferGeometry[] = [];
     const rampSignalParts: THREE.BufferGeometry[] = [];
-    for (const ramp of this.rampSurfaces) {
+    for (const ramp of concreteKitRamps) {
       const lateral = new THREE.Vector3(Math.cos(ramp.yaw), 0, -Math.sin(ramp.yaw));
       const forward = new THREE.Vector3(Math.sin(ramp.yaw), 0, Math.cos(ramp.yaw));
       const bottomY = ramp.spec.origin.y - (ramp.spec.skirtDepth ?? 0.8);
@@ -2183,7 +2415,8 @@ export class Arena implements ArenaRuntime {
   }
 
   private createOcean(): void {
-    const geometry = new THREE.PlaneGeometry(3600, 3600, 72, 72);
+    const oceanSpan = Math.max(MONSOON_DIVIDE.width, MONSOON_DIVIDE.depth) * 1.9;
+    const geometry = new THREE.PlaneGeometry(oceanSpan, oceanSpan, 160, 160);
     const material = new THREE.ShaderMaterial({
       name: 'MonsoonCelOcean',
       transparent: true,
@@ -2212,10 +2445,11 @@ export class Arena implements ArenaRuntime {
         varying float vWave;
         varying vec3 vWorld;
         void main() {
-          float band = floor(clamp(vWave * 1.8 + 2.0, 0.0, 3.0)) / 3.0;
-          float horizon = smoothstep(360.0, 1440.0, length(vWorld.xz));
-          vec3 color = mix(uDeep, uShallow, 0.34 + band * 0.38);
-          color = mix(color, uSun, horizon * 0.12);
+          float waveLight = smoothstep(-0.52, 0.72, vWave);
+          float horizon = smoothstep(720.0, 2880.0, length(vWorld.xz));
+          vec3 color = mix(uDeep, uShallow, 0.25 + waveLight * 0.36);
+          float glint = pow(smoothstep(0.42, 0.75, vWave), 3.0);
+          color = mix(color, uSun, horizon * 0.08 + glint * 0.09);
           gl_FragColor = vec4(color, 0.94);
         }
       `,
@@ -2229,33 +2463,80 @@ export class Arena implements ArenaRuntime {
     ocean.renderOrder = -1;
     ocean.receiveShadow = false;
     this.group.add(ocean);
+    this.createShorelineFoam();
   }
 
-  private createDistantIslands(): void {
-    const geometry = new THREE.ConeGeometry(1, 1, 7, 1);
-    const material = new THREE.MeshToonMaterial({ color: 0x233d49 });
+  private createShorelineFoam(): void {
+    const halfWidth = MONSOON_DIVIDE.width * 0.5;
+    const halfDepth = MONSOON_DIVIDE.depth * 0.5;
+    const waterline = MONSOON_DIVIDE.waterY + 0.7;
+    const paths: THREE.Vector3[][] = [];
+    const sides = [
+      { samples: 120, point: (t: number) => ({ x: THREE.MathUtils.lerp(-halfWidth, halfWidth, t), z: -halfDepth, ix: 0, iz: 1 }) },
+      { samples: 120, point: (t: number) => ({ x: THREE.MathUtils.lerp(halfWidth, -halfWidth, t), z: halfDepth, ix: 0, iz: -1 }) },
+      { samples: 100, point: (t: number) => ({ x: -halfWidth, z: THREE.MathUtils.lerp(halfDepth, -halfDepth, t), ix: 1, iz: 0 }) },
+      { samples: 100, point: (t: number) => ({ x: halfWidth, z: THREE.MathUtils.lerp(-halfDepth, halfDepth, t), ix: -1, iz: 0 }) },
+    ] as const;
+    for (const side of sides) {
+      const path: THREE.Vector3[] = [];
+      for (let index = 0; index <= side.samples; index += 1) {
+        const edge = side.point(index / side.samples);
+        let found: THREE.Vector3 | null = null;
+        for (let distance = 0; distance <= 440; distance += 8) {
+          const x = edge.x + edge.ix * distance;
+          const z = edge.z + edge.iz * distance;
+          if (sampleMonsoonHeight(x, z, this.seed) > waterline + 0.8) {
+            found = new THREE.Vector3(x, waterline, z);
+            break;
+          }
+        }
+        if (found) path.push(found);
+      }
+      if (path.length > 1) paths.push(path);
+    }
+
+    const positions: number[] = [];
+    const push = (point: THREE.Vector3): void => {
+      positions.push(point.x, point.y, point.z);
+    };
+    for (const path of paths) {
+      for (let index = 0; index < path.length - 1; index += 1) {
+        const a = path[index];
+        const b = path[index + 1];
+        const tangent = b.clone().sub(a).setY(0).normalize();
+        const cross = new THREE.Vector3(-tangent.z, 0, tangent.x);
+        const widthA = 2.2 + (Math.sin(index * 1.73) * 0.5 + 0.5) * 2.4;
+        const widthB = 2.2 + (Math.sin((index + 1) * 1.73) * 0.5 + 0.5) * 2.4;
+        const leftA = a.clone().addScaledVector(cross, widthA);
+        const rightA = a.clone().addScaledVector(cross, -widthA);
+        const leftB = b.clone().addScaledVector(cross, widthB);
+        const rightB = b.clone().addScaledVector(cross, -widthB);
+        push(leftA); push(leftB); push(rightA);
+        push(rightA); push(leftB); push(rightB);
+      }
+    }
+    if (positions.length === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xb9e4e2,
+      depthWrite: false,
+      fog: true,
+      opacity: 0.34,
+      side: THREE.DoubleSide,
+      transparent: true,
+    });
+    material.name = 'MonsoonWindBrokenShoreFoam';
+    const foam = new THREE.Mesh(geometry, material);
+    foam.name = 'MonsoonWindBrokenShoreline';
+    foam.renderOrder = 0;
+    foam.userData.nonCollidable = true;
     this.geometries.push(geometry);
     this.materials.push(material);
-    const count = 11;
-    const islands = new THREE.InstancedMesh(geometry, material, count);
-    islands.name = 'DistantIslandSilhouettes';
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    const random = randomFactory(this.seed ^ 0xd157a17d);
-    for (let index = 0; index < count; index += 1) {
-      const angle = (index / count) * Math.PI * 2 + random() * 0.22;
-      const radius = mw(560) + random() * mw(190);
-      const position = new THREE.Vector3(
-        Math.cos(angle) * radius,
-        MONSOON_DIVIDE.waterY - 2 + random() * 4,
-        Math.sin(angle) * radius,
-      );
-      quaternion.setFromEuler(new THREE.Euler(0, random() * Math.PI, 0));
-      matrix.compose(position, quaternion, new THREE.Vector3(mw(24) + random() * mw(30), mw(10) + random() * mw(19), mw(22) + random() * mw(34)));
-      islands.setMatrixAt(index, matrix);
-    }
-    islands.instanceMatrix.needsUpdate = true;
-    this.group.add(islands);
+    this.group.add(foam);
   }
 
   private createRouteGates(_toonRamp: THREE.Texture): void {
@@ -2354,13 +2635,13 @@ export class Arena implements ArenaRuntime {
       matrix.compose(
         pad.position.clone().add(new THREE.Vector3(0, 0.08, 0)),
         identity,
-        new THREE.Vector3(MONSOON_WORLD_SCALE, 1, MONSOON_WORLD_SCALE),
+        new THREE.Vector3(MONSOON_PLAYER_ART_SCALE, 1, MONSOON_PLAYER_ART_SCALE),
       );
       bases.setMatrixAt(index, matrix);
       matrix.compose(
         pad.position.clone().add(new THREE.Vector3(0, 0.33, 0)),
         horizontal,
-        new THREE.Vector3(MONSOON_WORLD_SCALE, MONSOON_WORLD_SCALE, MONSOON_WORLD_SCALE),
+        new THREE.Vector3(MONSOON_PLAYER_ART_SCALE, MONSOON_PLAYER_ART_SCALE, MONSOON_PLAYER_ART_SCALE),
       );
       rings.setMatrixAt(index, matrix);
     });
@@ -2419,77 +2700,6 @@ export class Arena implements ArenaRuntime {
     this.group.add(root);
   }
 
-  private createLandmarkTower(
-    x: number,
-    z: number,
-    color: number,
-    heightScale: number,
-    _toonRamp: THREE.Texture,
-  ): void {
-    const root = new THREE.Group();
-    root.name = `MonsoonLandmark_${color.toString(16)}`;
-    root.position.copy(placedPoint(x, z, this.seed));
-    const dark = new THREE.MeshStandardMaterial({ color: 0x102029, roughness: 0.62, metalness: 0.5 });
-    const white = new THREE.MeshStandardMaterial({ color: 0x52666c, roughness: 0.76, metalness: 0.16 });
-    const glow = new THREE.MeshStandardMaterial({
-      color,
-      emissive: color,
-      emissiveIntensity: 1.75,
-      roughness: 0.22,
-      metalness: 0.3,
-    });
-    this.materials.push(dark, white, glow);
-    const baseGeometry = new THREE.CylinderGeometry(3.1, 4, 1.1, 8);
-    const mastGeometry = new THREE.CylinderGeometry(0.38, 1.15, 15 * heightScale, 7);
-    const collarGeometry = new THREE.CylinderGeometry(1.3, 1.6, 0.65, 8);
-    const crownGeometry = new THREE.OctahedronGeometry(0.92, 0);
-    const haloGeometry = new THREE.TorusGeometry(1.45, 0.12, 6, 24);
-    const braceGeometry = new RoundedBoxGeometry(0.48, 5.6, 0.62, 1, 0.08);
-    const finGeometry = new THREE.ConeGeometry(0.46, 2.4, 4, 1, false, Math.PI * 0.25);
-    this.geometries.push(baseGeometry, mastGeometry, collarGeometry, crownGeometry, haloGeometry, braceGeometry, finGeometry);
-    const base = new THREE.Mesh(baseGeometry, dark);
-    base.position.y = 0.55;
-    const mast = new THREE.Mesh(mastGeometry, white);
-    mast.position.y = 1.1 + 7.5 * heightScale;
-    const collar = new THREE.Mesh(collarGeometry, dark);
-    collar.position.y = 3.1;
-    const braces = new THREE.InstancedMesh(braceGeometry, dark, 4);
-    const fins = new THREE.InstancedMesh(finGeometry, white, 4);
-    const detailMatrix = new THREE.Matrix4();
-    for (let index = 0; index < 4; index += 1) {
-      const angle = index / 4 * Math.PI * 2;
-      const radial = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
-      detailMatrix.compose(
-        radial.clone().multiplyScalar(1.68).setY(3.25),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -angle, index % 2 === 0 ? 0.16 : -0.16)),
-        new THREE.Vector3(1, 1, 1),
-      );
-      braces.setMatrixAt(index, detailMatrix);
-      detailMatrix.compose(
-        radial.clone().multiplyScalar(1.05).setY(7.4 + index * 0.46),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -angle, Math.PI * 0.5)),
-        new THREE.Vector3(1, 1, 1),
-      );
-      fins.setMatrixAt(index, detailMatrix);
-    }
-    braces.instanceMatrix.needsUpdate = true;
-    fins.instanceMatrix.needsUpdate = true;
-    const crownY = 2 + 15 * heightScale;
-    const crown = new THREE.Mesh(crownGeometry, glow);
-    crown.position.y = crownY;
-    const halo = new THREE.Mesh(haloGeometry, glow);
-    halo.position.y = crownY - 1.35;
-    halo.rotation.x = Math.PI * 0.5;
-    this.animatedProps.push({ object: crown, baseY: crownY, phase: x * 0.03, spin: 0.7 });
-    this.animatedProps.push({ object: halo, baseY: crownY - 1.35, phase: z * 0.03, spin: -0.42 });
-    root.add(base, mast, collar, braces, fins, crown, halo);
-    root.traverse((object) => {
-      const mesh = object as THREE.Mesh;
-      if (mesh.isMesh && mesh.material !== glow) mesh.castShadow = true;
-    });
-    this.group.add(root);
-  }
-
   private createDetailedDirtRoutes(_toonRamp: THREE.Texture): void {
     const positions: number[] = [];
     const normals: number[] = [];
@@ -2526,7 +2736,12 @@ export class Arena implements ArenaRuntime {
         const tangentLength = Math.hypot(tangentX, tangentZ) || 1;
         const crossX = -tangentZ / tangentLength;
         const crossZ = tangentX / tangentLength;
-        const halfWidth = width * 0.5;
+        const routeProgress = samples.length > 1 ? index / (samples.length - 1) : 0.5;
+        const longitudinalFade = closed
+          ? 1
+          : THREE.MathUtils.smoothstep(routeProgress, 0, 0.18)
+            * (1 - THREE.MathUtils.smoothstep(routeProgress, 0.82, 1));
+        const halfWidth = width * 0.5 * THREE.MathUtils.lerp(0.2, 1, longitudinalFade);
         const leftX = x + crossX * halfWidth;
         const leftZ = z + crossZ * halfWidth;
         const rightX = x - crossX * halfWidth;
@@ -2555,25 +2770,13 @@ export class Arena implements ArenaRuntime {
       }
     };
 
-    const subdivisions = 28;
-    for (const [startX, startZ, endX, endZ] of MONSOON_ROUTE_SEGMENTS) {
-      const samples: Array<readonly [number, number]> = [];
-      for (let index = 0; index <= subdivisions; index += 1) {
-        const t = index / subdivisions;
-        samples.push([
-          THREE.MathUtils.lerp(startX, endX, t) * MONSOON_WORLD_SCALE,
-          THREE.MathUtils.lerp(startZ, endZ, t) * MONSOON_WORLD_SCALE,
-        ]);
-      }
-      appendRibbon(samples, mw(9.6), false);
-    }
-    // The terrain itself defines the broad outer ski loop. Keeping its old
-    // full-width decal produced a debug-red ring around the whole island and
-    // sent ribbon triangles down the coastal cliffs. Only the compact inner
-    // race line receives a subtle packed-earth surface treatment.
+    // The terrain palette already exposes the radial ski corridors with an
+    // organic soil blend. A second set of straight decals read as editor
+    // arrows from overview height, so only the compact inner race line gets a
+    // restrained packed-earth surface treatment.
     appendRibbon(
       MONSOON_INNER_LOOP_SAMPLES.map(([x, z]) => [mw(x), mw(z)] as const),
-      mw(9.2),
+      mw(7.2),
       true,
     );
     const geometry = new THREE.BufferGeometry();
@@ -2585,12 +2788,12 @@ export class Arena implements ArenaRuntime {
     const texture = this.createDirtTexture();
     const edgeMask = this.createDirtRouteEdgeMask();
     const material = new THREE.MeshStandardMaterial({
-      color: 0x918979,
+      color: 0x778073,
       map: texture,
       alphaMap: edgeMask,
       alphaTest: 0.06,
       transparent: true,
-      opacity: 0.82,
+      opacity: 0.68,
       depthWrite: false,
       roughness: 0.98,
       metalness: 0,
@@ -2680,6 +2883,71 @@ export class Arena implements ArenaRuntime {
     return texture;
   }
 
+  private createStormPuddles(): void {
+    const puddles = [
+      { x: -92, z: -34, rx: 19, rz: 10, yaw: -0.3 },
+      { x: -48, z: 28, rx: 13, rz: 7, yaw: 0.4 },
+      { x: -18, z: -62, rx: 16, rz: 8, yaw: 0.12 },
+      { x: 30, z: 42, rx: 18, rz: 9, yaw: -0.48 },
+      { x: 76, z: -24, rx: 14, rz: 7, yaw: 0.3 },
+      { x: 112, z: 54, rx: 12, rz: 6, yaw: -0.18 },
+      { x: -128, z: 72, rx: 11, rz: 5, yaw: 0.62 },
+      { x: 118, z: -78, rx: 17, rz: 7, yaw: -0.52 },
+    ] as const;
+    const positions: number[] = [];
+    const colors: number[] = [];
+    const segments = 18;
+    const push = (x: number, z: number, brightness: number): void => {
+      positions.push(x, sampleMonsoonHeight(x, z, this.seed) + 0.11, z);
+      colors.push(0.36 * brightness, 0.73 * brightness, 0.8 * brightness);
+    };
+    for (const puddle of puddles) {
+      const cosine = Math.cos(puddle.yaw);
+      const sine = Math.sin(puddle.yaw);
+      for (let segment = 0; segment < segments; segment += 1) {
+        const appendRim = (index: number): void => {
+          const angle = index / segments * Math.PI * 2;
+          const ripple = 0.86 + Math.sin(index * 2.17 + puddle.x) * 0.09;
+          const localX = Math.cos(angle) * puddle.rx * ripple;
+          const localZ = Math.sin(angle) * puddle.rz * ripple;
+          push(
+            puddle.x + localX * cosine - localZ * sine,
+            puddle.z + localX * sine + localZ * cosine,
+            0.72,
+          );
+        };
+        push(puddle.x, puddle.z, 1);
+        appendRim(segment);
+        appendRim(segment + 1);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      depthWrite: false,
+      metalness: 0.08,
+      opacity: 0.46,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      roughness: 0.2,
+      transparent: true,
+      vertexColors: true,
+    });
+    material.name = 'MonsoonStormBasinWetPatches';
+    const wetPatches = new THREE.Mesh(geometry, material);
+    wetPatches.name = 'MonsoonIrregularStormPuddles';
+    wetPatches.renderOrder = 1;
+    wetPatches.userData.nonCollidable = true;
+    this.geometries.push(geometry);
+    this.materials.push(material);
+    this.group.add(wetPatches);
+  }
+
   private createGrassBladeGeometry(): THREE.BufferGeometry {
     const positions: number[] = [];
     const normals: number[] = [];
@@ -2698,11 +2966,12 @@ export class Arena implements ArenaRuntime {
     for (const [blade, [angle, offsetX, offsetZ]] of cluster.entries()) {
       const cosine = Math.cos(angle);
       const sine = Math.sin(angle);
-      const width = 0.01 + (blade % 3) * 0.004;
-      const height = 0.2 + (blade % 4) * 0.035;
+      const width = 0.026 + (blade % 3) * 0.008;
+      const height = 0.42 + (blade % 4) * 0.075;
       const points = [
         new THREE.Vector3(-width + offsetX, 0, offsetZ),
         new THREE.Vector3(width + offsetX, 0, offsetZ),
+        new THREE.Vector3(offsetX + width * 0.45 + 0.055, height * 0.62, offsetZ),
         new THREE.Vector3(offsetX + 0.07, height, offsetZ),
       ];
       for (const point of points) {
@@ -2710,11 +2979,11 @@ export class Arena implements ArenaRuntime {
         const z = point.x * sine + point.z * cosine;
         point.set(x, point.y, z);
       }
-      for (const index of [0, 1, 2]) {
+      for (const index of [0, 1, 2, 0, 2, 3]) {
         const point = points[index];
         positions.push(point.x, point.y, point.z);
         normals.push(sine * 0.26, 0.93, cosine * 0.26);
-        uvs.push(index === 0 ? 0 : index === 1 ? 1 : 0.5, index < 2 ? 0 : 1);
+        uvs.push(index === 0 ? 0 : index === 1 ? 1 : 0.55, index < 2 ? 0 : index === 2 ? 0.62 : 1);
       }
     }
     const geometry = new THREE.BufferGeometry();
@@ -2726,23 +2995,420 @@ export class Arena implements ArenaRuntime {
   }
 
   private createWeedGeometry(): THREE.BufferGeometry {
-    const positions = new Float32Array([
-      -0.018, 0, 0, 0.018, 0, 0, 0.025, 0.52, 0,
-      0.005, 0.2, 0, 0.29, 0.31, 0.02, 0.018, 0.35, 0,
-      -0.005, 0.29, 0, -0.25, 0.41, -0.02, 0.015, 0.42, 0,
-      -0.04, 0.5, 0, 0.09, 0.5, 0, 0.025, 0.62, 0,
-    ]);
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const normals = new Float32Array(positions.length);
-    for (let index = 0; index < normals.length; index += 3) {
-      normals[index] = 0.12;
-      normals[index + 1] = 0.94;
-      normals[index + 2] = 0.32;
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const stemColor = new THREE.Color(0x73805a);
+    const leafColor = new THREE.Color(0x98a975);
+    const seedColor = new THREE.Color(0xc6b47b);
+    const push = (points: THREE.Vector3[], normal: THREE.Vector3, color: THREE.Color): void => {
+      for (const point of points) {
+        positions.push(point.x, point.y, point.z);
+        normals.push(normal.x, normal.y, normal.z);
+        colors.push(color.r, color.g, color.b);
+      }
+    };
+    for (let stalk = 0; stalk < 4; stalk += 1) {
+      const angle = stalk / 4 * Math.PI * 2 + stalk * 0.23;
+      const forward = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+      const side = new THREE.Vector3(-forward.z, 0, forward.x);
+      const normal = new THREE.Vector3(forward.x * 0.22, 0.94, forward.z * 0.22).normalize();
+      const root = forward.clone().multiplyScalar(0.08 + stalk * 0.02);
+      const height = 0.68 + stalk * 0.09;
+      const bend = forward.clone().multiplyScalar(0.08 + stalk * 0.025);
+      const stemLeft = root.clone().addScaledVector(side, 0.022);
+      const stemRight = root.clone().addScaledVector(side, -0.022);
+      const top = root.clone().add(bend).add(new THREE.Vector3(0, height, 0));
+      push([stemLeft, stemRight, top], normal, stemColor);
+      for (const [leafY, leafSide] of [[0.28, -1], [0.43, 1]] as const) {
+        const center = root.clone().addScaledVector(bend, leafY / height).add(new THREE.Vector3(0, leafY, 0));
+        const outward = side.clone().multiplyScalar(leafSide);
+        const tip = center.clone().addScaledVector(outward, 0.3).add(new THREE.Vector3(0, 0.09, 0));
+        const shoulderA = center.clone().addScaledVector(outward, 0.13).addScaledVector(forward, 0.07);
+        const shoulderB = center.clone().addScaledVector(outward, 0.13).addScaledVector(forward, -0.07);
+        push([center, shoulderA, tip, center, tip, shoulderB], normal, leafColor);
+      }
+      const headSide = side.clone().multiplyScalar(0.095);
+      const headBottom = top.clone().add(new THREE.Vector3(0, -0.08, 0));
+      const headTop = top.clone().add(new THREE.Vector3(0, 0.16, 0));
+      push([headBottom.clone().add(headSide), headBottom.clone().sub(headSide), headTop], normal, seedColor);
     }
-    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
     return geometry;
+  }
+
+  private createBoulderGeometry(variant: 0 | 1 | 2): THREE.BufferGeometry {
+    const geometry = new THREE.IcosahedronGeometry(1, 1);
+    const positions = geometry.getAttribute('position');
+    const point = new THREE.Vector3();
+    for (let index = 0; index < positions.count; index += 1) {
+      point.fromBufferAttribute(positions, index);
+      const direction = point.clone().normalize();
+      const fracture = 1
+        + Math.sin(direction.x * (7.1 + variant * 1.9) + direction.z * (3.1 + variant)) * (0.075 + variant * 0.018)
+        + Math.sin(direction.y * (10.3 + variant * 1.4) - direction.x * 4.6) * (0.055 + variant * 0.012)
+        + Math.sin((direction.x + direction.z) * (15.1 + variant * 2.8)) * 0.04;
+      point.multiplyScalar(fracture);
+      if (variant === 0) {
+        point.x *= 1.12;
+        point.y *= 0.82 + Math.max(0, direction.y) * 0.1;
+      } else if (variant === 1) {
+        point.z *= 1.18;
+        point.y *= 1.02 + Math.max(0, direction.y) * 0.16;
+        point.x += direction.y * 0.09;
+      } else {
+        point.x *= 0.92;
+        point.z *= 0.86;
+        point.y *= 1.2 + Math.max(0, direction.y) * 0.18;
+        point.z -= direction.y * 0.12;
+      }
+      positions.setXYZ(index, point.x, point.y, point.z);
+    }
+    positions.needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return geometry;
+  }
+
+  private createFernGeometry(variant: 0 | 1 | 2): THREE.BufferGeometry {
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const leafColor = new THREE.Color(variant === 0 ? 0x729b63 : variant === 1 ? 0x5f8b58 : 0x89a76d);
+    const tipColor = new THREE.Color(variant === 0 ? 0x9bb77a : variant === 1 ? 0x7eaa68 : 0xb0c587);
+    const stemColor = new THREE.Color(0x536e45);
+    const frondCount = variant === 0 ? 7 : variant === 1 ? 9 : 6;
+    const leafletPairs = variant === 2 ? 5 : 7;
+    const pushTriangle = (
+      a: THREE.Vector3,
+      b: THREE.Vector3,
+      c: THREE.Vector3,
+      normal: THREE.Vector3,
+      color: THREE.Color,
+    ): void => {
+      for (const point of [a, b, c]) {
+        positions.push(point.x, point.y, point.z);
+        normals.push(normal.x, normal.y, normal.z);
+        colors.push(color.r, color.g, color.b);
+      }
+    };
+    for (let frond = 0; frond < frondCount; frond += 1) {
+      const angle = frond / frondCount * Math.PI * 2 + variant * 0.21 + (frond % 2) * 0.1;
+      const forward = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+      const side = new THREE.Vector3(-forward.z, 0, forward.x);
+      const normal = new THREE.Vector3(forward.x * 0.2, 0.96, forward.z * 0.2).normalize();
+      const reach = (variant === 0 ? 1.08 : variant === 1 ? 1.34 : 0.9) * (0.88 + (frond % 3) * 0.08);
+      const rise = variant === 0 ? 1.04 : variant === 1 ? 0.7 : 1.34;
+      const curve = variant === 0 ? 0.46 : variant === 1 ? 0.7 : 0.24;
+      const sample = (t: number): THREE.Vector3 => {
+        const radial = reach * (t * (1 - curve * 0.17 * t));
+        const y = rise * (t - curve * t * t * 0.62) + Math.sin(t * Math.PI) * (variant === 1 ? 0.18 : 0.1);
+        return forward.clone().multiplyScalar(radial).add(new THREE.Vector3(0, y + 0.035, 0));
+      };
+      for (let segment = 0; segment < leafletPairs; segment += 1) {
+        const t0 = segment / leafletPairs;
+        const t1 = (segment + 1) / leafletPairs;
+        const stemA = sample(t0);
+        const stemB = sample(t1);
+        const stemWidth = 0.022 * (1 - t0 * 0.64);
+        pushTriangle(stemA.clone().addScaledVector(side, stemWidth), stemA.clone().addScaledVector(side, -stemWidth), stemB, normal, stemColor);
+        if (segment === 0) continue;
+        const t = (segment + 0.16) / leafletPairs;
+        const center = sample(t);
+        const taper = Math.sin(Math.PI * Math.pow(t, 0.82));
+        const leafLength = (variant === 1 ? 0.34 : variant === 2 ? 0.27 : 0.31) * (0.3 + taper * 0.86);
+        const leafWidth = leafLength * (variant === 1 ? 0.24 : 0.34);
+        const along = sample(Math.min(1, t + 0.05)).sub(center).normalize();
+        for (const leafSide of [-1, 1]) {
+          const outward = side.clone().multiplyScalar(leafSide);
+          const base = center.clone().addScaledVector(outward, 0.025);
+          const tip = center.clone()
+            .addScaledVector(outward, leafLength)
+            .addScaledVector(along, leafLength * 0.26)
+            .add(new THREE.Vector3(0, -leafLength * (variant === 1 ? 0.18 : 0.08), 0));
+          const shoulder = base.clone()
+            .addScaledVector(outward, leafLength * 0.42)
+            .addScaledVector(along, leafWidth);
+          const trailing = base.clone()
+            .addScaledVector(outward, leafLength * 0.38)
+            .addScaledVector(along, -leafWidth * 0.72);
+          const mixed = leafColor.clone().lerp(tipColor, t * 0.55 + (frond % 3) * 0.08);
+          pushTriangle(base, shoulder, tip, normal, mixed);
+          pushTriangle(base, tip, trailing, normal, mixed);
+        }
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return geometry;
+  }
+
+  private colorizeProceduralGeometry(source: THREE.BufferGeometry, color: number): THREE.BufferGeometry {
+    const geometry = source.index ? source.toNonIndexed() : source;
+    if (geometry !== source) source.dispose();
+    const positions = geometry.getAttribute('position');
+    const tint = new THREE.Color(color);
+    const colors = new Float32Array(positions.count * 3);
+    for (let index = 0; index < positions.count; index += 1) {
+      colors[index * 3] = tint.r;
+      colors[index * 3 + 1] = tint.g;
+      colors[index * 3 + 2] = tint.b;
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return geometry;
+  }
+
+  private createFoliageClumpGeometry(color: number, variation: number): THREE.BufferGeometry {
+    const source = new THREE.IcosahedronGeometry(1, 1);
+    const geometry = source.index ? source.toNonIndexed() : source;
+    if (geometry !== source) source.dispose();
+    const positions = geometry.getAttribute('position');
+    const normalAttribute = geometry.getAttribute('normal');
+    const point = new THREE.Vector3();
+    const base = new THREE.Color(color);
+    const shadow = base.clone().multiplyScalar(0.68);
+    const sunward = base.clone().lerp(new THREE.Color(0xc6d99a), 0.24);
+    const colors = new Float32Array(positions.count * 3);
+    for (let index = 0; index < positions.count; index += 1) {
+      point.fromBufferAttribute(positions, index);
+      const direction = point.clone().normalize();
+      const tuft = 1
+        + Math.sin(direction.x * (6.4 + variation) + direction.z * 3.7) * 0.09
+        + Math.sin(direction.y * 8.8 - direction.x * (3.2 + variation * 0.4)) * 0.065
+        + Math.cos((direction.x - direction.z) * 11.6 + variation) * 0.035;
+      point.multiplyScalar(tuft);
+      point.x += direction.y * Math.sin(variation * 1.7) * 0.06;
+      point.z += direction.y * Math.cos(variation * 1.3) * 0.05;
+      positions.setXYZ(index, point.x, point.y, point.z);
+      normalAttribute.setXYZ(index, direction.x, direction.y, direction.z);
+      const brightness = THREE.MathUtils.clamp(direction.y * 0.46 + direction.x * 0.12 + 0.48, 0, 1);
+      const tint = shadow.clone().lerp(sunward, brightness);
+      colors[index * 3] = tint.r;
+      colors[index * 3 + 1] = tint.g;
+      colors[index * 3 + 2] = tint.b;
+    }
+    positions.needsUpdate = true;
+    normalAttribute.needsUpdate = true;
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return geometry;
+  }
+
+  private createLeafSprayGeometry(color: number, variation: number): THREE.BufferGeometry {
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const uvs: number[] = [];
+    const base = new THREE.Color(color);
+    const highlight = base.clone().lerp(new THREE.Color(0xd4dfa6), 0.3);
+    const leafCount = 16;
+    for (let leaf = 0; leaf < leafCount; leaf += 1) {
+      const azimuth = leaf * 2.399963 + variation * 0.37;
+      const elevation = -0.58 + (leaf % 6) * 0.23 + Math.sin(leaf * 1.7 + variation) * 0.08;
+      const direction = new THREE.Vector3(
+        Math.cos(azimuth) * Math.cos(elevation),
+        Math.sin(elevation),
+        Math.sin(azimuth) * Math.cos(elevation),
+      ).normalize();
+      const center = direction.clone().multiplyScalar(0.66 + (leaf % 4) * 0.065);
+      const tangent = new THREE.Vector3(-Math.sin(azimuth), 0.16 * Math.sin(elevation), Math.cos(azimuth)).normalize();
+      const longitudinal = tangent.clone().cross(direction).normalize();
+      const length = 0.25 + (leaf % 3) * 0.045;
+      const width = 0.105 + (leaf % 2) * 0.025;
+      const root = center.clone().addScaledVector(longitudinal, -length * 0.45);
+      const tip = center.clone().addScaledVector(longitudinal, length * 0.62).addScaledVector(direction, 0.035);
+      const left = center.clone().addScaledVector(tangent, width);
+      const right = center.clone().addScaledVector(tangent, -width);
+      const tint = base.clone().lerp(highlight, (leaf % 5) / 7);
+      for (const [point, u, v] of [
+        [root, 0.5, 0], [left, 0, 0.52], [tip, 0.5, 1],
+        [root, 0.5, 0], [tip, 0.5, 1], [right, 1, 0.52],
+      ] as const) {
+        positions.push(point.x, point.y, point.z);
+        normals.push(direction.x, direction.y, direction.z);
+        colors.push(tint.r, tint.g, tint.b);
+        uvs.push(u, v);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return geometry;
+  }
+
+  private createShrubGeometry(variant: 0 | 1): THREE.BufferGeometry {
+    const parts: THREE.BufferGeometry[] = [];
+    const broadleaf = variant === 0;
+    const branchSpecs: ReadonlyArray<readonly [number, number, number, number, number, number]> = broadleaf
+      ? [[-0.5, 0.25, 0.15, -0.84, 1.05, 0.28], [0.42, 0.24, -0.08, 0.72, 1.18, -0.18], [0, 0.22, 0.2, 0.08, 1.35, 0.36]]
+      : [[-0.1, 0.22, 0, 0.74, 1.1, 0.12], [0.04, 0.2, -0.12, 1.02, 0.78, -0.42], [-0.04, 0.18, 0.1, 0.6, 1.38, 0.44]];
+    const branchBetween = (spec: readonly [number, number, number, number, number, number], radius: number): THREE.BufferGeometry => {
+      const start = new THREE.Vector3(spec[0], spec[1], spec[2]);
+      const end = new THREE.Vector3(spec[3], spec[4], spec[5]);
+      const direction = end.clone().sub(start);
+      const length = direction.length();
+      const branch = this.colorizeProceduralGeometry(new THREE.CylinderGeometry(radius * 0.72, radius, length, 6), 0x584d3b);
+      branch.applyMatrix4(new THREE.Matrix4().compose(
+        start.clone().add(end).multiplyScalar(0.5),
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
+        new THREE.Vector3(1, 1, 1),
+      ));
+      return branch;
+    };
+    branchSpecs.forEach((spec, index) => parts.push(branchBetween(spec, 0.055 + index * 0.009)));
+    const clumps: ReadonlyArray<readonly [number, number, number, number, number, number, number]> = broadleaf
+      ? [
+        [-0.92, 0.92, 0.18, 0.72, 0.58, 0.66, 0x6f925d], [-0.45, 1.18, -0.35, 0.82, 0.62, 0.72, 0x7fa064],
+        [0.08, 1.38, 0.3, 0.86, 0.68, 0.76, 0x8baa68], [0.64, 1.12, -0.24, 0.78, 0.6, 0.7, 0x698b59],
+        [0.98, 0.86, 0.28, 0.62, 0.5, 0.58, 0x91ad70], [0.18, 0.86, -0.62, 0.74, 0.58, 0.65, 0x5e8153],
+        [-0.22, 0.68, 0.65, 0.69, 0.48, 0.64, 0x789b61],
+      ]
+      : [
+        [0.18, 0.72, 0.1, 0.76, 0.43, 0.58, 0x718c55], [0.68, 0.96, -0.28, 0.92, 0.47, 0.64, 0x819961],
+        [1.18, 0.82, 0.26, 0.8, 0.4, 0.58, 0x657f4e], [0.7, 1.34, 0.34, 0.72, 0.46, 0.62, 0x91a76a],
+        [1.54, 0.58, -0.18, 0.58, 0.34, 0.5, 0x788e58], [0.2, 0.52, -0.5, 0.62, 0.34, 0.54, 0x596f49],
+      ];
+    clumps.forEach(([x, y, z, sx, sy, sz, color], index) => {
+      const clump = this.createFoliageClumpGeometry(color, index + variant * 7.3);
+      const transform = new THREE.Matrix4().compose(
+        new THREE.Vector3(x, y, z),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(index * 0.13, index * 0.67, index * 0.08)),
+        new THREE.Vector3(sx, sy, sz),
+      );
+      clump.applyMatrix4(transform);
+      const leafSpray = this.createLeafSprayGeometry(color, index + variant * 3.1);
+      leafSpray.applyMatrix4(transform);
+      parts.push(clump, leafSpray);
+    });
+    const merged = mergeGeometries(parts, false);
+    parts.forEach((part) => part.dispose());
+    if (!merged) throw new Error('Failed to build Monsoon shrub geometry.');
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
+    return merged;
+  }
+
+  private createStormTreeGeometry(variant: 0 | 1 | 2): THREE.BufferGeometry {
+    const parts: THREE.BufferGeometry[] = [];
+    const branchBetween = (
+      start: THREE.Vector3,
+      end: THREE.Vector3,
+      startRadius: number,
+      endRadius: number,
+      color = 0x594a36,
+    ): void => {
+      const direction = end.clone().sub(start);
+      const length = direction.length();
+      const branch = this.colorizeProceduralGeometry(new THREE.CylinderGeometry(endRadius, startRadius, length, 7), color);
+      branch.applyMatrix4(new THREE.Matrix4().compose(
+        start.clone().add(end).multiplyScalar(0.5),
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
+        new THREE.Vector3(1, 1, 1),
+      ));
+      parts.push(branch);
+    };
+    if (variant === 0) {
+      branchBetween(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.58, 7.6, 0.05), 0.48, 0.18, 0x514839);
+      for (let tier = 0; tier < 6; tier += 1) {
+        const y = 2.5 + tier * 0.9;
+        const radius = 2.35 - tier * 0.25;
+        const crownColor = tier % 3 === 0 ? 0x52724f : tier % 3 === 1 ? 0x64835a : 0x789567;
+        const crown = this.colorizeProceduralGeometry(
+          new THREE.ConeGeometry(radius, 2.25, 10, 3),
+          crownColor,
+        );
+        const transform = new THREE.Matrix4().compose(
+          new THREE.Vector3(0.16 + tier * 0.11, y, tier % 2 ? 0.14 : -0.12),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(0.02, tier * 0.53, -0.055)),
+          new THREE.Vector3(1.28, 1, 0.92),
+        );
+        crown.applyMatrix4(transform);
+        const needleSpray = this.createLeafSprayGeometry(crownColor, tier + 21.4);
+        needleSpray.scale(radius * 0.92, 0.9, radius * 0.7);
+        needleSpray.translate(0.16 + tier * 0.11, y, tier % 2 ? 0.14 : -0.12);
+        parts.push(crown, needleSpray);
+      }
+    } else if (variant === 1) {
+      branchBetween(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.24, 5.5, 0), 0.58, 0.25, 0x5b4934);
+      const branchEnds = [
+        new THREE.Vector3(-2.6, 5.9, 0.55), new THREE.Vector3(2.9, 6.4, -0.45),
+        new THREE.Vector3(-1.2, 7.25, -1.9), new THREE.Vector3(1.65, 7.45, 1.75),
+        new THREE.Vector3(0.72, 8.1, -0.25),
+      ];
+      branchEnds.forEach((end, index) => {
+        const start = new THREE.Vector3(0.08 + index * 0.04, 4.1 + (index % 3) * 0.45, 0);
+        branchBetween(start, end, 0.22, 0.08);
+      });
+      const crownSpecs: ReadonlyArray<readonly [number, number, number, number, number, number, number]> = [
+        [-2.8, 6.2, 0.7, 2.25, 1.55, 1.8, 0x668656], [-1.5, 7.25, -1.55, 2.4, 1.7, 1.95, 0x789763],
+        [0.05, 7.55, 0.2, 2.75, 1.9, 2.15, 0x88a66b], [2.25, 6.85, -0.65, 2.45, 1.65, 1.92, 0x5f7e52],
+        [1.65, 7.65, 1.72, 2.1, 1.52, 1.8, 0x78975f], [0.52, 8.75, -0.48, 1.95, 1.45, 1.7, 0x91ac72],
+        [-0.72, 6.32, 1.82, 2.15, 1.38, 1.72, 0x6d8d59], [3.42, 6.02, 0.72, 1.55, 1.2, 1.42, 0x829e68],
+      ];
+      crownSpecs.forEach(([x, y, z, sx, sy, sz, color], index) => {
+        const crown = this.createFoliageClumpGeometry(color, index + 11.7);
+        const transform = new THREE.Matrix4().compose(
+          new THREE.Vector3(x, y, z),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(index * 0.11, index * 0.51, index * 0.07)),
+          new THREE.Vector3(sx, sy, sz),
+        );
+        crown.applyMatrix4(transform);
+        const leafSpray = this.createLeafSprayGeometry(color, index + 13.1);
+        leafSpray.applyMatrix4(transform);
+        parts.push(crown, leafSpray);
+      });
+    } else {
+      branchBetween(new THREE.Vector3(0, 0, 0), new THREE.Vector3(-0.28, 4.6, 0.12), 0.62, 0.3, 0x594735);
+      const branchEnds = [
+        new THREE.Vector3(-1.9, 7.5, 0.35), new THREE.Vector3(1.25, 7.05, -0.72),
+        new THREE.Vector3(3.65, 6.55, 0.18), new THREE.Vector3(2.82, 7.85, 0.94),
+        new THREE.Vector3(-3.15, 6.4, -0.62), new THREE.Vector3(0.35, 8.55, 0.12),
+      ];
+      branchEnds.forEach((end, index) => {
+        const start = new THREE.Vector3(-0.2 + (index % 2) * 0.18, 3.85 + (index % 3) * 0.38, 0.08);
+        branchBetween(start, end, 0.24 - (index % 2) * 0.025, 0.075);
+      });
+      const crownSpecs: ReadonlyArray<readonly [number, number, number, number, number, number, number]> = [
+        [-3.25, 6.55, -0.5, 1.65, 1.22, 1.45, 0x607e53], [-1.9, 7.55, 0.36, 2.05, 1.45, 1.62, 0x75945f],
+        [-0.45, 8.35, 0.08, 2.15, 1.52, 1.72, 0x89a76b], [1.2, 7.22, -0.78, 2.28, 1.46, 1.7, 0x658557],
+        [2.75, 7.68, 0.8, 2.18, 1.4, 1.62, 0x7c9a62], [4.02, 6.58, 0.22, 1.82, 1.18, 1.46, 0x58784d],
+        [2.22, 6.12, -1.2, 1.75, 1.12, 1.42, 0x6d8c59], [0.35, 8.92, -0.1, 1.72, 1.2, 1.4, 0x96af75],
+        [-0.72, 6.76, 1.58, 1.9, 1.2, 1.52, 0x78965f],
+      ];
+      crownSpecs.forEach(([x, y, z, sx, sy, sz, color], index) => {
+        const transform = new THREE.Matrix4().compose(
+          new THREE.Vector3(x, y, z),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(index * 0.07, index * 0.49, -0.04 + index * 0.015)),
+          new THREE.Vector3(sx, sy, sz),
+        );
+        const crown = this.createFoliageClumpGeometry(color, index + 28.4);
+        crown.applyMatrix4(transform);
+        const leafSpray = this.createLeafSprayGeometry(color, index + 31.2);
+        leafSpray.applyMatrix4(transform);
+        parts.push(crown, leafSpray);
+      });
+    }
+    const merged = mergeGeometries(parts, false);
+    parts.forEach((part) => part.dispose());
+    if (!merged) throw new Error('Failed to build Monsoon storm-tree geometry.');
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
+    return merged;
   }
 
   private createGroundMarks(): void {
@@ -2892,24 +3558,29 @@ export class Arena implements ArenaRuntime {
   private createVegetation(_toonRamp: THREE.Texture): void {
     const mobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 600;
     const random = randomFactory(this.seed ^ 0x6a7a55e1);
-    const rockGeometry = new THREE.IcosahedronGeometry(1, 0);
+    const biomeGroup = new THREE.Group();
+    biomeGroup.name = 'MonsoonAuthoredHighlandBiome';
+    const rockGeometries = ([0, 1, 2] as const).map((variant) => this.createBoulderGeometry(variant));
     const rockMaterial = new THREE.MeshStandardMaterial({
-      color: 0x657d89,
+      color: 0x8799a0,
       roughness: 0.93,
       metalness: 0.015,
       flatShading: true,
     });
+    rockMaterial.name = 'MonsoonBiomeRockMaterial';
     const rockCount = this.scatteredRocks.length;
-    const rocks = new THREE.InstancedMesh(rockGeometry, rockMaterial, rockCount);
-    rocks.name = 'MonsoonFacetedRockField';
+    const rockGroup = new THREE.Group();
+    rockGroup.name = 'MonsoonClusteredTalusAndBoulderFamilies';
     const grassGeometry = this.createGrassBladeGeometry();
-    const grassMaterial = new THREE.MeshStandardMaterial({
-      color: 0xc1d59a,
-      roughness: 0.92,
-      metalness: 0,
+    const grassMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      depthWrite: false,
+      opacity: 0.68,
       side: THREE.DoubleSide,
+      transparent: true,
       vertexColors: true,
     });
+    grassMaterial.name = 'MonsoonBiomeGrassMaterial';
     grassMaterial.customProgramCacheKey = () => 'monsoon-reactive-grass-v1';
     grassMaterial.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = this.grassUniforms.uTime;
@@ -2945,24 +3616,76 @@ export class Arena implements ArenaRuntime {
     // Spatial chunks retain the continuous blade field while letting the
     // renderer reject vegetation behind the camera. The old map-wide mesh was
     // effectively never culled and animated ~1.4M blade vertices every frame.
-    const grassCount = mobile ? 12_000 : 36_000;
+    const grassCount = mobile ? 9_000 : 26_000;
     const grassGroup = new THREE.Group();
-    grassGroup.name = 'MonsoonWindGrass';
+    grassGroup.name = 'MonsoonLayeredWindGrass';
     const weedGeometry = this.createWeedGeometry();
-    const weedMaterial = new THREE.MeshStandardMaterial({
-      color: 0xd5ddb4,
-      roughness: 0.88,
+    const weedMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      depthWrite: false,
+      opacity: 0.88,
+      side: THREE.DoubleSide,
+      transparent: true,
+      vertexColors: true,
+    });
+    weedMaterial.name = 'MonsoonBiomeWeedMaterial';
+    weedMaterial.customProgramCacheKey = () => 'monsoon-reactive-weeds-v1';
+    weedMaterial.onBeforeCompile = grassMaterial.onBeforeCompile;
+    const weedCount = mobile ? 480 : 1_450;
+    const weedGroup = new THREE.Group();
+    weedGroup.name = 'MonsoonMixedWeedsAndSeedHeads';
+    const fernGeometries = ([0, 1, 2] as const).map((variant) => this.createFernGeometry(variant));
+    const fernMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0x456744,
+      emissiveIntensity: 0.18,
+      roughness: 0.9,
       metalness: 0,
       side: THREE.DoubleSide,
       vertexColors: true,
     });
-    weedMaterial.customProgramCacheKey = () => 'monsoon-reactive-weeds-v1';
-    weedMaterial.onBeforeCompile = grassMaterial.onBeforeCompile;
-    const weedCount = mobile ? 900 : 2_800;
-    const weedGroup = new THREE.Group();
-    weedGroup.name = 'MonsoonMixedWeedsAndSeedHeads';
-    this.geometries.push(rockGeometry, grassGeometry, weedGeometry);
-    this.materials.push(rockMaterial, grassMaterial, weedMaterial);
+    fernMaterial.name = 'MonsoonBiomeFernMaterial';
+    fernMaterial.customProgramCacheKey = () => 'monsoon-reactive-pinnate-ferns-v2';
+    fernMaterial.onBeforeCompile = grassMaterial.onBeforeCompile;
+    const fernCount = mobile ? 1_250 : 4_800;
+    const fernGroup = new THREE.Group();
+    fernGroup.name = 'MonsoonPinnateFernFamilies';
+    const shrubGeometries = ([0, 1] as const).map((variant) => this.createShrubGeometry(variant));
+    const shrubMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0x172515,
+      emissiveIntensity: 0.16,
+      roughness: 0.94,
+      metalness: 0,
+      vertexColors: true,
+    });
+    shrubMaterial.name = 'MonsoonBiomeShrubMaterial';
+    const shrubCount = mobile ? 360 : 1_180;
+    const shrubGroup = new THREE.Group();
+    shrubGroup.name = 'MonsoonBroadleafAndWindScrubFamilies';
+    const treeGeometries = ([0, 1, 2] as const).map((variant) => this.createStormTreeGeometry(variant));
+    const treeMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0x101a10,
+      emissiveIntensity: 0.1,
+      roughness: 0.9,
+      metalness: 0,
+      flatShading: false,
+      vertexColors: true,
+    });
+    treeMaterial.name = 'MonsoonBiomeTreeMaterial';
+    const treeCount = mobile ? 84 : 300;
+    const treeGroup = new THREE.Group();
+    treeGroup.name = 'MonsoonConiferAndStormCanopyFamilies';
+    this.geometries.push(
+      ...rockGeometries,
+      grassGeometry,
+      weedGeometry,
+      ...fernGeometries,
+      ...shrubGeometries,
+      ...treeGeometries,
+    );
+    this.materials.push(rockMaterial, grassMaterial, weedMaterial, fernMaterial, shrubMaterial, treeMaterial);
     const matrix = new THREE.Matrix4();
     const quaternion = new THREE.Quaternion();
     const euler = new THREE.Euler();
@@ -2970,6 +3693,9 @@ export class Arena implements ArenaRuntime {
     const instanceColor = new THREE.Color();
     const grassBuckets = Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]);
     const weedBuckets = Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]);
+    const fernBuckets = fernGeometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
+    const shrubBuckets = shrubGeometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
+    const treeBuckets = treeGeometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
     const chunkFor = (x: number, z: number): number => {
       const column = THREE.MathUtils.clamp(
         Math.floor((x / MONSOON_DIVIDE.width + 0.5) * VEGETATION_CHUNK_COLUMNS),
@@ -2983,42 +3709,193 @@ export class Arena implements ArenaRuntime {
       );
       return row * VEGETATION_CHUNK_COLUMNS + column;
     };
-    const findPlacement = (avoidRoute: number): THREE.Vector3 => {
-      for (let attempt = 0; attempt < 80; attempt += 1) {
-        const x = (random() - 0.5) * mw(430);
-        const z = (random() - 0.5) * mw(350);
+    type VegetationProfile = 'grass' | 'weed' | 'fern' | 'shrub' | 'tree';
+    type BiomeZone = readonly [centerX: number, centerZ: number, radiusX: number, radiusZ: number, density: number];
+    const placementNormal = new THREE.Vector3();
+    const biomeZones: Readonly<Record<VegetationProfile, ReadonlyArray<BiomeZone>>> = {
+      grass: [
+        [-112, 61, 64, 34, 1.12], [-48, -96, 76, 39, 1.18], [82, 68, 70, 39, 1.02],
+        [124, -48, 61, 42, 0.9], [4, -142, 94, 30, 0.82], [-159, -8, 48, 53, 0.72],
+        [18, 18, 68, 48, 0.58],
+      ],
+      weed: [
+        [-118, 54, 49, 22, 1.2], [-52, -103, 60, 25, 1.05], [75, 61, 54, 25, 1.12],
+        [120, -48, 46, 28, 0.82], [8, -139, 68, 18, 0.92], [-154, -18, 34, 32, 0.7],
+      ],
+      fern: [
+        [-112, 58, 46, 22, 1.28], [-56, -101, 57, 23, 1.16], [73, 62, 50, 24, 1.22],
+        [116, -52, 42, 27, 0.92], [3, -138, 65, 18, 1.05], [-151, -20, 31, 32, 0.76],
+        [-8, 24, 36, 25, 0.88],
+      ],
+      shrub: [
+        [-124, 66, 45, 25, 1.12], [-53, -105, 54, 28, 1.16], [82, 69, 49, 27, 1.02],
+        [126, -49, 40, 29, 0.92], [1, -144, 61, 18, 0.78], [-161, -12, 33, 36, 0.68],
+      ],
+      tree: [
+        [-126, 61, 39, 20, 1.16], [-61, -109, 46, 21, 1.2], [78, 67, 42, 21, 1.05],
+        [126, -54, 34, 22, 0.82], [0, -146, 52, 15, 0.72], [-162, -19, 27, 28, 0.62],
+      ],
+    };
+    const routeLimits: Readonly<Record<VegetationProfile, number>> = {
+      grass: 0.27,
+      weed: 0.2,
+      fern: 0.16,
+      shrub: 0.12,
+      tree: 0.085,
+    };
+    const baseClearance: Readonly<Record<VegetationProfile, number>> = {
+      grass: 205,
+      weed: 225,
+      fern: 245,
+      shrub: 265,
+      tree: 285,
+    };
+    const pickZone = (zones: ReadonlyArray<BiomeZone>): BiomeZone => {
+      const total = zones.reduce((sum, zone) => sum + zone[4], 0);
+      let roll = random() * total;
+      for (const zone of zones) {
+        roll -= zone[4];
+        if (roll <= 0) return zone;
+      }
+      return zones[zones.length - 1];
+    };
+    const findPlacement = (profile: VegetationProfile): THREE.Vector3 | null => {
+      const zones = biomeZones[profile];
+      const attemptBudget = profile === 'tree' ? 256 : profile === 'shrub' ? 128 : 96;
+      for (let attempt = 0; attempt < attemptBudget; attempt += 1) {
+        let x: number;
+        let z: number;
+        let zoneDensity = 0.42;
+        let radial = 0.86;
+        const clusterChance = profile === 'tree' ? 0.98 : profile === 'shrub' ? 0.96 : profile === 'fern' ? 0.97 : profile === 'weed' ? 0.91 : 0.84;
+        if (random() < clusterChance) {
+          const [centerX, centerZ, radiusX, radiusZ, density] = pickZone(zones);
+          const angle = random() * Math.PI * 2;
+          radial = Math.sqrt(random());
+          const meander = 0.82 + Math.sin(angle * 3 + centerX * 0.04 - centerZ * 0.03) * 0.16;
+          x = mw(centerX + Math.cos(angle) * radiusX * radial * meander);
+          z = mw(centerZ + Math.sin(angle) * radiusZ * radial / meander);
+          zoneDensity = density;
+        } else {
+          x = (random() - 0.5) * mw(430);
+          z = (random() - 0.5) * mw(350);
+        }
         const y = sampleMonsoonHeight(x, z, this.seed);
         const masks = sampleMonsoonMasks(x, z);
+        const designY = y / MONSOON_WORLD_SCALE;
+        const designX = x / MONSOON_WORLD_SCALE;
+        const designZ = z / MONSOON_WORLD_SCALE;
+        const moisture = THREE.MathUtils.clamp(masks.crater * 0.62 + (1 - radial) * 0.56 + (1 - masks.coast) * 0.18, 0, 1);
+        const patchNoise = 0.5 + 0.5 * Math.sin(designX * 0.21 + Math.sin(designZ * 0.13) * 2.2)
+          * Math.cos(designZ * 0.17 - designX * 0.04);
+        const profileAffinity = profile === 'fern'
+          ? 0.38 + moisture * 0.58
+          : profile === 'tree'
+            ? 0.32 + moisture * 0.4
+            : profile === 'shrub'
+              ? 0.42 + patchNoise * 0.42
+              : 0.5 + moisture * 0.24 + patchNoise * 0.2;
+        const clearOfBases = (
+          Math.hypot(x - mw(-85), z - mw(130)) > baseClearance[profile]
+          && Math.hypot(x - mw(95), z - mw(-120)) > baseClearance[profile]
+        );
         if (
-          y > MONSOON_DIVIDE.waterY + 2.4 && masks.route < avoidRoute && masks.crater < 0.62
-          && !this.isConcreteFootprint(x, z)
+          y > MONSOON_DIVIDE.waterY + 3.4
+          && masks.route < routeLimits[profile]
+          && masks.coast < (profile === 'grass' ? 0.92 : profile === 'fern' ? 0.84 : 0.88)
+          && clearOfBases
         ) {
+          const highlandScour = THREE.MathUtils.smoothstep(designY, 48, 84);
+          const altitudeSurvival = 1 - highlandScour * (profile === 'tree' ? 0.96 : profile === 'shrub' ? 0.84 : profile === 'fern' ? 0.76 : 0.62);
+          const centerFalloff = 0.28 + Math.pow(1 - radial, profile === 'tree' ? 0.62 : 0.82) * 0.88;
+          const density = THREE.MathUtils.clamp(zoneDensity * profileAffinity * altitudeSurvival * centerFalloff, 0.04, 0.98);
+          if (random() >= density) continue;
+          const normalY = sampleMonsoonNormal(x, z, placementNormal, this.seed).y;
+          const minimumNormal = profile === 'tree' ? 0.8 : profile === 'shrub' ? 0.72 : profile === 'fern' ? 0.64 : 0.57;
+          if (normalY < minimumNormal || this.isConcreteFootprint(x, z)) continue;
           return new THREE.Vector3(x, y, z);
         }
       }
-      return new THREE.Vector3(0, -100, 0);
+      return null;
     };
-    for (let index = 0; index < rockCount; index += 1) {
-      const rock = this.scatteredRocks[index];
-      matrix.compose(rock.position, rock.quaternion, rock.scale);
-      rocks.setMatrixAt(index, matrix);
-      rocks.setColorAt(index, instanceColor.setHex(index % 3 === 0 ? 0x718494 : 0x51687a));
+    for (let family = 0; family < rockGeometries.length; family += 1) {
+      const familyRocks = this.scatteredRocks.filter((_, index) => index % rockGeometries.length === family);
+      const mesh = new THREE.InstancedMesh(rockGeometries[family], rockMaterial, familyRocks.length);
+      mesh.name = `MonsoonFracturedBoulderFamily${family + 1}`;
+      familyRocks.forEach((rock, index) => {
+        matrix.compose(rock.position, rock.quaternion, rock.scale);
+        mesh.setMatrixAt(index, matrix);
+        const palette = family === 0 ? [0x8da0a6, 0x71878f] : family === 1 ? [0x788d96, 0x617681] : [0x96a5a5, 0x738888];
+        mesh.setColorAt(index, instanceColor.setHex(palette[index % palette.length]));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.computeBoundingBox();
+      mesh.computeBoundingSphere();
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      rockGroup.add(mesh);
     }
+    const placedCounts = { grass: 0, weed: 0, fern: [0, 0, 0], shrub: [0, 0], tree: [0, 0, 0] };
+    const pack = (bucket: number[], position: THREE.Vector3, yaw: number, sx: number, sy: number, sz: number, color: number): void => {
+      bucket.push(position.x, position.y, position.z, yaw, sx, sy, sz, color);
+    };
     for (let index = 0; index < grassCount; index += 1) {
-      const position = findPlacement(0.21);
+      const position = findPlacement('grass');
+      if (!position) continue;
       const yaw = random() * Math.PI * 2;
-      const scale = 0.68 + random() * 0.4;
+      const scale = 0.7 + random() * 0.92;
       const colorPick = random();
-      const color = colorPick > 0.84 ? 0x9eb879 : colorPick > 0.34 ? 0x78975c : 0x607c4d;
-      grassBuckets[chunkFor(position.x, position.z)].push(position.x, position.y + 0.018, position.z, yaw, scale, color);
+      const color = colorPick > 0.84 ? 0xd6e3ad : colorPick > 0.34 ? 0xb3ca8f : 0x9ab67e;
+      pack(grassBuckets[chunkFor(position.x, position.z)], position.setY(position.y + 0.018), yaw, scale * (0.86 + random() * 0.28), scale, scale, color);
+      placedCounts.grass += 1;
     }
     for (let index = 0; index < weedCount; index += 1) {
-      const position = findPlacement(0.19);
+      const position = findPlacement('weed');
+      if (!position) continue;
       const yaw = random() * Math.PI * 2;
-      const scale = 0.55 + random() * 0.52;
+      const scale = 0.86 + random() * 1.08;
       const pick = random();
-      const color = pick > 0.82 ? 0xc8b07b : pick > 0.42 ? 0x8d9d66 : 0x697e56;
-      weedBuckets[chunkFor(position.x, position.z)].push(position.x, position.y + 0.015, position.z, yaw, scale, color);
+      const color = pick > 0.82 ? 0xf0dcaa : pick > 0.42 ? 0xdce4bd : 0xc5d7ac;
+      pack(weedBuckets[chunkFor(position.x, position.z)], position.setY(position.y + 0.015), yaw, scale, scale * (0.9 + random() * 0.45), scale, color);
+      placedCounts.weed += 1;
+    }
+    for (let index = 0; index < fernCount; index += 1) {
+      const position = findPlacement('fern');
+      if (!position) continue;
+      const familyRoll = random();
+      const family = familyRoll > 0.73 ? 2 : familyRoll > 0.36 ? 1 : 0;
+      const yaw = random() * Math.PI * 2;
+      const hero = random() > 0.94 ? 1.42 : 1;
+      const width = (0.72 + random() * 1.62) * hero;
+      const height = width * (family === 2 ? 1.04 + random() * 0.32 : 0.72 + random() * 0.32);
+      const pick = random();
+      const color = pick > 0.82 ? 0xd7e1bd : pick > 0.4 ? 0xb9ce9f : 0x9eb989;
+      pack(fernBuckets[family][chunkFor(position.x, position.z)], position.setY(position.y + 0.024), yaw, width, height, width * (0.88 + random() * 0.24), color);
+      placedCounts.fern[family] += 1;
+    }
+    for (let index = 0; index < shrubCount; index += 1) {
+      const position = findPlacement('shrub');
+      if (!position) continue;
+      const family = random() > 0.56 ? 1 : 0;
+      const yaw = random() * Math.PI * 2;
+      const hero = random() > 0.9 ? 1.38 : 1;
+      const width = (0.9 + random() * 1.65) * hero;
+      const height = width * (family === 0 ? 0.88 + random() * 0.28 : 0.7 + random() * 0.24);
+      const color = random() > 0.5 ? 0xe8efd7 : 0xcddbbd;
+      pack(shrubBuckets[family][chunkFor(position.x, position.z)], position.setY(position.y + 0.03), yaw, width, height, width * (0.82 + random() * 0.34), color);
+      placedCounts.shrub[family] += 1;
+    }
+    for (let index = 0; index < treeCount; index += 1) {
+      const position = findPlacement('tree');
+      if (!position) continue;
+      const familyRoll = random();
+      const family = familyRoll > 0.78 ? 2 : familyRoll > 0.4 ? 1 : 0;
+      const yaw = random() * Math.PI * 2;
+      const scale = family === 0 ? 0.9 + random() * 1.25 : family === 1 ? 0.82 + random() * 1.18 : 0.78 + random() * 1.12;
+      const color = random() > 0.5 ? 0xf3f5e9 : 0xdde7d4;
+      pack(treeBuckets[family][chunkFor(position.x, position.z)], position.setY(position.y + 0.04), yaw, scale * (0.86 + random() * 0.34), scale * (0.94 + random() * 0.28), scale, color);
+      placedCounts.tree[family] += 1;
     }
     const buildChunks = (
       name: string,
@@ -3026,23 +3903,24 @@ export class Arena implements ArenaRuntime {
       material: THREE.Material,
       buckets: number[][],
       target: THREE.Group,
+      castShadow = false,
+      receiveShadow = false,
     ): void => {
       for (let chunk = 0; chunk < buckets.length; chunk += 1) {
         const packed = buckets[chunk];
-        const count = packed.length / 6;
+        const count = packed.length / 8;
         if (count === 0) continue;
         const mesh = new THREE.InstancedMesh(geometry, material, count);
         mesh.name = `${name}Chunk${chunk}`;
         mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
         for (let index = 0; index < count; index += 1) {
-          const offset = index * 6;
+          const offset = index * 8;
           this.ambientPosition.set(packed[offset], packed[offset + 1], packed[offset + 2]);
           quaternion.setFromEuler(euler.set(0, packed[offset + 3], 0));
-          const scale = packed[offset + 4];
-          scaleVector.set(scale, scale, scale);
+          scaleVector.set(packed[offset + 4], packed[offset + 5], packed[offset + 6]);
           matrix.compose(this.ambientPosition, quaternion, scaleVector);
           mesh.setMatrixAt(index, matrix);
-          mesh.setColorAt(index, instanceColor.setHex(packed[offset + 5]));
+          mesh.setColorAt(index, instanceColor.setHex(packed[offset + 7]));
         }
         mesh.instanceMatrix.needsUpdate = true;
         if (mesh.instanceColor) {
@@ -3051,20 +3929,39 @@ export class Arena implements ArenaRuntime {
         }
         mesh.computeBoundingBox();
         mesh.computeBoundingSphere();
-        // Tiny foliage shadow sampling is expensive and visually redundant
-        // against the terrain's authored lighting and larger rock shadows.
-        mesh.castShadow = false;
-        mesh.receiveShadow = false;
+        mesh.castShadow = castShadow;
+        mesh.receiveShadow = receiveShadow;
         target.add(mesh);
       }
     };
     buildChunks('MonsoonWindGrass', grassGeometry, grassMaterial, grassBuckets, grassGroup);
     buildChunks('MonsoonMixedWeedsAndSeedHeads', weedGeometry, weedMaterial, weedBuckets, weedGroup);
-    rocks.instanceMatrix.needsUpdate = true;
-    if (rocks.instanceColor) rocks.instanceColor.needsUpdate = true;
-    rocks.computeBoundingSphere();
-    rocks.receiveShadow = true;
-    this.group.add(rocks, grassGroup, weedGroup);
+    fernGeometries.forEach((geometry, family) => {
+      buildChunks(`MonsoonFernFamily${family + 1}`, geometry, fernMaterial, fernBuckets[family], fernGroup, false, true);
+    });
+    shrubGeometries.forEach((geometry, family) => {
+      buildChunks(`MonsoonShrubFamily${family + 1}`, geometry, shrubMaterial, shrubBuckets[family], shrubGroup, false, true);
+    });
+    treeGeometries.forEach((geometry, family) => {
+      buildChunks(`MonsoonTreeFamily${family + 1}`, geometry, treeMaterial, treeBuckets[family], treeGroup, !mobile, true);
+    });
+    biomeGroup.userData.biomeVegetation = {
+      deterministic: true,
+      familyCounts: { boulder: 3, fern: 3, shrub: 2, tree: 3 },
+      requestedCounts: { rock: rockCount, grass: grassCount, weed: weedCount, fern: fernCount, shrub: shrubCount, tree: treeCount },
+      placedCounts,
+      routeLimits,
+      baseClearance,
+      densityZoneCounts: Object.fromEntries(Object.entries(biomeZones).map(([profile, zones]) => [profile, zones.length])),
+      scaleRanges: {
+        fern: [0.72, 3.33],
+        shrub: [0.9, 3.52],
+        tree: [0.82, 2.15],
+        boulder: [0.55, 13],
+      },
+    };
+    biomeGroup.add(rockGroup, grassGroup, weedGroup, fernGroup, shrubGroup, treeGroup);
+    this.group.add(biomeGroup);
   }
 
   private createAmbientLife(toonRamp: THREE.Texture): void {
@@ -3362,13 +4259,21 @@ export class Arena implements ArenaRuntime {
   }
 
   private createStormRain(): void {
-    const count = window.matchMedia('(pointer: coarse)').matches ? 220 : 620;
+    const count = window.matchMedia('(pointer: coarse)').matches ? 460 : 1_280;
     const random = randomFactory(this.seed ^ 0x57024d11);
-    const positions = new Float32Array(count * 3);
+    const positions = new Float32Array(count * 6);
     for (let index = 0; index < count; index += 1) {
-      positions[index * 3] = -230 + random() * 260;
-      positions[index * 3 + 1] = -4 + random() * 120;
-      positions[index * 3 + 2] = -230 + random() * 260;
+      const offset = index * 6;
+      const x = -130 + random() * 260;
+      const y = random() * 120;
+      const z = -130 + random() * 260;
+      const length = 2.8 + random() * 5.2;
+      positions[offset] = x;
+      positions[offset + 1] = y;
+      positions[offset + 2] = z;
+      positions[offset + 3] = x - 1.15;
+      positions[offset + 4] = y - length;
+      positions[offset + 5] = z - 0.62;
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -3391,7 +4296,6 @@ export class Arena implements ArenaRuntime {
             - uTime * uWind * 0.42;
           p.xz += uWindDirection * gust;
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          gl_PointSize = clamp(14.0 / -mv.z, 1.0, 4.0);
           vFade = smoothstep(0.0, 20.0, p.y) * (1.0 - smoothstep(90.0, 118.0, p.y)) * uIntensity;
           gl_Position = projectionMatrix * mv;
         }
@@ -3399,17 +4303,69 @@ export class Arena implements ArenaRuntime {
       fragmentShader: `
         varying float vFade;
         void main() {
-          vec2 p = gl_PointCoord - 0.5;
-          float streak = smoothstep(0.16, 0.0, abs(p.x)) * smoothstep(0.52, 0.1, abs(p.y));
-          gl_FragColor = vec4(0.55, 0.82, 1.0, streak * vFade * 0.46);
+          gl_FragColor = vec4(0.62, 0.86, 1.0, vFade * 0.7);
         }
       `,
     });
     this.geometries.push(geometry);
     this.materials.push(material);
-    const rain = new THREE.Points(geometry, material);
-    rain.name = 'MonsoonStormFrontRain';
+    const rain = new THREE.LineSegments(geometry, material);
+    rain.name = 'MonsoonWindSlantedRainSheets';
     rain.frustumCulled = false;
+    this.rain = rain;
     this.group.add(rain);
+  }
+
+  private createStormLightning(): void {
+    const random = randomFactory(this.seed ^ 0x11a7f11e);
+    const start = new THREE.Vector3(76, 286, -84);
+    const end = new THREE.Vector3(220, 86, 150);
+    const positions: number[] = [];
+    const trunk: THREE.Vector3[] = [];
+    const segments = 13;
+    for (let index = 0; index <= segments; index += 1) {
+      const t = index / segments;
+      const point = start.clone().lerp(end, t);
+      if (index > 0 && index < segments) {
+        point.x += (random() - 0.5) * 22;
+        point.z += (random() - 0.5) * 18;
+      }
+      trunk.push(point);
+      if (index > 0) positions.push(...trunk[index - 1].toArray(), ...point.toArray());
+    }
+    for (const branchIndex of [4, 7, 9]) {
+      const root = trunk[branchIndex];
+      const direction = new THREE.Vector3(
+        (random() - 0.5) * 68,
+        -24 - random() * 34,
+        (random() - 0.5) * 58,
+      );
+      const elbow = root.clone().addScaledVector(direction, 0.48);
+      const tip = root.clone().add(direction);
+      positions.push(...root.toArray(), ...elbow.toArray(), ...elbow.toArray(), ...tip.toArray());
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.LineBasicMaterial({
+      blending: THREE.AdditiveBlending,
+      color: 0xc8f4ff,
+      depthWrite: false,
+      opacity: 0,
+      toneMapped: false,
+      transparent: true,
+    });
+    material.name = 'MonsoonCollectorLightning';
+    const lightning = new THREE.LineSegments(geometry, material);
+    lightning.name = 'MonsoonCollectorLightningBranches';
+    lightning.frustumCulled = false;
+    lightning.visible = false;
+    lightning.renderOrder = 5;
+    this.lightning = lightning;
+    this.lightningMaterial = material;
+    this.geometries.push(geometry);
+    this.materials.push(material);
+    this.group.add(lightning);
   }
 }

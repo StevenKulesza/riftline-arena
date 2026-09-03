@@ -106,6 +106,7 @@ function parseArgs(argv) {
     combat: false,
     fly: false,
     map: null,
+    seed: 450_600,
   };
   for (let index = 2; index < argv.length; index += 1) {
     const value = argv[index];
@@ -124,6 +125,7 @@ function parseArgs(argv) {
     else if (value === '--combat') result.combat = true;
     else if (value === '--fly') result.fly = true;
     else if (value === '--map') result.map = argv[++index];
+    else if (value === '--seed') result.seed = Number(argv[++index]);
     else throw new Error(`Unknown argument: ${value}`);
   }
   return result;
@@ -140,6 +142,7 @@ export async function runProfile(argv = process.argv) {
   const profileUrl = new URL(url);
   if (args.unbatched) profileUrl.searchParams.set('perf-unbatched', '1');
   if (args.map) profileUrl.searchParams.set('map', args.map);
+  profileUrl.searchParams.set('mapSeed', String(args.seed));
   if (!args.url) {
     previewServer = await preview({ preview: { host: '127.0.0.1', port, strictPort: true } });
   }
