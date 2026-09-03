@@ -602,6 +602,36 @@ if (MAP_FILTER === 'all' || MAP_FILTER === 'monsoon') await runMap(
       fov: 52,
     },
     {
+      file: `${ROUND}-monsoon-fern-detail.png`,
+      position: { x: -492, y: 0, z: -842, groundOffset: 3.4 },
+      target: { x: -468, y: 0, z: -824, groundOffset: 1.15 },
+      fov: 46,
+    },
+    {
+      file: `${ROUND}-monsoon-tropical-tree-scale.png`,
+      position: { x: -540, y: 0, z: -884, groundOffset: 4.2 },
+      target: { x: -482, y: 0, z: -832, groundOffset: 15 },
+      fov: 54,
+    },
+    {
+      file: `${ROUND}-monsoon-tropical-canopy.png`,
+      position: { x: -360, y: 0, z: -724, groundOffset: 5.5 },
+      target: { x: -492, y: 0, z: -842, groundOffset: 14 },
+      fov: 58,
+    },
+    {
+      file: `${ROUND}-monsoon-procedural-palm-grove.png`,
+      position: { x: 500, y: 0, z: 602, groundOffset: 8.5 },
+      target: { x: 580, y: 0, z: 671, groundOffset: 24 },
+      fov: 54,
+    },
+    {
+      file: `${ROUND}-monsoon-procedural-broadleaf-grove.png`,
+      position: { x: -666, y: 0, z: -812, groundOffset: 7.2 },
+      target: { x: -603, y: 0, z: -755, groundOffset: 21 },
+      fov: 54,
+    },
+    {
       file: `${ROUND}-monsoon-east-biome.png`,
       position: { x: 516, y: 0, z: 440, groundOffset: 7 },
       target: { x: 584, y: 0, z: 496, groundOffset: 4.5 },

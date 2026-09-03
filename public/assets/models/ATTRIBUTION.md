@@ -1,3 +1,9 @@
+# Monsoon vegetation
+
+Monsoon Divide's trees, palms, shrubs, ferns, grasses, weeds, and boulders are
+project-original procedural geometry and runtime-generated textures. No
+third-party vegetation meshes or texture scans are shipped for the biome.
+
 # Character asset
 
 `quaternius-swat.glb` is **SWAT** by Quaternius, distributed by Poly Pizza

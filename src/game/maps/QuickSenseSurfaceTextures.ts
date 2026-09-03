@@ -234,11 +234,15 @@ function createTerrainAlbedo(): THREE.CanvasTexture {
   for (let y = 0; y < TEXTURE_SIZE; y += 1) {
     for (let x = 0; x < TEXTURE_SIZE; x += 1) {
       const grain = fractalNoise(x, y, 131);
-      const sediment = Math.sin((x * 0.23 + y) * TAU / 113) * 4;
+      const sediment = Math.sin((x * 0.17 + y * 0.31) * TAU / 163) * 2.2;
       const offset = (y * TEXTURE_SIZE + x) * 4;
-      image.data[offset] = THREE.MathUtils.clamp(218 + grain * 23 + sediment, 185, 238);
-      image.data[offset + 1] = THREE.MathUtils.clamp(221 + grain * 20 + sediment, 190, 240);
-      image.data[offset + 2] = THREE.MathUtils.clamp(211 + grain * 18 + sediment * 0.7, 184, 231);
+      // QuickSense is a sun-baked orange mineral basin, not neutral sand.
+      // Keep enough value range for the vertex slope colors to shape the
+      // terrain, but bias the material toward the terracotta palette in the
+      // reference so the map reads warm even in an unlit preview.
+      image.data[offset] = THREE.MathUtils.clamp(229 + grain * 19 + sediment, 198, 246);
+      image.data[offset + 1] = THREE.MathUtils.clamp(183 + grain * 18 + sediment * 0.8, 150, 215);
+      image.data[offset + 2] = THREE.MathUtils.clamp(126 + grain * 13 + sediment * 0.5, 96, 159);
       image.data[offset + 3] = 255;
     }
   }
@@ -285,8 +289,8 @@ function createTerrainRoughness(): THREE.CanvasTexture {
 }
 
 function rockHeight(x: number, y: number): number {
-  const layers = Math.sin(y * TAU / 41 + Math.sin(x * TAU / 181) * 1.8) * 0.31;
-  const secondaryLayers = Math.sin(y * TAU / 13 + x * 0.017) * 0.09;
+  const layers = Math.sin(y * TAU / 59 + Math.sin(x * TAU / 181) * 1.2) * 0.1;
+  const secondaryLayers = Math.sin(y * TAU / 19 + x * 0.017) * 0.035;
   const fractureA = Math.abs((x + y * 0.21 + 38) % 173) < 1.2 ? -0.9 : 0;
   const fractureB = Math.abs((x - y * 0.38 + 92) % 229) < 0.9 ? -0.65 : 0;
   return layers + secondaryLayers + fractureA + fractureB + fractalNoise(x, y, 191) * 0.32;
@@ -299,8 +303,8 @@ function createRockAlbedo(): THREE.CanvasTexture {
   for (let y = 0; y < TEXTURE_SIZE; y += 1) {
     for (let x = 0; x < TEXTURE_SIZE; x += 1) {
       const grain = fractalNoise(x, y, 193);
-      const strata = Math.sin(y * TAU / 47 + Math.sin(x * TAU / 179) * 1.45);
-      const secondaryStrata = Math.sin(y * TAU / 15 + x * 0.019) * 0.35;
+      const strata = Math.sin(y * TAU / 61 + Math.sin(x * TAU / 179) * 1.1);
+      const secondaryStrata = Math.sin(y * TAU / 23 + x * 0.019) * 0.24;
       const fracture = (
         Math.abs((x + y * 0.21 + 38) % 173) < 1.35
         || Math.abs((x - y * 0.38 + 92) % 229) < 1.05
@@ -308,19 +312,19 @@ function createRockAlbedo(): THREE.CanvasTexture {
       const mineralWash = Math.sin((x * 0.31 - y * 0.08) * TAU / 137) * 4;
       const offset = (y * TEXTURE_SIZE + x) * 4;
       image.data[offset] = THREE.MathUtils.clamp(
-        224 + grain * 25 + strata * 11 + secondaryStrata * 7 + mineralWash - fracture * 44,
+        226 + grain * 23 + strata * 4.5 + secondaryStrata * 2.8 + mineralWash - fracture * 40,
         146,
         248,
       );
       image.data[offset + 1] = THREE.MathUtils.clamp(
-        214 + grain * 21 + strata * 8 + secondaryStrata * 5 + mineralWash * 0.58 - fracture * 48,
-        132,
-        239,
+        176 + grain * 19 + strata * 3.8 + secondaryStrata * 2.2 + mineralWash * 0.58 - fracture * 44,
+        103,
+        226,
       );
       image.data[offset + 2] = THREE.MathUtils.clamp(
-        198 + grain * 18 + strata * 5 + secondaryStrata * 4 - fracture * 51,
-        116,
-        225,
+        119 + grain * 16 + strata * 2.8 + secondaryStrata * 1.8 - fracture * 47,
+        65,
+        176,
       );
       image.data[offset + 3] = 255;
     }

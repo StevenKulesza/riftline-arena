@@ -9,10 +9,12 @@ export interface AdaptiveQualityOptions {
   degradeCooldownMs?: number;
   recoverCooldownMs?: number;
   healthyWindowsToRecover?: number;
+  maxFrameMs?: number;
 }
 
 export interface AdaptiveQualityWindow {
   meanFrameMs: number;
+  meanWorkMs: number;
   worstFrameMs: number;
   overBudgetRatio: number;
   severeFrameCount: number;
@@ -52,6 +54,7 @@ export class AdaptiveQualitySystem {
   private readonly minDpr: number;
   private readonly maxDpr: number;
   private readonly targetFrameMs: number;
+  private readonly maxFrameMs: number;
   private readonly sampleWindowMs: number;
   private readonly dprStep: number;
   private readonly degradeCooldownMs: number;
@@ -63,6 +66,7 @@ export class AdaptiveQualitySystem {
   private lastChangeAtMs = Number.NEGATIVE_INFINITY;
   private windowDurationMs = 0;
   private windowFrameTotalMs = 0;
+  private windowWorkTotalMs = 0;
   private windowWorstFrameMs = 0;
   private windowSamples = 0;
   private windowOverBudgetFrames = 0;
@@ -75,6 +79,7 @@ export class AdaptiveQualitySystem {
     this.maxDpr = Math.max(0.25, requestedMax);
     this.minDpr = Math.min(this.maxDpr, Math.max(0.25, requestedMin));
     this.targetFrameMs = Math.max(8, finiteOption(options.targetFrameMs, 1_000 / 60));
+    this.maxFrameMs = Math.max(this.targetFrameMs, finiteOption(options.maxFrameMs, this.targetFrameMs * 2));
     this.sampleWindowMs = Math.max(250, finiteOption(options.sampleWindowMs, 1_000));
     this.dprStep = Math.max(0.05, finiteOption(options.dprStep, 0.125));
     this.degradeCooldownMs = Math.max(
@@ -96,25 +101,34 @@ export class AdaptiveQualitySystem {
     return this.dprCap;
   }
 
-  sampleFrame(frameTimeMs: number): AdaptiveQualityChange | null {
+  sampleFrame(frameTimeMs: number, presentationIntervalMs = frameTimeMs): AdaptiveQualityChange | null {
     if (!Number.isFinite(frameTimeMs) || frameTimeMs <= 0) return null;
+    if (!Number.isFinite(presentationIntervalMs) || presentationIntervalMs <= 0) return null;
 
     // Browser scheduling can report multi-second gaps after a hidden tab. The
     // game loop clamps simulation deltas to 50 ms, so cap quality samples at
     // the same boundary rather than treating tab suspension as GPU overload.
-    const sampleMs = Math.min(frameTimeMs, 50);
-    this.elapsedMs += sampleMs;
-    this.windowDurationMs += sampleMs;
+    const workMs = Math.min(frameTimeMs, 50);
+    const intervalMs = Math.min(presentationIntervalMs, 50);
+    // WebGL submission time is not GPU completion time. A backed-up GPU can
+    // submit in 6 ms while delivering frames at 20-40 ms. Include presentation
+    // pacing, and run windows/cooldowns in elapsed time, not accumulated CPU work.
+    const sampleMs = Math.max(workMs, intervalMs);
+    this.elapsedMs += intervalMs;
+    this.windowDurationMs += intervalMs;
     this.windowFrameTotalMs += sampleMs;
+    this.windowWorkTotalMs += workMs;
     this.windowWorstFrameMs = Math.max(this.windowWorstFrameMs, sampleMs);
     this.windowSamples += 1;
     if (sampleMs > this.targetFrameMs * 1.15) this.windowOverBudgetFrames += 1;
-    if (sampleMs > this.targetFrameMs * 2) this.windowSevereFrames += 1;
+    if (sampleMs > this.maxFrameMs) this.windowSevereFrames += 1;
 
     if (this.windowDurationMs < this.sampleWindowMs) return null;
 
     const window = this.finishWindow();
-    const sustainedOverload = window.meanFrameMs > this.targetFrameMs * 1.08
+    // Tolerate 60 Hz presentation when targeting 65 FPS: a display's 16.67 ms
+    // interval alone is not evidence that reducing resolution can help.
+    const sustainedOverload = window.meanFrameMs > this.targetFrameMs * 1.12
       || window.overBudgetRatio >= 0.18;
     const burstOverload = window.severeFrameCount >= 2;
     const canDegrade = this.dprCap > this.minDpr
@@ -129,7 +143,8 @@ export class AdaptiveQualitySystem {
       );
     }
 
-    const hasHeadroom = window.meanFrameMs < this.targetFrameMs * 0.78
+    const hasHeadroom = window.meanWorkMs < this.targetFrameMs * 0.78
+      && window.meanFrameMs < this.targetFrameMs * 1.12
       && window.overBudgetRatio <= 0.02
       && window.severeFrameCount === 0;
     this.healthyWindows = hasHeadroom ? this.healthyWindows + 1 : 0;
@@ -170,6 +185,7 @@ export class AdaptiveQualitySystem {
   private finishWindow(): AdaptiveQualityWindow {
     const window = {
       meanFrameMs: this.windowFrameTotalMs / this.windowSamples,
+      meanWorkMs: this.windowWorkTotalMs / this.windowSamples,
       worstFrameMs: this.windowWorstFrameMs,
       overBudgetRatio: this.windowOverBudgetFrames / this.windowSamples,
       severeFrameCount: this.windowSevereFrames,
@@ -182,6 +198,7 @@ export class AdaptiveQualitySystem {
   private clearWindow(): void {
     this.windowDurationMs = 0;
     this.windowFrameTotalMs = 0;
+    this.windowWorkTotalMs = 0;
     this.windowWorstFrameMs = 0;
     this.windowSamples = 0;
     this.windowOverBudgetFrames = 0;

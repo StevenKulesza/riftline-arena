@@ -1,0 +1,240 @@
+{
+  "round": "r16",
+  "files": {
+    "r16-monsoon-active-combat.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.641932509523425,
+      "dominantColorShare": 0.06840277777777778,
+      "luminance": {
+        "mean": 0.47495681463779565,
+        "contrast": 0.13467873881372827
+      },
+      "meanSaturation": 0.33242669756058346,
+      "edgeDensity": 0.14366475867429865
+    },
+    "r16-monsoon-active-mobile.png": {
+      "width": 390,
+      "height": 844,
+      "colorEntropyBits": 7.269150511751486,
+      "dominantColorShare": 0.04189213564213564,
+      "luminance": {
+        "mean": 0.49285855410546103,
+        "contrast": 0.17153019055863225
+      },
+      "meanSaturation": 0.32893968110537136,
+      "edgeDensity": 0.10921187960207156
+    },
+    "r16-monsoon-bounds-high.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.413049440650704,
+      "dominantColorShare": 0.06897569444444444,
+      "luminance": {
+        "mean": 0.47946119528867603,
+        "contrast": 0.1524951730822722
+      },
+      "meanSaturation": 0.3541530418140131,
+      "edgeDensity": 0.06895272418910324
+    },
+    "r16-monsoon-grassland.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.066873719164494,
+      "dominantColorShare": 0.12909722222222222,
+      "luminance": {
+        "mean": 0.4864575616285305,
+        "contrast": 0.14146870945965587
+      },
+      "meanSaturation": 0.2815599288074236,
+      "edgeDensity": 0.08033001201328528
+    },
+    "r16-monsoon-mobile.png": {
+      "width": 390,
+      "height": 844,
+      "colorEntropyBits": 5.785413281946426,
+      "dominantColorShare": 0.0717667748917749,
+      "luminance": {
+        "mean": 0.5033666663448687,
+        "contrast": 0.09854319973176774
+      },
+      "meanSaturation": 0.333740257660942,
+      "edgeDensity": 0.05170703292102413
+    },
+    "r16-monsoon-overlook.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.311331078553771,
+      "dominantColorShare": 0.07342013888888889,
+      "luminance": {
+        "mean": 0.48875865814269664,
+        "contrast": 0.11514460188999266
+      },
+      "meanSaturation": 0.4172114254549544,
+      "edgeDensity": 0.10124726167761995
+    },
+    "r16-monsoon-ramp.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.717310631813516,
+      "dominantColorShare": 0.13152777777777777,
+      "luminance": {
+        "mean": 0.5149222221949807,
+        "contrast": 0.10565880213984795
+      },
+      "meanSaturation": 0.3373475979036727,
+      "edgeDensity": 0.10458624832167338
+    },
+    "r16-monsoon-relay-fin.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.331212671367582,
+      "dominantColorShare": 0.10480902777777777,
+      "luminance": {
+        "mean": 0.5026620744689274,
+        "contrast": 0.12553463481133598
+      },
+      "meanSaturation": 0.24543756257738847,
+      "edgeDensity": 0.050508797964808144
+    },
+    "r16-monsoon-relay-network.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.223692362480839,
+      "dominantColorShare": 0.06958333333333333,
+      "luminance": {
+        "mean": 0.4413544863425962,
+        "contrast": 0.12005799889754339
+      },
+      "meanSaturation": 0.31029246547877404,
+      "edgeDensity": 0.08691965232139072
+    },
+    "r16-monsoon-reward-armor.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 4.502074373077741,
+      "dominantColorShare": 0.20699652777777777,
+      "luminance": {
+        "mean": 0.38549307747822226,
+        "contrast": 0.09688453294356114
+      },
+      "meanSaturation": 0.4866651711221408,
+      "edgeDensity": 0.03478552752455657
+    },
+    "r16-monsoon-reward-damage.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 4.126719813305397,
+      "dominantColorShare": 0.2084375,
+      "luminance": {
+        "mean": 0.45984566797382653,
+        "contrast": 0.0728347951499016
+      },
+      "meanSaturation": 0.30543614983276324,
+      "edgeDensity": 0.031446540880503145
+    },
+    "r16-monsoon-reward-health.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 4.3727828970390545,
+      "dominantColorShare": 0.21769097222222222,
+      "luminance": {
+        "mean": 0.48821369063181425,
+        "contrast": 0.08510544516778157
+      },
+      "meanSaturation": 0.2858997534813549,
+      "edgeDensity": 0.03455586177655289
+    },
+    "r16-monsoon-reward-rail.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.292138129466535,
+      "dominantColorShare": 0.12206597222222222,
+      "luminance": {
+        "mean": 0.5884659760484674,
+        "contrast": 0.14902613176639676
+      },
+      "meanSaturation": 0.20719560940124868,
+      "edgeDensity": 0.048000141332768004
+    },
+    "r16-monsoon-ski-nw.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.763131905205464,
+      "dominantColorShare": 0.07545138888888889,
+      "luminance": {
+        "mean": 0.43959938717321145,
+        "contrast": 0.0929395932414595
+      },
+      "meanSaturation": 0.2677856999204221,
+      "edgeDensity": 0.07563069747721009
+    },
+    "r16-monsoon-storm-drain.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.018386268078234,
+      "dominantColorShare": 0.1928125,
+      "luminance": {
+        "mean": 0.4119893516203235,
+        "contrast": 0.11154669891695347
+      },
+      "meanSaturation": 0.27696784408269814,
+      "edgeDensity": 0.07478270086919653
+    },
+    "r16-monsoon-structure.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.68385998083856,
+      "dominantColorShare": 0.12432291666666667,
+      "luminance": {
+        "mean": 0.5315526454112184,
+        "contrast": 0.13244958813018812
+      },
+      "meanSaturation": 0.29136281444387185,
+      "edgeDensity": 0.07656702706522507
+    },
+    "r16-monsoon-weather.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.028091111245185,
+      "dominantColorShare": 0.04918402777777778,
+      "luminance": {
+        "mean": 0.49553116569989175,
+        "contrast": 0.11617537179413133
+      },
+      "meanSaturation": 0.2809215615765148,
+      "edgeDensity": 0.08865097872941842
+    },
+    "r16-monsoon-west-harvester.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.285334073543843,
+      "dominantColorShare": 0.054739583333333335,
+      "luminance": {
+        "mean": 0.4253384206835612,
+        "contrast": 0.10753979668687248
+      },
+      "meanSaturation": 0.3603491318409059,
+      "edgeDensity": 0.0946929545615151
+    },
+    "r16-monsoon-windbreak.png": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.759341030921544,
+      "dominantColorShare": 0.13338541666666667,
+      "luminance": {
+        "mean": 0.38883300084422345,
+        "contrast": 0.13579646299526257
+      },
+      "meanSaturation": 0.6843171945053993,
+      "edgeDensity": 0.09492262030951876
+    }
+  },
+  "average": {
+    "colorEntropyBits": 5.715359252103885,
+    "dominantColorShare": 0.11287166780587832,
+    "meanSaturation": 0.33621103097739174,
+    "edgeDensity": 0.0763770220111442,
+    "luminanceContrast": 0.11923212979880447
+  }
+}

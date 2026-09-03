@@ -4,7 +4,14 @@ interface ThreeGameDiagnostics {
   frame: number;
   elapsed: number;
   score: number;
+  opponentScore: number;
   targetScore: number;
+  matchMode: 'arena' | 'tdm' | 'ctf' | 'raid';
+  teams: {
+    player: 'azure' | 'crimson' | null;
+    azure: number;
+    crimson: number;
+  };
   complete: boolean;
   state: string;
   viewMode: 'first-person' | 'third-person';
@@ -42,6 +49,7 @@ interface ThreeGameDiagnostics {
     health: number;
     armor: number;
     score: number;
+    team: 'azure' | 'crimson' | null;
     weapon: 'machine' | 'shotgun' | 'rocket' | 'plasma' | 'laser' | 'sniper' | 'rail' | 'disc';
     targetOwner: 'player' | number | null;
     targetVisible: boolean;
@@ -292,6 +300,13 @@ interface ThreeGameDiagnostics {
     supportY: number;
     hasAuthoredWeapon: boolean;
   }>;
+  flags: Array<{
+    team: 'azure' | 'crimson';
+    carrier: 'player' | number | null;
+    atBase: boolean;
+    droppedSeconds: number;
+    position: { x: number; y: number; z: number };
+  }>;
   coreProgress: number;
   core: {
     phase: 'telegraph' | 'active' | 'cooldown';
@@ -303,6 +318,12 @@ interface ThreeGameDiagnostics {
     secondsRemaining: number;
     cycle: number;
     captures: number;
+  };
+  raid: {
+    uplinksSecured: number;
+    uplinkTarget: number;
+    activeUplink: number;
+    progress: number;
   };
   style: {
     meter: number;
@@ -619,6 +640,8 @@ interface ThreeGameTestHooks {
     launchSpeed: number;
     direction: { x: number; y: number; z: number };
   }>;
+  /** Return the authored Bipbeta2 movement graph used by route QA. */
+  getMovementFlow(): unknown;
   /** Test world-space static terrain visibility between two points. */
   sampleLineOfSight(start: { x: number; y: number; z: number }, end: { x: number; y: number; z: number }): boolean;
   /** Place player/bot zero for deterministic FOV and occlusion checks. */
@@ -662,6 +685,8 @@ interface ThreeGameTestHooks {
   setWeaponHandsVisible(visible: boolean): void;
   /** Hide the entire first-person rig for unobstructed environment/reward captures. */
   setFirstPersonWeaponVisible(visible: boolean): void;
+  /** Hide local character presentation for unobstructed objective marker captures. */
+  setLocalPlayerVisualsVisible(visible: boolean): void;
   parkBotsForScreenshot(): void;
   resetWeaponCaptureState(): void;
   /** Freeze ambient/idle animation time so screenshots are stable. */
@@ -783,13 +808,28 @@ interface ThreeGameTestHooks {
   /** Return deterministic biome-family, density-zone, scale, and gameplay-clearance diagnostics. */
   getMonsoonBiomeVegetationAudit(): {
     deterministic: boolean;
+    vegetationConstruction: string;
     familyCounts: { boulder: number; fern: number; shrub: number; tree: number };
+    rockField: import('./game/maps/MonsoonRockField').MonsoonRockFieldBuild['diagnostics'];
     requestedCounts: { rock: number; grass: number; weed: number; fern: number; shrub: number; tree: number };
+    visualPlantEstimate: { fern: number; shrub: number; tree: number };
     placedCounts: { grass: number; weed: number; fern: number[]; shrub: number[]; tree: number[] };
+    fernLodCounts: { hero: number; mass: number; scanned: number };
+    shrubLodCounts: { hero: number; thicket: number };
+    treeLodCounts: { hero: number; massCanopy: number };
+    treeConstruction: string;
+    treeVariantNames: string[];
+    treeRepresentativePositions: Array<Array<{ x: number; y: number; z: number }>>;
     routeLimits: { grass: number; weed: number; fern: number; shrub: number; tree: number };
     baseClearance: { grass: number; weed: number; fern: number; shrub: number; tree: number };
     densityZoneCounts: { grass: number; weed: number; fern: number; shrub: number; tree: number };
     scaleRanges: { fern: number[]; shrub: number[]; tree: number[]; boulder: number[] };
+    scannedFernSource: string;
+    scannedFernLicense: string;
+    scannedShrubSource: string;
+    scannedShrubLicense: string;
+    scannedTreeSource: string;
+    scannedTreeLicense: string;
   } | null;
   /** Deterministic player-eye screenshots covering every major tower section. */
   getOutpostTowerReviewStates(): string[];
@@ -854,6 +894,8 @@ interface Window {
   __THREE_GAME_TEST_HOOKS__?: ThreeGameTestHooks;
   __THREE_FRAME_TIMING__?: {
     frame: number;
+    renderedAtMs: number;
+    frameIntervalMs: number;
     refreshHz: number;
     workStride: number;
     updateMs: number;

@@ -19,7 +19,7 @@
       <section id="hud" aria-label="Arena combat status">
         <header class="match-ribbon">
           <div class="match-ident">
-            <span class="eyebrow">Arena protocol</span>
+            <span id="match-mode-value" class="eyebrow">Arena protocol</span>
             <strong id="match-status">WARMUP</strong>
           </div>
 
@@ -298,6 +298,22 @@
                 </span>
                 <span class="map-choice-state" aria-hidden="true">Selected</span>
               </button>
+              <button class="map-choice" type="button" data-map-choice="bipbeta2">
+                <img
+                  class="map-choice-image"
+                  src="/assets/maps/bipbeta2-preview.svg"
+                  alt=""
+                  decoding="async"
+                  draggable="false"
+                />
+                <span class="map-choice-shade" aria-hidden="true"></span>
+                <span class="map-choice-index" aria-hidden="true">02 // BP2</span>
+                <span class="map-choice-copy">
+                  <strong>Bipbeta2</strong>
+                  <small>Vector chamber · Fast movement</small>
+                </span>
+                <span class="map-choice-state" aria-hidden="true">Selected</span>
+              </button>
               <button class="map-choice" type="button" data-map-choice="quicksense">
                 <img
                   class="map-choice-image"
@@ -307,12 +323,33 @@
                   draggable="false"
                 />
                 <span class="map-choice-shade" aria-hidden="true"></span>
-                <span class="map-choice-index" aria-hidden="true">02 // QS</span>
+                <span class="map-choice-index" aria-hidden="true">03 // QS</span>
                 <span class="map-choice-copy">
                   <strong>QuickSense</strong>
                   <small>Flow range · High-speed lines</small>
                 </span>
                 <span class="map-choice-state" aria-hidden="true">Selected</span>
+              </button>
+            </div>
+          </div>
+          <div class="mode-picker" aria-label="Choose match mode">
+            <span class="map-picker-label">Select protocol</span>
+            <div class="mode-picker-options">
+              <button class="mode-choice active" type="button" data-mode-choice="arena" aria-pressed="true">
+                <span class="mode-choice-index">01 // FFA</span>
+                <span class="mode-choice-copy"><strong>Arena</strong><small>Rotating Flux Core · free-for-all</small></span>
+              </button>
+              <button class="mode-choice" type="button" data-mode-choice="tdm" aria-pressed="false">
+                <span class="mode-choice-index">02 // TDM</span>
+                <span class="mode-choice-copy"><strong>Team Deathmatch</strong><small>8v8 squads · first to 20 frags</small></span>
+              </button>
+              <button class="mode-choice" type="button" data-mode-choice="ctf" aria-pressed="false">
+                <span class="mode-choice-index">03 // CTF</span>
+                <span class="mode-choice-copy"><strong>Capture the Flag</strong><small>8v8 squads · steal · return · cap three times</small></span>
+              </button>
+              <button class="mode-choice" type="button" data-mode-choice="raid" aria-pressed="false">
+                <span class="mode-choice-index">04 // RAID</span>
+                <span class="mode-choice-copy"><strong>Raid</strong><small>8v8 squads · contest three uplinks</small></span>
               </button>
             </div>
           </div>

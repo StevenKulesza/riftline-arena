@@ -1,0 +1,673 @@
+{
+  "port": "37499",
+  "generatedAt": "2026-09-03T08:06:56.183Z",
+  "maps": {
+    "monsoon": {
+      "captures": [],
+      "extras": [
+        {
+          "state": "spectator",
+          "file": "r68-monsoon-bounds-high.png",
+          "position": {
+            "x": -120,
+            "y": 1500,
+            "z": -2320
+          },
+          "target": {
+            "x": 0,
+            "y": 210,
+            "z": 80
+          },
+          "fov": 58
+        },
+        {
+          "state": "spectator",
+          "file": "r68-monsoon-fern-detail.png",
+          "position": {
+            "x": -492,
+            "y": 0,
+            "z": -842,
+            "groundOffset": 3.4
+          },
+          "target": {
+            "x": -468,
+            "y": 0,
+            "z": -824,
+            "groundOffset": 1.15
+          },
+          "fov": 46
+        },
+        {
+          "state": "spectator",
+          "file": "r68-monsoon-tropical-canopy.png",
+          "position": {
+            "x": -360,
+            "y": 0,
+            "z": -724,
+            "groundOffset": 5.5
+          },
+          "target": {
+            "x": -492,
+            "y": 0,
+            "z": -842,
+            "groundOffset": 14
+          },
+          "fov": 58
+        },
+        {
+          "state": "spectator",
+          "file": "r68-monsoon-procedural-palm-grove.png",
+          "position": {
+            "x": 500,
+            "y": 0,
+            "z": 602,
+            "groundOffset": 8.5
+          },
+          "target": {
+            "x": 580,
+            "y": 0,
+            "z": 671,
+            "groundOffset": 24
+          },
+          "fov": 54
+        },
+        {
+          "state": "spectator",
+          "file": "r68-monsoon-procedural-broadleaf-grove.png",
+          "position": {
+            "x": -666,
+            "y": 0,
+            "z": -812,
+            "groundOffset": 7.2
+          },
+          "target": {
+            "x": -603,
+            "y": 0,
+            "z": -755,
+            "groundOffset": 21
+          },
+          "fov": 54
+        }
+      ],
+      "measures": {
+        "map": {
+          "name": "Monsoon Divide",
+          "seed": 450600,
+          "generationVersion": 13,
+          "ready": true,
+          "topologyHash": "3fb81c77",
+          "bounds": {
+            "width": 3840,
+            "depth": 3200
+          },
+          "altitudeRange": {
+            "min": -152,
+            "max": 816.897
+          },
+          "renderTriangles": 96000,
+          "collisionTriangles": 123260,
+          "spawnCount": 15,
+          "pickupCount": 11,
+          "jumpPadCount": 6,
+          "skiRoutes": 6
+        },
+        "fog": {
+          "type": "linear",
+          "color": "#86a2aa",
+          "near": 920,
+          "far": 5200
+        },
+        "camera": {
+          "distance": 0.964,
+          "position": {
+            "x": -1200,
+            "y": 1200.964,
+            "z": 1480
+          },
+          "thirdPersonObstructed": false
+        },
+        "renderer": {
+          "calls": 552,
+          "triangles": 8035336,
+          "geometries": 294,
+          "textures": 109,
+          "activeWeaponVfx": 0,
+          "activeSurfaceMarks": 0,
+          "activeTracers": 0,
+          "activeSoftSmoke": 0,
+          "smokeTextureSource": "procedural-soft-density",
+          "tracerTextureSource": "procedural-longitudinal-energy-ramp",
+          "weaponWearMaterials": 5,
+          "weaponWearTextures": 4,
+          "weaponAssetSource": "procedural",
+          "weaponModelMeshes": 296,
+          "weaponRenderMeshes": 26,
+          "weaponModelTriangles": 68552,
+          "weaponTuck": 0,
+          "weaponObstructionDistance": 3.35,
+          "weaponViewPosition": {
+            "x": 0.3,
+            "y": -0.54,
+            "z": -0.5
+          },
+          "weaponViewRotation": {
+            "x": 0.011,
+            "y": 0.006,
+            "z": 0
+          },
+          "weaponMuzzleDistance": 1.58,
+          "weaponMuzzleForwardDistance": 1.491,
+          "weaponMuzzleOccluded": false,
+          "weaponPulseIntensity": 0
+        },
+        "frameTiming": {
+          "frame": 9,
+          "refreshHz": 0,
+          "workStride": 1,
+          "updateMs": 0.9,
+          "renderMs": 2.8,
+          "totalMs": 3.7,
+          "worstFrame": {
+            "frame": 1,
+            "updateMs": 6.2,
+            "renderMs": 1114.2,
+            "totalMs": 1120.4
+          },
+          "slowFrames": [
+            {
+              "frame": 1,
+              "updateMs": 6.2,
+              "renderMs": 1114.2,
+              "totalMs": 1120.4
+            }
+          ]
+        },
+        "lighting": {
+          "profile": "monsoon",
+          "key": {
+            "color": "#ffe1b7",
+            "intensity": 3.65,
+            "position": {
+              "x": 310,
+              "y": 456,
+              "z": 236
+            },
+            "target": {
+              "x": 0,
+              "y": 133.722,
+              "z": 0
+            }
+          },
+          "fillIntensity": 0.31,
+          "rimIntensity": 0.48,
+          "environmentIntensity": 0.7,
+          "exposure": 1.03,
+          "shadow": {
+            "type": "PCFShadowMap",
+            "mapSize": 2048,
+            "extent": 1996.8,
+            "bias": 0,
+            "normalBias": 0.032,
+            "casters": 26,
+            "receivers": 435
+          },
+          "contactShadows": {
+            "sources": 12,
+            "visible": 9,
+            "drawCalls": 1
+          }
+        },
+        "renderAudit": [
+          {
+            "material": "MonsoonBiomeFernMaterial",
+            "draws": 89,
+            "shadowDraws": 0,
+            "triangles": 1900228,
+            "instances": 11630
+          },
+          {
+            "material": "MonsoonBiomeProceduralTropicalShrubMaterial",
+            "draws": 54,
+            "shadowDraws": 0,
+            "triangles": 1644384,
+            "instances": 3161
+          },
+          {
+            "material": "MonsoonBiomeProceduralTropicalWoodMaterial",
+            "draws": 49,
+            "shadowDraws": 0,
+            "triangles": 450416,
+            "instances": 1375
+          },
+          {
+            "material": "MonsoonBiomeProceduralTropicalLeafMaterial",
+            "draws": 35,
+            "shadowDraws": 0,
+            "triangles": 1691140,
+            "instances": 998
+          },
+          {
+            "material": "MeshStandardMaterial",
+            "draws": 23,
+            "shadowDraws": 10,
+            "triangles": 64806,
+            "instances": 504
+          },
+          {
+            "material": "MonsoonBiomeGrassMaterial",
+            "draws": 30,
+            "shadowDraws": 0,
+            "triangles": 521820,
+            "instances": 28990
+          },
+          {
+            "material": "MonsoonBiomeWeedMaterial",
+            "draws": 24,
+            "shadowDraws": 0,
+            "triangles": 52704,
+            "instances": 2196
+          },
+          {
+            "material": "MonsoonBiomeProceduralPalmLeafMaterial",
+            "draws": 14,
+            "shadowDraws": 0,
+            "triangles": 212148,
+            "instances": 377
+          },
+          {
+            "material": "MonsoonBiomeRockMaterial",
+            "draws": 3,
+            "shadowDraws": 3,
+            "triangles": 112000,
+            "instances": 1400
+          },
+          {
+            "material": "MonsoonEncounterWetStructuralShell",
+            "draws": 3,
+            "shadowDraws": 2,
+            "triangles": 6592,
+            "instances": 12
+          },
+          {
+            "material": "MeshToonMaterial",
+            "draws": 3,
+            "shadowDraws": 1,
+            "triangles": 360,
+            "instances": 19
+          },
+          {
+            "material": "MeshBasicMaterial",
+            "draws": 3,
+            "shadowDraws": 0,
+            "triangles": 256,
+            "instances": 128
+          },
+          {
+            "material": "MonsoonWorldArtWetHarvesterShell",
+            "draws": 1,
+            "shadowDraws": 1,
+            "triangles": 2688,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonWorldArtStormbreakBasalt",
+            "draws": 1,
+            "shadowDraws": 1,
+            "triangles": 936,
+            "instances": 39
+          },
+          {
+            "material": "MonsoonStormAbradedRouteCurbs",
+            "draws": 1,
+            "shadowDraws": 1,
+            "triangles": 15408,
+            "instances": 428
+          },
+          {
+            "material": "MonsoonPressureGatewayShell",
+            "draws": 1,
+            "shadowDraws": 1,
+            "triangles": 2540,
+            "instances": 10
+          },
+          {
+            "material": "Monsoon outpost dark load-bearing basalt",
+            "draws": 1,
+            "shadowDraws": 1,
+            "triangles": 3032,
+            "instances": 1
+          },
+          {
+            "material": "Monsoon outpost storm-washed armor",
+            "draws": 1,
+            "shadowDraws": 1,
+            "triangles": 1704,
+            "instances": 1
+          },
+          {
+            "material": "Monsoon outpost wet anti-slip deck",
+            "draws": 1,
+            "shadowDraws": 1,
+            "triangles": 13500,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonPanoramaMatchedTerrainPBR",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 96000,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonWorldArtConductiveTrim",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 756,
+            "instances": 21
+          },
+          {
+            "material": "MonsoonWorldArtRouteBeaconShell",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 5120,
+            "instances": 32
+          },
+          {
+            "material": "MonsoonWorldArtCyanAmberSignal",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 3344,
+            "instances": 76
+          },
+          {
+            "material": "MonsoonEncounterSharedCyanAmberSignal",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 528,
+            "instances": 12
+          },
+          {
+            "material": "MonsoonWetStormwaterChannels",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 1696,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonRestrainedRouteSignals",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 1720,
+            "instances": 86
+          },
+          {
+            "material": "Monsoon outpost conductive edge trim",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 11344,
+            "instances": 1
+          },
+          {
+            "material": "Monsoon outpost smoked storm glass",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 348,
+            "instances": 1
+          },
+          {
+            "material": "Monsoon outpost cyan route signal",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 1652,
+            "instances": 1
+          },
+          {
+            "material": "Monsoon outpost amber storm signal",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 880,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonDistantFarBasalt",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 2016,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonDistantMidWetBasalt",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 2592,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonDistantNearWetSeaStacks",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 1485,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonDistantConductiveCollectors",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 1148,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonDistantWindDrivenMist",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 528,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonCelOcean",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 51200,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonWindBrokenShoreFoam",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 760,
+            "instances": 1
+          },
+          {
+            "material": "MonsoonStormBasinWetPatches",
+            "draws": 1,
+            "shadowDraws": 0,
+            "triangles": 144,
+            "instances": 1
+          }
+        ],
+        "pads": [
+          {
+            "x": -344,
+            "y": 155.695,
+            "z": 112,
+            "radius": 8.4,
+            "launchSpeed": 175.025,
+            "direction": {
+              "x": -0.675,
+              "y": 0.502,
+              "z": 0.54
+            }
+          },
+          {
+            "x": 352,
+            "y": 151.626,
+            "z": 128,
+            "radius": 8.4,
+            "launchSpeed": 155.08,
+            "direction": {
+              "x": 0.696,
+              "y": 0.445,
+              "z": 0.564
+            }
+          },
+          {
+            "x": -216,
+            "y": 126.527,
+            "z": -368,
+            "radius": 8.4,
+            "launchSpeed": 172.932,
+            "direction": {
+              "x": -0.793,
+              "y": 0.506,
+              "z": -0.34
+            }
+          },
+          {
+            "x": 272,
+            "y": 265.67,
+            "z": -384,
+            "radius": 8.4,
+            "launchSpeed": 164.002,
+            "direction": {
+              "x": 0.778,
+              "y": 0.48,
+              "z": -0.405
+            }
+          },
+          {
+            "x": -984,
+            "y": 251.43,
+            "z": 64,
+            "radius": 8.4,
+            "launchSpeed": 205.828,
+            "direction": {
+              "x": 0.334,
+              "y": 0.416,
+              "z": 0.846
+            }
+          },
+          {
+            "x": 976,
+            "y": 341.456,
+            "z": -64,
+            "radius": 8.4,
+            "launchSpeed": 205.041,
+            "direction": {
+              "x": -0.317,
+              "y": 0.301,
+              "z": 0.899
+            }
+          }
+        ],
+        "spawns": [
+          {
+            "x": -792,
+            "y": 348.28,
+            "z": 512
+          },
+          {
+            "x": 712,
+            "y": 229.46,
+            "z": 544
+          },
+          {
+            "x": -480,
+            "y": 136.19,
+            "z": -464
+          },
+          {
+            "x": 408,
+            "y": 165.86,
+            "z": -584
+          },
+          {
+            "x": -1264,
+            "y": 504.46,
+            "z": 720
+          },
+          {
+            "x": 1224,
+            "y": 480.64,
+            "z": 632
+          },
+          {
+            "x": -1040,
+            "y": 366.78,
+            "z": -808
+          },
+          {
+            "x": 1280,
+            "y": 186.66,
+            "z": -320
+          },
+          {
+            "x": -600,
+            "y": 332.93,
+            "z": 1040
+          },
+          {
+            "x": 600,
+            "y": 272.85,
+            "z": 1040
+          },
+          {
+            "x": -1432,
+            "y": 178.19,
+            "z": 264
+          },
+          {
+            "x": 1408,
+            "y": 124.95,
+            "z": 224
+          },
+          {
+            "x": 48,
+            "y": 243.34,
+            "z": -1120
+          },
+          {
+            "x": -80,
+            "y": 217.68,
+            "z": 1040
+          },
+          {
+            "x": -872,
+            "y": 413.34,
+            "z": -176
+          }
+        ],
+        "spawnSpan": {
+          "minX": -1432,
+          "maxX": 1408,
+          "minZ": -1120,
+          "maxZ": 1040,
+          "minY": 124.949,
+          "maxY": 504.459
+        },
+        "spawnDiagonal": 3568.081,
+        "sight": null,
+        "grid": {
+          "cells": 806,
+          "hits": 806,
+          "occupancy": 1,
+          "minY": -152,
+          "maxY": 759.801,
+          "verticalRange": 911.801,
+          "step": 128,
+          "bounds": {
+            "minX": -1920,
+            "maxX": 1920,
+            "minZ": -1600,
+            "maxZ": 1600,
+            "step": 128,
+            "fromY": 1600
+          }
+        }
+      },
+      "ski": [],
+      "pads": []
+    }
+  },
+  "consoleErrors": [],
+  "pageErrors": []
+}

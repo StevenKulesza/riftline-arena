@@ -3,6 +3,7 @@ import type { WeaponId } from '../game/config';
 export type HudStanding = {
   callsign: string;
   score: number;
+  team?: string;
   rank?: number;
   isPlayer?: boolean;
   isLeader?: boolean;
@@ -66,6 +67,7 @@ export type HudState = {
   speed: number;
   score: number;
   botLead: number;
+  matchMode: string;
   timeRemaining: number;
   weaponId: WeaponId;
   weapon: string;
@@ -175,6 +177,7 @@ export class Hud {
     this.updateJetpack(state.jetpack);
     this.score.textContent = String(state.score);
     this.botLead.textContent = String(state.botLead);
+    this.element('#match-mode-value').textContent = state.matchMode;
     this.updateStandings(state);
     const minutes = Math.floor(Math.max(0, state.timeRemaining) / 60).toString().padStart(2, '0');
     const seconds = Math.floor(Math.max(0, state.timeRemaining) % 60).toString().padStart(2, '0');
@@ -441,7 +444,7 @@ export class Hud {
       const rank = hasExplicitRanks ? Math.max(1, Math.trunc(entry.rank ?? index + 1)) : index + 1;
       const isLeader = Boolean(entry.isLeader) || (!hasExplicitLeader && index === 0);
       const isPlayer = Boolean(entry.isPlayer);
-      const stateLabels = [isPlayer ? 'YOU' : '', isLeader ? 'LEAD' : ''].filter(Boolean);
+      const stateLabels = [isPlayer ? 'YOU' : '', entry.team?.trim() ?? '', isLeader ? 'LEAD' : ''].filter(Boolean);
       const stateLabel = stateLabels.length ? stateLabels.join(' · ') : 'RIVAL';
       const score = Math.max(-99, Math.min(999, entry.score));
 
@@ -449,6 +452,7 @@ export class Hud {
       row.classList.toggle('is-leader', isLeader);
       row.dataset.player = String(isPlayer);
       row.dataset.leader = String(isLeader);
+      row.dataset.team = entry.team?.trim() ?? '';
       row.setAttribute('aria-label', `Rank ${rank}, ${entry.callsign}, ${score} points, ${stateLabel.toLowerCase()}`);
       this.setText(this.child(row, '.standing-rank'), String(rank).padStart(2, '0'));
       this.setText(this.child(row, '.standing-callsign'), entry.callsign);

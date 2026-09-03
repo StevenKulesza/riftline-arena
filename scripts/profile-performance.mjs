@@ -58,6 +58,20 @@ export function computeFrameMetrics(deltas) {
   };
 }
 
+/** Count actual game renders, never callbacks on which the game skipped work. */
+export function computeRenderedFrameMetrics(samples) {
+  const deltas = [];
+  let previous = null;
+  for (const sample of samples) {
+    if (!Number.isFinite(sample?.frame) || !Number.isFinite(sample?.renderedAtMs)) continue;
+    if (previous && sample.frame > previous.frame && sample.renderedAtMs > previous.renderedAtMs) {
+      deltas.push(sample.renderedAtMs - previous.renderedAtMs);
+    }
+    if (!previous || sample.frame > previous.frame) previous = sample;
+  }
+  return computeFrameMetrics(deltas);
+}
+
 function finiteCounter(value) {
   return Number.isFinite(value) ? value : null;
 }
@@ -231,6 +245,7 @@ export async function runProfile(argv = process.argv) {
     const gl = canvas?.getContext('webgl2') ?? canvas?.getContext('webgl');
     const debug = gl?.getExtension('WEBGL_debug_renderer_info');
     const deltas = [];
+    const renderedFrames = [];
     const timeline = [];
     const slowFrames = [];
     const longAnimationFrames = [];
@@ -256,6 +271,17 @@ export async function runProfile(argv = process.argv) {
       : null;
     longFrameObserver?.observe({ type: 'long-animation-frame' });
     const started = performance.now();
+    const initialTiming = window.__THREE_FRAME_TIMING__;
+    if (!Number.isFinite(initialTiming?.renderedAtMs)) {
+      throw new Error('Rebuild the game: strict profiling requires actual render timestamps.');
+    }
+    renderedFrames.push({ frame: initialTiming.frame, renderedAtMs: initialTiming.renderedAtMs });
+    let previousWork = {
+      frame: initialTiming.frame,
+      updateMs: initialTiming.updateMs,
+      renderMs: initialTiming.renderMs,
+      totalMs: initialTiming.totalMs,
+    };
     let previous = started;
     let nextTimelineSample = 0;
     await new Promise((resolve) => {
@@ -264,12 +290,19 @@ export async function runProfile(argv = process.argv) {
         deltas.push(frameTimeMs);
         previous = now;
         const elapsed = now - started;
+        const timing = window.__THREE_FRAME_TIMING__;
+        if (timing.frame !== renderedFrames.at(-1).frame) {
+          renderedFrames.push({ frame: timing.frame, renderedAtMs: timing.renderedAtMs });
+        }
         if (frameTimeMs > 25) {
           const diagnostics = window.__THREE_GAME_DIAGNOSTICS__;
           const phaseTiming = window.__THREE_FRAME_TIMING__;
           slowFrames.push({
             elapsedMs: elapsed,
             frameTimeMs,
+            // rAF delta measures the time AFTER the preceding callback's
+            // work; reading only the new frame incorrectly hid render stalls.
+            precedingGameFrame: previousWork,
             updateMs: phaseTiming?.updateMs ?? null,
             renderMs: phaseTiming?.renderMs ?? null,
             gameFrameMs: phaseTiming?.totalMs ?? null,
@@ -299,6 +332,7 @@ export async function runProfile(argv = process.argv) {
           });
           nextTimelineSample += 500;
         }
+        previousWork = { frame: timing.frame, updateMs: timing.updateMs, renderMs: timing.renderMs, totalMs: timing.totalMs };
         if (now - started >= duration) resolve();
         else requestAnimationFrame(sample);
       };
@@ -315,6 +349,7 @@ export async function runProfile(argv = process.argv) {
         software: renderer ? /swiftshader|llvmpipe|software|basic render/i.test(renderer) : null,
       },
       deltas,
+      renderedFrames,
       slowFrames,
       longAnimationFrames,
       timeline,
@@ -334,15 +369,20 @@ export async function runProfile(argv = process.argv) {
     await page.keyboard.up('Space');
     await page.keyboard.up('KeyW');
   }
-  const { deltas, ...measurement } = rawMeasurement;
-  const frameMetrics = computeFrameMetrics(deltas);
+  const { deltas, renderedFrames, ...measurement } = rawMeasurement;
+  const frameMetrics = computeRenderedFrameMetrics(renderedFrames);
+  const browserCallbackMetrics = computeFrameMetrics(deltas);
   const rendererCounters = summarizeRendererCounters(measurement.diagnostics);
   const validHardwareRun = measurement.gpu.software === false && measurement.webdriver === false;
   const passesTarget = validHardwareRun
     && frameMetrics.fps >= args.target
-    && frameMetrics.onePercentLowFps >= args.target;
+    && frameMetrics.onePercentLowFps >= args.target
+    && consoleErrors.length === 0
+    && pageErrors.length === 0;
   const result = {
-    profileSchemaVersion: 2,
+    profileSchemaVersion: 3,
+    frameMetricSource: 'actual-game-renders',
+    browserCallbackMetrics,
     capturedAt: new Date().toISOString(),
     buildMode: 'vite-production-preview',
     scenario: args.state,
@@ -361,7 +401,7 @@ export async function runProfile(argv = process.argv) {
     validHardwareRun,
     passesTarget,
     performanceContract: {
-      passCriterion: 'valid hardware run with average and 1% low FPS at or above target',
+      passCriterion: 'error-free hardware run with actual-render average and 1% low FPS at or above target',
       targetFps: args.target,
       targetFrameTimeMs: 1_000 / args.target,
       observedFps: frameMetrics.fps,

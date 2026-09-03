@@ -4,7 +4,6 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { loadGrenadeAsset } from '../assets/GrenadeAsset';
@@ -79,6 +78,18 @@ import {
   type MonsoonRewardKind,
 } from './maps/MonsoonRewardVisuals';
 import { COMBAT, GRAPPLE, GRENADE, MATCH_DURATION, MAX_FIXED_STEPS_PER_FRAME, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
+import {
+  areAllies,
+  matchModeDefinition,
+  matchModeFromQuery,
+  opposingTeam,
+  TEAM_COLORS,
+  TEAM_LABELS,
+  teamForActor,
+  type MatchActor,
+  type MatchModeId,
+  type TeamId,
+} from './modes';
 import { JetpackEnergy } from './JetpackEnergy';
 import {
   FIGHTER_FIXED_STEP,
@@ -210,6 +221,23 @@ type PickupState = {
   respawn: number;
 };
 
+type FlagState = {
+  team: TeamId;
+  group: THREE.Group;
+  baseGroup: THREE.Group;
+  basePosition: THREE.Vector3;
+  carrier: Owner | null;
+  atBase: boolean;
+  droppedSeconds: number;
+};
+
+const CTF_CAPTURE_LIMIT = 3;
+const CTF_FLAG_PICKUP_RADIUS = 1.9;
+const CTF_FLAG_RETURN_SECONDS = 18;
+const CTF_FLAG_CARRY_HEIGHT = 1.72;
+const RAID_UPLINK_COUNT = 3;
+const RAID_UPLINK_HOLD_SECONDS = 4;
+
 type BotObjectiveKind = 'health' | 'armor' | 'weapon' | 'core' | 'route' | 'retreat';
 
 type BotObjectiveCommitment = {
@@ -244,12 +272,17 @@ const BASE_GAME_FOV = 80;
 const THIRD_PERSON_FOV = 62;
 const MAX_SPEED_FOV = 98;
 const MAP_FOG_PROFILES = Object.freeze({
+  bipbeta2: Object.freeze({
+    color: 0x17252d,
+    near: 130,
+    far: 900,
+  }),
   quicksense: Object.freeze({
-    // Warm, pale mineral dust ties the road network into QuickSense's
-    // sandstone mountains without tinting nearby combat silhouettes.
-    color: 0xc9b99d,
-    near: 210,
-    far: 1120,
+    // Match the late-afternoon mineral haze in the QuickSense concept while
+    // keeping enough contrast for silhouettes and route edges.
+    color: 0xc7a08d,
+    near: 255,
+    far: 1180,
   }),
   monsoon: Object.freeze({
     color: 0x86a2aa,
@@ -389,6 +422,7 @@ export class Game {
     surface: 'metal',
   };
   private readonly pickups: PickupState[] = [];
+  private readonly flags: FlagState[] = [];
   private readonly monsoonRewardVisuals: MonsoonRewardVisualKit | null;
   private readonly botTargets = new Map<number, Owner>();
   private readonly botObjectives = new Map<number, BotObjectiveCommitment>();
@@ -428,6 +462,7 @@ export class Game {
   private readonly botWeaponPresentations = new Map<number, WeaponViewModel>();
   private muzzleSocket = new THREE.Object3D();
   private readonly coreGroup = new THREE.Group();
+  private readonly coreVisualGroup = new THREE.Group();
   private readonly coreLight = new THREE.PointLight(0x3ee8ff, 6, 26, 2);
   private readonly coreAnchors: readonly CoreAnchor[];
   private readonly coreDirector: FluxCoreDirector<CoreAnchor>;
@@ -453,6 +488,7 @@ export class Game {
   private environmentTexture?: THREE.Texture;
 
   private rng = createSeededRandom(450600);
+  private matchMode: MatchModeId = matchModeFromQuery();
   private mode: GameMode = 'ready';
   private accumulator = 0;
   private botAccumulator = 0;
@@ -466,6 +502,12 @@ export class Game {
   private health = 100;
   private armor = 50;
   private score = 0;
+  private readonly teamScores: Record<TeamId, number> = { azure: 0, crimson: 0 };
+  private readonly ctfCaptures: Record<TeamId, number> = { azure: 0, crimson: 0 };
+  private raidUplinkIndex = 0;
+  private raidUplinkProgress = 0;
+  private raidUplinksSecured = 0;
+  private raidUplinkTeam: TeamId | null = null;
   private deaths = 0;
   private airborneKills = 0;
   private selectedWeapon = 0;
@@ -758,11 +800,15 @@ export class Game {
           ? 0.7
           : quickSenseQuality
             ? 0.625
-            : 0.75,
+            : 0.625,
       maxDpr: this.maxRenderDpr,
+      targetFrameMs: 1_000 / 65,
+      maxFrameMs: 1_000 / 35,
       sampleWindowMs: 750,
       dprStep: quickSenseQuality ? 0.125 : 0.25,
       degradeCooldownMs: 750,
+      recoverCooldownMs: 8_000,
+      healthyWindowsToRecover: 8,
     });
     // Ordinary software-rendered play stays cheap, but explicit QA captures
     // must retain the grounding/contact shadows being judged. Otherwise the
@@ -852,6 +898,7 @@ export class Game {
     }
     this.createPickups();
     this.createCore();
+    this.createFlags();
     this.camera.add(this.weaponModel);
     this.grappleSocket.name = 'grapple-lower-left-socket';
     this.grappleSocket.position.set(-0.44, -0.34, -0.58);
@@ -873,6 +920,8 @@ export class Game {
     this.updateCamera(0);
     this.updateViewModeUi();
     this.installTestHooks();
+    const matchModeElement = document.querySelector<HTMLElement>('#match-mode-value');
+    if (matchModeElement) matchModeElement.textContent = matchModeDefinition(this.matchMode).label.toUpperCase();
     this.publishDiagnostics();
   }
 
@@ -1014,6 +1063,10 @@ export class Game {
     await yieldDuringLoad();
     this.installTestHooks();
     this.publishDiagnostics();
+    const requestedQaState = new URLSearchParams(window.location.search).get('state');
+    if (requestedQaState) {
+      window.__THREE_GAME_TEST_HOOKS__?.setState(requestedQaState);
+    }
   }
 
   dispose(): void {
@@ -1038,6 +1091,10 @@ export class Game {
     for (const pickup of this.pickups) {
       if (pickup.visual) pickup.group.removeFromParent();
       else this.disposeObject(pickup.group);
+    }
+    for (const flag of this.flags) {
+      this.disposeObject(flag.group);
+      this.disposeObject(flag.baseGroup);
     }
     this.monsoonRewardVisuals?.dispose();
     this.disposeObject(this.coreGroup);
@@ -1200,15 +1257,13 @@ export class Game {
     this.frame += 1;
     this.elapsed = elapsed;
     this.fps += ((1 / Math.max(delta, 0.001)) - this.fps) * Math.min(1, delta * 3);
-    // Base dynamic resolution on the work the game actually submitted, not on
-    // the requestAnimationFrame interval. Browser/OS scheduling gaps can make
-    // `delta` hundreds of milliseconds even when update + render cost 10 ms;
-    // treating those gaps as GPU overload caused a live render-target resize,
-    // which amplified a harmless delayed callback into the visible hitch.
+    // Submission time alone misses asynchronous GPU overload. Include delivery
+    // pacing so fast CPU submission cannot trigger premature quality recovery.
+    // The controller ignores isolated gaps and requires sustained headroom.
     const measuredFrameMs = window.__THREE_FRAME_TIMING__?.totalMs ?? 0;
     const qualityChange = this.softwareRenderer || measuredFrameMs <= 0
       ? null
-      : this.adaptiveQuality.sampleFrame(measuredFrameMs);
+      : this.adaptiveQuality.sampleFrame(measuredFrameMs, delta * 1_000);
     if (qualityChange) this.renderDprCap = qualityChange.dprCap;
     if (resizeRenderer(this.renderer, this.camera, this.renderDprCap)) this.resizePostProcessing();
 
@@ -1267,7 +1322,8 @@ export class Game {
     this.arena.update(this.pausedForScreenshot ? this.screenshotArenaTime : elapsed, this.reducedMotion);
     this.mapLighting.setWeatherSeverity(this.weatherSnapshot.severity);
     if (this.arena.mapInfo.name !== 'QuickSense') {
-      this.scene.backgroundIntensity = 0.78 * THREE.MathUtils.lerp(1, 0.58, this.weatherSnapshot.severity);
+      const mapBase = this.arena.mapInfo.name === 'Bipbeta2' ? 0.42 : 0.78;
+      this.scene.backgroundIntensity = mapBase * THREE.MathUtils.lerp(1, 0.58, this.weatherSnapshot.severity);
     }
     this.updatePickupVisuals(delta, elapsed);
     this.updateEffects(this.pausedForScreenshot ? 0 : delta);
@@ -1740,6 +1796,7 @@ export class Game {
 
     for (const fighter of this.fighters) {
       if (fighter === subject || fighter.destroyed) continue;
+      if (fighter.pilot !== null && subject.pilot !== null && this.areFriendlyOwners(subject.pilot, fighter.pilot)) continue;
       const radius = Math.max(1.8, fighter.visual.radius * 0.68);
       const hit = this.fighterAimRay.intersectSphere(
         new THREE.Sphere(fighter.flight.position, radius),
@@ -1752,7 +1809,8 @@ export class Game {
       result.copy(hit);
     }
     for (const bot of this.bots) {
-      if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)) continue;
+      if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)
+        || (subject.pilot !== null && this.areFriendlyOwners(subject.pilot, bot.id))) continue;
       const hit = this.rayOwnerCapsuleHit(origin, view, bot.id, bestDistance, 'plasma');
       if (!hit) continue;
       const distance = origin.distanceTo(hit);
@@ -1765,6 +1823,7 @@ export class Game {
 
   private damageFighter(fighter: FighterRuntime, amount: number, owner: Owner, cause: string): void {
     if (fighter.destroyed || amount <= 0) return;
+    if (fighter.pilot !== null && (fighter.pilot === owner || this.areFriendlyOwners(owner, fighter.pilot))) return;
     fighter.shieldDelay = 4;
     let remaining = amount;
     if (fighter.shield > 0) {
@@ -2030,36 +2089,47 @@ export class Game {
     }
 
     this.matchTime -= delta;
-    let bestScore = this.score;
+    const definition = matchModeDefinition(this.matchMode);
+    const playerMatchScore = this.playerTeamScore();
+    const opponentMatchScore = this.opposingTeamScore();
+    let reachedScoreLimit = false;
     let leadersAtBestScore = 1;
-    let reachedScoreLimit = this.score >= SCORE_LIMIT;
-    let overtimeScoreChanged = this.overtime && this.overtimeBaselineScores[0] !== this.score;
-    for (let index = 0; index < this.bots.length; index += 1) {
-      const botScore = this.bots[index].score;
-      reachedScoreLimit ||= botScore >= SCORE_LIMIT;
-      overtimeScoreChanged ||= this.overtime && this.overtimeBaselineScores[index + 1] !== botScore;
-      if (botScore > bestScore) {
-        bestScore = botScore;
-        leadersAtBestScore = 1;
-      } else if (botScore === bestScore) {
-        leadersAtBestScore += 1;
+    let overtimeScoreChanged = false;
+    if (definition.teamBased) {
+      reachedScoreLimit = this.matchMode === 'raid'
+        ? this.raidUplinksSecured >= RAID_UPLINK_COUNT
+        : playerMatchScore >= definition.targetScore || opponentMatchScore >= definition.targetScore;
+      leadersAtBestScore = playerMatchScore === opponentMatchScore ? 2 : 1;
+    } else {
+      let bestScore = this.score;
+      reachedScoreLimit = this.score >= SCORE_LIMIT;
+      leadersAtBestScore = 1;
+      overtimeScoreChanged = this.overtime && this.overtimeBaselineScores[0] !== this.score;
+      for (let index = 0; index < this.bots.length; index += 1) {
+        const botScore = this.bots[index].score;
+        reachedScoreLimit ||= botScore >= SCORE_LIMIT;
+        overtimeScoreChanged ||= this.overtime && this.overtimeBaselineScores[index + 1] !== botScore;
+        if (botScore > bestScore) {
+          bestScore = botScore;
+          leadersAtBestScore = 1;
+        } else if (botScore === bestScore) {
+          leadersAtBestScore += 1;
+        }
       }
     }
-    if (overtimeScoreChanged) {
-      this.completeMatch();
-      return;
-    }
-    if (reachedScoreLimit) {
+    if (overtimeScoreChanged || reachedScoreLimit) {
       this.completeMatch();
       return;
     }
     if (this.matchTime <= 0) {
-      if (!this.overtime && leadersAtBestScore > 1) {
+      // Raid is a cooperative extraction run: timing out is a failed raid,
+      // while competitive modes resolve from their two team totals.
+      if (this.matchMode === 'arena' && !this.overtime && leadersAtBestScore > 1) {
         this.overtime = true;
         this.overtimeBaselineScores = [this.score, ...this.bots.map((bot) => bot.score)];
         this.matchTime = 60;
         this.hud.message('OVERTIME · NEXT SCORE WINS');
-      } else if (this.overtime) {
+      } else if (this.matchMode === 'arena' && this.overtime) {
         this.matchTime = 60;
         this.hud.message('OVERTIME EXTENDED · NEXT SCORE WINS');
       } else {
@@ -2101,6 +2171,7 @@ export class Game {
     this.updateGrenades(delta);
     this.updatePickups(delta);
     this.updateCore(delta);
+    if (this.mode !== 'running') return;
     if (this.input.isFireHeld() && !this.playerFighter) {
       if (WEAPONS[this.selectedWeapon].id === 'laser') this.fireContinuousLaserTick(delta);
       else {
@@ -2902,9 +2973,9 @@ export class Game {
     const targets = [
       {
         id: 'player',
-        teamId: 'player',
+        teamId: this.teamForOwner('player') ?? 'player',
         alive: this.mode === 'running' && this.health > 0,
-        targetable: this.mode === 'running' && this.health > 0,
+        targetable: this.mode === 'running' && this.health > 0 && !this.areFriendlyOwners(bot.id, 'player'),
         sensorVisible: bot.group.position.distanceToSquared(this.playerPosition) <= 190 * 190,
         airborne: Boolean(this.playerFighter) || !this.grounded,
         threat: this.playerFighter ? 1 : 0.72,
@@ -2914,9 +2985,9 @@ export class Game {
       },
       ...this.bots.filter((targetBot) => targetBot.id !== bot.id).map((targetBot) => ({
         id: targetBot.id,
-        teamId: targetBot.id,
+        teamId: this.teamForOwner(targetBot.id) ?? targetBot.id,
         alive: targetBot.alive,
-        targetable: targetBot.alive,
+        targetable: targetBot.alive && !this.areFriendlyOwners(bot.id, targetBot.id),
         sensorVisible: bot.group.position.distanceToSquared(targetBot.group.position) <= 190 * 190,
         airborne: Boolean(this.fighterForPilot(targetBot.id)) || !targetBot.grounded,
         threat: this.fighterForPilot(targetBot.id) ? 0.92 : 0.58,
@@ -2954,7 +3025,7 @@ export class Game {
       deltaSeconds: delta,
       actor: {
         id: bot.id,
-        teamId: bot.id,
+        teamId: this.teamForOwner(bot.id) ?? bot.id,
         alive: bot.alive,
         canUseFighters: true,
         position: bot.group.position,
@@ -3093,7 +3164,9 @@ export class Game {
 
       const botEye = this.botEyeScratch.copy(bot.group.position);
       botEye.y += 1.42;
-      const droneTarget = this.nearestVisibleHostileDrone(botEye, 105);
+      const droneTarget = this.matchMode === 'raid' || this.matchMode === 'arena'
+        ? this.nearestVisibleHostileDrone(botEye, 105)
+        : null;
       // A movement-locked combatant is an explicitly staged test/capture actor.
       // Preserve its assigned target instead of allowing nearby ambient bots to
       // steal aggro from the sightline being exercised.
@@ -3532,7 +3605,9 @@ export class Game {
   }
 
   private chooseBotTarget(bot: Bot): Owner | null {
-    const candidates: Owner[] = ['player', ...this.bots.filter((candidate) => candidate.id !== bot.id).map((candidate) => candidate.id)];
+    const candidates: Owner[] = ['player', ...this.bots
+      .filter((candidate) => candidate.id !== bot.id && !this.areFriendlyOwners(bot.id, candidate.id))
+      .map((candidate) => candidate.id)];
     const eye = bot.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
     let best: { owner: Owner; score: number } | null = null;
     for (const owner of candidates) {
@@ -3554,6 +3629,8 @@ export class Game {
   }
 
   private chooseBotObjective(bot: Bot): THREE.Vector3 {
+    if (this.matchMode === 'raid') return this.arena.corePosition;
+    if (this.matchMode === 'ctf') return this.chooseCaptureTheFlagObjective(bot);
     const existing = this.botObjectives.get(bot.id);
     if (existing) {
       const reached = bot.group.position.distanceToSquared(existing.position) <= BOT_OBJECTIVE_REACH_RADIUS * BOT_OBJECTIVE_REACH_RADIUS;
@@ -3652,6 +3729,204 @@ export class Game {
     return routed;
   }
 
+  private teamForOwner(owner: MatchActor): TeamId | null {
+    return teamForActor(this.matchMode, owner);
+  }
+
+  private areFriendlyOwners(left: MatchActor, right: MatchActor): boolean {
+    return areAllies(this.matchMode, left, right);
+  }
+
+  private awardScore(owner: DamageSource, points: number): void {
+    if (owner === 'drone') return;
+    const team = this.teamForOwner(owner);
+    if (team && matchModeDefinition(this.matchMode).teamBased) {
+      this.teamScores[team] = Math.max(0, this.teamScores[team] + points);
+      return;
+    }
+    if (owner === 'player') this.score += points;
+    else this.bots[owner].score += points;
+  }
+
+  private playerTeamScore(): number {
+    const team = this.teamForOwner('player');
+    return team ? this.teamScores[team] : this.score;
+  }
+
+  private opposingTeamScore(): number {
+    const team = this.teamForOwner('player');
+    if (!team) return Math.max(...this.bots.map((bot) => bot.score));
+    return this.teamScores[opposingTeam(team)];
+  }
+
+  private chooseCaptureTheFlagObjective(bot: Bot): THREE.Vector3 {
+    const team = this.teamForOwner(bot.id) ?? 'crimson';
+    const ownFlag = this.flags.find((flag) => flag.team === team);
+    const enemyFlag = this.flags.find((flag) => flag.team !== team);
+    const carried = this.flags.find((flag) => flag.carrier === bot.id);
+    if (carried) return this.flagBasePosition(team);
+
+    const enemyCarrier = enemyFlag?.carrier;
+    if (enemyCarrier !== null && enemyCarrier !== undefined && !this.areFriendlyOwners(bot.id, enemyCarrier)) {
+      return this.ownerPosition(enemyCarrier, 0);
+    }
+    // Runner attacks the flag. The anchor protects home and retrieves a flag
+    // first, which keeps the 8v8 opening legible without requiring a squad UI.
+    if (bot.archetype === 'runner' || bot.id === 2 || ownFlag?.atBase) {
+      return enemyFlag?.group.position ?? this.arena.corePosition;
+    }
+    return ownFlag?.group.position ?? this.arena.corePosition;
+  }
+
+  private flagBasePosition(team: TeamId): THREE.Vector3 {
+    return this.flags.find((flag) => flag.team === team)?.basePosition ?? this.arena.corePosition;
+  }
+
+  private resetFlags(): void {
+    for (const flag of this.flags) {
+      flag.carrier = null;
+      flag.atBase = true;
+      flag.droppedSeconds = 0;
+      flag.group.position.copy(flag.basePosition);
+      flag.group.visible = this.matchMode === 'ctf';
+    }
+  }
+
+  private flagCarriedBy(owner: Owner): FlagState | null {
+    return this.flags.find((flag) => flag.carrier === owner) ?? null;
+  }
+
+  private dropCarriedFlag(owner: Owner, position: THREE.Vector3): void {
+    const flag = this.flagCarriedBy(owner);
+    if (!flag) return;
+    flag.carrier = null;
+    flag.atBase = false;
+    flag.droppedSeconds = CTF_FLAG_RETURN_SECONDS;
+    flag.group.position.copy(position);
+    flag.group.visible = this.matchMode === 'ctf';
+    this.hud.message(`${TEAM_LABELS[flag.team]} FLAG DROPPED`);
+  }
+
+  private returnFlag(flag: FlagState, actor: Owner): void {
+    flag.carrier = null;
+    flag.atBase = true;
+    flag.droppedSeconds = 0;
+    flag.group.position.copy(flag.basePosition);
+    flag.group.visible = this.matchMode === 'ctf';
+    this.hud.message(actor === 'player' ? `${TEAM_LABELS[flag.team]} FLAG RETURNED` : `${TEAM_LABELS[flag.team]} FLAG RECOVERED`);
+  }
+
+  private updateCaptureTheFlag(delta: number): void {
+    if (this.matchMode !== 'ctf') return;
+    const actors: Owner[] = ['player', ...this.bots.map((bot) => bot.id)];
+    for (const flag of this.flags) {
+      if (flag.carrier !== null) {
+        if (!this.ownerAlive(flag.carrier)) {
+          this.dropCarriedFlag(flag.carrier, flag.group.position.clone());
+        } else {
+          flag.group.position.copy(this.ownerPosition(flag.carrier, CTF_FLAG_CARRY_HEIGHT));
+        }
+      } else if (!flag.atBase) {
+        flag.droppedSeconds = Math.max(0, flag.droppedSeconds - delta);
+        if (flag.droppedSeconds <= 0) {
+          this.returnFlag(flag, 'player');
+          continue;
+        }
+      }
+    }
+
+    for (const actor of actors) {
+      if (!this.ownerAlive(actor)) continue;
+      const team = this.teamForOwner(actor);
+      if (!team) continue;
+      const feet = this.ownerPosition(actor, 0);
+      for (const flag of this.flags) {
+        if (flag.carrier !== null || feet.distanceToSquared(flag.group.position) > CTF_FLAG_PICKUP_RADIUS ** 2) continue;
+        if (flag.team === team) {
+          if (!flag.atBase) this.returnFlag(flag, actor);
+          continue;
+        }
+        flag.carrier = actor;
+        flag.atBase = false;
+        flag.droppedSeconds = 0;
+        this.hud.message(actor === 'player' ? `ENEMY FLAG SECURED · RETURN TO ${TEAM_LABELS[team]}` : `${this.bots[actor]?.displayName ?? 'ALLY'} HAS ENEMY FLAG`);
+      }
+    }
+
+    for (const actor of actors) {
+      const team = this.teamForOwner(actor);
+      const carried = this.flagCarriedBy(actor);
+      if (!team || !carried || carried.team === team) continue;
+      const home = this.flags.find((flag) => flag.team === team);
+      if (!home?.atBase || this.ownerPosition(actor, 0).distanceToSquared(home.basePosition) > CTF_FLAG_PICKUP_RADIUS ** 2) continue;
+      carried.carrier = null;
+      carried.atBase = true;
+      carried.droppedSeconds = 0;
+      carried.group.position.copy(carried.basePosition);
+      this.ctfCaptures[team] += 1;
+      this.awardScore(actor, 1);
+      this.hud.message(team === 'azure' ? 'AZURE CAPTURE · +1' : 'CRIMSON CAPTURE · +1');
+      this.hud.pulseObjective();
+      this.spawnBurst(home.group.position, TEAM_COLORS[team], 18);
+    }
+  }
+
+  private updateRaidObjective(delta: number): void {
+    const anchor = this.coreAnchors[this.raidUplinkIndex % this.coreAnchors.length];
+    if (!anchor) return;
+    this.positionCoreAt(anchor);
+    this.coreActive = true;
+    this.coreCooldown = 0;
+    this.coreContested = false;
+    this.coreGroup.visible = true;
+    this.coreGroup.scale.setScalar(1);
+    this.coreLight.visible = true;
+    this.coreLight.intensity = 6;
+
+    const coreRadiusSq = POWERUP.coreRadius * POWERUP.coreRadius;
+    const insideTeams = new Set<TeamId>();
+    const teamRepresentatives = new Map<TeamId, Owner>();
+    if (this.health > 0 && this.playerPosition.distanceToSquared(this.arena.corePosition) <= coreRadiusSq) {
+      insideTeams.add('azure');
+      teamRepresentatives.set('azure', 'player');
+    }
+    for (const bot of this.bots) {
+      if (!bot.alive || bot.group.position.distanceToSquared(this.arena.corePosition) > coreRadiusSq) continue;
+      const team = this.teamForOwner(bot.id);
+      if (!team) continue;
+      insideTeams.add(team);
+      if (!teamRepresentatives.has(team)) teamRepresentatives.set(team, bot.id);
+    }
+    this.coreContested = insideTeams.size > 1;
+    if (insideTeams.size === 1) {
+      this.raidUplinkTeam = insideTeams.values().next().value ?? null;
+      this.coreOwner = this.raidUplinkTeam ? teamRepresentatives.get(this.raidUplinkTeam) ?? null : null;
+      this.raidUplinkProgress = Math.min(1, this.raidUplinkProgress + delta / RAID_UPLINK_HOLD_SECONDS);
+    } else {
+      this.coreOwner = null;
+      this.raidUplinkProgress = Math.max(0, this.raidUplinkProgress - delta * 0.22);
+      if (this.raidUplinkProgress <= 0) this.raidUplinkTeam = null;
+    }
+    this.coreProgress = this.raidUplinkProgress;
+    if (this.raidUplinkProgress < 1) return;
+
+    this.raidUplinksSecured += 1;
+    this.raidUplinkTeam = this.raidUplinkTeam ?? this.teamForOwner(this.coreOwner ?? 'player');
+    this.awardScore(this.coreOwner ?? 'player', 1);
+    this.hud.message(`${TEAM_LABELS[this.raidUplinkTeam ?? 'azure']} UPLINK ${this.raidUplinksSecured}/${RAID_UPLINK_COUNT} SECURED`);
+    this.hud.pulseObjective();
+    this.spawnBurst(this.coreGroup.position, TEAM_COLORS.azure, 22);
+    if (this.raidUplinksSecured >= RAID_UPLINK_COUNT) {
+      this.completeMatch();
+      return;
+    }
+    this.raidUplinkIndex += 1;
+    this.raidUplinkProgress = 0;
+    this.raidUplinkTeam = null;
+    this.coreProgress = 0;
+    this.coreOwner = null;
+  }
+
   private ownerAlive(owner: Owner): boolean {
     return owner === 'player' ? this.mode === 'running' && this.health > 0 : Boolean(this.bots[owner]?.alive);
   }
@@ -3722,7 +3997,8 @@ export class Game {
     let bestDistance = maxDistance;
     const hitPoint = new THREE.Vector3();
     for (const fighter of this.fighters) {
-      if (fighter.destroyed || fighter.pilot === owner) continue;
+      if (fighter.destroyed || fighter.pilot === owner
+        || (fighter.pilot !== null && this.areFriendlyOwners(owner, fighter.pilot))) continue;
       const radius = Math.max(1.8, fighter.visual.radius * 0.68);
       const hit = ray.intersectSphere(new THREE.Sphere(fighter.flight.position, radius), hitPoint);
       if (!hit) continue;
@@ -4174,6 +4450,7 @@ export class Game {
     const height = this.combatHitHeight();
     for (const bot of this.bots) {
       if (!bot.alive || this.fighterForPilot(bot.id)) continue;
+      if (this.areFriendlyOwners('player', bot.id)) continue;
       const feet = bot.group.position;
       const capsuleStart = feet.clone().add(new THREE.Vector3(0, radius, 0));
       const capsuleEnd = feet.clone().add(new THREE.Vector3(0, Math.max(radius, height - radius), 0));
@@ -4622,7 +4899,8 @@ export class Game {
           break;
         }
         for (const fighter of this.fighters) {
-          if (fighter.destroyed || fighter.pilot === projectile.owner) continue;
+          if (fighter.destroyed || fighter.pilot === projectile.owner
+            || (fighter.pilot !== null && this.areFriendlyOwners(projectile.owner, fighter.pilot))) continue;
           const hitRadius = Math.max(1.4, fighter.visual.radius * 0.72);
           if (projectile.root.position.distanceToSquared(fighter.flight.position) >= hitRadius * hitRadius) continue;
           this.damageFighter(
@@ -4645,6 +4923,7 @@ export class Game {
         if (remove) break;
         for (const bot of this.bots) {
           if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)
+            || this.areFriendlyOwners(projectile.owner, bot.id)
             || (projectile.owner === bot.id && (projectile.weapon !== 'disc' || projectile.ownerSafeTime > 0))) continue;
           const travel = previousPosition.distanceTo(projectile.root.position);
           const shotDir = travel > 1e-6
@@ -4743,6 +5022,7 @@ export class Game {
     const minKnockback = definition.splashMinKnockback ?? Math.max(0.5, maxKnockback * 0.08);
     for (const bot of this.bots) {
       if (!bot.alive || this.fighters.some((fighter) => fighter.pilot === bot.id)
+        || this.areFriendlyOwners(projectile.owner, bot.id)
         || bot === directlyHit || projectile.owner === bot.id) continue;
       const sample = this.sampleSplash(
         position,
@@ -4908,12 +5188,12 @@ export class Game {
     this.fovPunch = Math.max(this.fovPunch, 4.2);
     this.trauma = Math.min(1, this.trauma + 0.28);
     if (owner === 'player') {
-      this.score += 1;
+      this.awardScore(owner, 1);
       this.hud.message(`GRENADIER ${drone.id.toUpperCase()} DESTROYED · ${weaponName.toUpperCase()}`);
     } else if (typeof owner === 'number') {
       const bot = this.bots[owner];
       if (bot) {
-        bot.score += 1;
+        this.awardScore(owner, 1);
         this.hud.message(`${bot.displayName} DESTROYED ${drone.id.toUpperCase()} · ${weaponName.toUpperCase()}`);
       }
     }
@@ -4948,12 +5228,12 @@ export class Game {
     this.fovPunch = Math.max(this.fovPunch, 3.5);
     this.trauma = Math.min(1, this.trauma + 0.22);
     if (owner === 'player') {
-      this.score += 1;
+      this.awardScore(owner, 1);
       this.hud.message(`HOSTILE ${drone.id.toUpperCase()} DESTROYED · ${weaponName.toUpperCase()}`);
     } else if (typeof owner === 'number') {
       const bot = this.bots[owner];
       if (bot) {
-        bot.score += 1;
+        this.awardScore(owner, 1);
         this.hud.message(`${bot.displayName} DESTROYED ${drone.id.toUpperCase()} · ${weaponName.toUpperCase()}`);
       }
     }
@@ -4970,9 +5250,11 @@ export class Game {
     _headshot = false,
     knockbackDirection?: THREE.Vector3,
   ): void {
+    if (owner !== 'drone' && this.areFriendlyOwners(owner, bot.id)) return;
     const coreDenial = this.coreActive && this.coreOwner === bot.id && this.coreProgress >= 0.25;
     const eliminationDistance = this.playerPosition.distanceTo(bot.group.position);
     const eliminationSpeed = Math.hypot(this.playerVelocity.x, this.playerVelocity.z);
+    const eliminationPosition = bot.group.position.clone();
     // Capture traversal state before hit knockback mutates the victim. A grounded
     // longshot must not be mislabeled as an air-frag because its lethal impact
     // launched the bot on the same frame.
@@ -5002,6 +5284,7 @@ export class Game {
       this.audio.grunt(bot.group.position, Math.min(1.35, damage / 34), `bot-${bot.id}`);
     }
     if (!killed) return;
+    this.dropCarriedFlag(bot.id, eliminationPosition);
     const fragLine = owner === 'player'
       ? `YOU FRAGGED ${bot.displayName} · ${weaponName.toUpperCase()}`
       : typeof owner === 'number'
@@ -5009,7 +5292,7 @@ export class Game {
         : `HOSTILE DRONE FRAGGED ${bot.displayName} · LASER`;
     this.hud.killConfirm(fragLine);
     if (owner === 'player') {
-      this.score += 1;
+      this.awardScore(owner, 1);
       if (!this.grounded) this.airborneKills += 1;
       this.awardEliminationStyle({
         airborne: eliminationAirborne,
@@ -5022,7 +5305,7 @@ export class Game {
     } else if (typeof owner === 'number') {
       const shooter = this.bots[owner];
       if (shooter) {
-        shooter.score += 1;
+        this.awardScore(owner, 1);
         this.hud.message(fragLine);
       }
     } else {
@@ -5062,6 +5345,7 @@ export class Game {
 
   private damagePlayer(amount: number, owner: DamageSource, cause: string, hitOrigin?: THREE.Vector3, knockback?: number): void {
     if (this.mode !== 'running') return;
+    if (typeof owner === 'number' && this.areFriendlyOwners(owner, 'player')) return;
     const armored = this.armor > 0;
     const absorbed = Math.min(this.armor, amount * 0.66);
     this.armor -= absorbed;
@@ -5082,11 +5366,12 @@ export class Game {
     if (this.health <= 0) {
       this.health = 0;
       this.deaths += 1;
+      this.dropCarriedFlag('player', this.playerPosition.clone());
       this.mode = 'respawning';
       this.respawnTimer = 1.6;
       this.respawnCause = cause;
       if (owner === 'player') this.score = Math.max(-5, this.score - 1);
-      else if (typeof owner === 'number') this.bots[owner].score += 1;
+      else if (typeof owner === 'number') this.awardScore(owner, 1);
       this.audio.death();
       this.hud.message(owner === 'player'
         ? `SELF-DESTRUCT · ${cause}`
@@ -5192,6 +5477,20 @@ export class Game {
   }
 
   private updateCore(delta: number): void {
+    if (this.matchMode === 'ctf') {
+      this.updateCaptureTheFlag(delta);
+      this.coreActive = false;
+      this.coreProgress = 0;
+      this.coreOwner = null;
+      this.coreContested = false;
+      this.coreGroup.visible = false;
+      this.coreLight.intensity = 0;
+      return;
+    }
+    if (this.matchMode === 'raid') {
+      this.updateRaidObjective(delta);
+      return;
+    }
     const wasActive = this.coreActive;
     this.coreDirector.update(delta);
     const directorState = this.coreDirector.snapshot();
@@ -5224,30 +5523,48 @@ export class Game {
     const playerInside = this.playerPosition.distanceToSquared(this.arena.corePosition) <= coreRadiusSq;
     let insideBotCount = 0;
     let soleBotOwner: number | null = null;
+    const insideTeams = new Set<TeamId>();
+    const teamRepresentatives = new Map<TeamId, Owner>();
+    if (playerInside && this.matchMode === 'tdm') {
+      insideTeams.add('azure');
+      teamRepresentatives.set('azure', 'player');
+    }
     for (const bot of this.bots) {
       if (!bot.alive || bot.group.position.distanceToSquared(this.arena.corePosition) > coreRadiusSq) continue;
       insideBotCount += 1;
       soleBotOwner = bot.id;
+      if (this.matchMode === 'tdm') {
+        const team = this.teamForOwner(bot.id);
+        if (team) {
+          insideTeams.add(team);
+          if (!teamRepresentatives.has(team)) teamRepresentatives.set(team, bot.id);
+        }
+      }
     }
     let owner: Owner | null = null;
-    if (playerInside && insideBotCount === 0) owner = 'player';
-    if (!playerInside && insideBotCount === 1) owner = soleBotOwner;
-    this.coreContested = (playerInside && insideBotCount > 0) || insideBotCount > 1;
+    if (this.matchMode === 'tdm') {
+      if (insideTeams.size === 1) owner = teamRepresentatives.values().next().value ?? null;
+      this.coreContested = insideTeams.size > 1;
+    } else {
+      if (playerInside && insideBotCount === 0) owner = 'player';
+      if (!playerInside && insideBotCount === 1) owner = soleBotOwner;
+      this.coreContested = (playerInside && insideBotCount > 0) || insideBotCount > 1;
+    }
     if (owner === null) {
       this.coreProgress = Math.max(0, this.coreProgress - delta * 0.65);
       this.coreOwner = null;
       return;
     }
-    if (this.coreOwner !== owner) this.coreProgress = 0;
+    if (this.coreOwner === null || !this.areFriendlyOwners(this.coreOwner, owner)) this.coreProgress = 0;
     this.coreOwner = owner;
     this.coreProgress += delta / POWERUP.coreHold;
     if (this.coreProgress < 1) return;
     if (owner === 'player') {
-      this.score += 3;
+      this.awardScore(owner, 3);
       this.coreCaptures += 1;
       this.hud.message(`FLUX CORE CAPTURED · ${this.currentCoreAnchorName} · +3`);
     } else {
-      this.bots[owner].score += 3;
+      this.awardScore(owner, 3);
       this.hud.message(`${this.bots[owner].displayName} CAPTURED ${this.currentCoreAnchorName}`);
     }
     this.audio.pickup('core');
@@ -5312,13 +5629,40 @@ export class Game {
           });
         }
       }
-      this.coreGroup.rotation.y += delta * 1.1;
-      this.coreGroup.position.y = this.arena.corePosition.y + 2.4 + Math.sin(elapsed * 2.7) * 0.18;
+      this.coreVisualGroup.rotation.y += delta * 1.1;
+      this.coreVisualGroup.position.y = Math.sin(elapsed * 2.7) * 0.18;
+      const coreCrystal = this.coreVisualGroup.getObjectByName('flux-core-crystal');
+      if (coreCrystal) {
+        const pulse = 1 + Math.sin(elapsed * 3.4) * 0.035;
+        coreCrystal.scale.setScalar(pulse);
+      }
     }
   }
 
   private updateEffects(delta: number): void {
     this.weaponVfx.update(delta);
+    if (this.matchMode === 'ctf' && !this.reducedMotion) {
+      for (const flag of this.flags) {
+        const ring = flag.group.getObjectByName('ctf-flag-ring');
+        if (ring) ring.rotation.z += delta * 2.2;
+        const beaconRing = flag.group.getObjectByName('ctf-beacon-ring');
+        if (beaconRing) beaconRing.rotation.z -= delta * 1.45;
+        const baseRing = flag.baseGroup.getObjectByName('ctf-base-ring');
+        if (baseRing) baseRing.rotation.z += delta * 0.35;
+        const beacon = flag.group.getObjectByName('ctf-signal-beacon');
+        if (beacon) {
+          const phase = Number(flag.group.userData.phase ?? 0);
+          beacon.position.y = 0.88 + Math.sin(this.elapsed * 2.4 + phase) * 0.035;
+          beacon.rotation.y += delta * 0.9;
+        }
+        const signalCore = flag.group.getObjectByName('ctf-signal-core');
+        if (signalCore) {
+          const phase = Number(flag.group.userData.phase ?? 0);
+          const pulse = 1 + Math.sin(this.elapsed * 3.1 + phase) * 0.11;
+          signalCore.scale.setScalar(pulse);
+        }
+      }
+    }
   }
 
   private applyWeaponViewPose(
@@ -5757,13 +6101,16 @@ export class Game {
 
   private updateHud(): void {
     const definition = WEAPONS[this.selectedWeapon];
+    const modeDefinition = matchModeDefinition(this.matchMode);
     const jetpackEnergy = this.jetpackEnergy.snapshot();
-    const botLead = Math.max(...this.bots.map((bot) => bot.score));
+    const playerMatchScore = this.playerTeamScore();
+    const opponentMatchScore = this.opposingTeamScore();
+    const botLead = this.matchMode === 'arena' ? Math.max(...this.bots.map((bot) => bot.score)) : opponentMatchScore;
     const coreDirectorState = this.coreDirector.snapshot();
-    const coreLocation = coreDirectorState.active
+    let coreLocation = coreDirectorState.active
       ? coreDirectorState.currentAnchor?.name ?? this.currentCoreAnchorName
       : coreDirectorState.nextAnchor?.name ?? this.currentCoreAnchorName;
-    const coreStatus = this.coreActive
+    let coreStatus = this.coreActive
       ? this.coreContested
         ? 'CORE CONTESTED'
         : this.coreOwner === null
@@ -5774,11 +6121,98 @@ export class Game {
       : coreDirectorState.phase === 'telegraph'
         ? `CORE LOCKING · ${Math.max(0, Math.ceil(this.coreCooldown))}s`
         : `CORE RELOCATING · ${Math.max(0, Math.ceil(this.coreCooldown))}s`;
+    let objectiveProgress = this.coreProgress;
+    let objectivePhase = this.coreActive ? this.coreContested ? 'CONTESTED' : 'CAPTURE' : coreDirectorState.phase.toUpperCase();
+    let nextEventLabel = this.coreActive ? 'CAPTURE LIVE' : coreDirectorState.phase === 'telegraph' ? 'CORE ONLINE' : 'NEXT LOCK';
+    let nextEventSeconds = this.coreActive ? 0 : this.coreCooldown;
+    const arenaScores = [this.score, ...this.bots.map((bot) => bot.score)];
+    const arenaLeaderIndex = arenaScores.indexOf(Math.max(...arenaScores));
+    let standings = this.matchMode === 'arena'
+      ? [
+        { callsign: 'RIFT-01', score: this.score, isPlayer: true, isLeader: arenaLeaderIndex === 0 },
+        ...this.bots.map((bot, index) => ({
+          callsign: bot.displayName,
+          score: bot.score,
+          isLeader: arenaLeaderIndex === index + 1,
+        })),
+      ]
+      : [
+        {
+          rank: 1,
+          callsign: `${TEAM_LABELS.azure} SQUAD // 8`,
+          score: this.teamScores.azure,
+          team: TEAM_LABELS.azure,
+          isPlayer: true,
+          isLeader: playerMatchScore >= opponentMatchScore,
+        },
+        {
+          rank: 2,
+          callsign: `${TEAM_LABELS.crimson} SQUAD // 8`,
+          score: this.teamScores.crimson,
+          team: TEAM_LABELS.crimson,
+          isLeader: opponentMatchScore > playerMatchScore,
+        },
+        {
+          rank: 3,
+          callsign: 'RIFT-01',
+          score: this.score,
+          team: TEAM_LABELS.azure,
+        },
+        {
+          rank: 4,
+          callsign: [...this.bots].sort((left, right) => right.score - left.score)[0]?.displayName ?? 'SQUAD LEAD',
+          score: [...this.bots].sort((left, right) => right.score - left.score)[0]?.score ?? 0,
+          team: TEAM_LABELS.crimson,
+        },
+      ];
+    if (this.matchMode === 'ctf') {
+      const azureFlag = this.flags.find((flag) => flag.team === 'azure');
+      const crimsonFlag = this.flags.find((flag) => flag.team === 'crimson');
+      const carriedFlag = this.flags.find((flag) => flag.carrier !== null);
+      const carrierName = carriedFlag?.carrier === 'player'
+        ? 'RIFT-01'
+        : typeof carriedFlag?.carrier === 'number'
+          ? this.bots[carriedFlag.carrier]?.displayName ?? 'ALLY'
+          : null;
+      coreLocation = 'AZURE BASE // CRIMSON BASE';
+      objectiveProgress = this.ctfCaptures.azure / CTF_CAPTURE_LIMIT;
+      objectivePhase = 'CAPTURE';
+      coreStatus = carriedFlag
+        ? `${carrierName} HAS ${TEAM_LABELS[carriedFlag.team]} FLAG`
+        : !crimsonFlag?.atBase
+          ? 'ENEMY FLAG DROPPED'
+          : !azureFlag?.atBase
+            ? 'YOUR FLAG MISSING'
+            : 'FLAGS LIVE · STEAL AND RETURN';
+      nextEventLabel = `${TEAM_LABELS.azure} CAPS`;
+      nextEventSeconds = 0;
+    } else if (this.matchMode === 'raid') {
+      coreLocation = `UPLINK ${Math.min(RAID_UPLINK_COUNT, this.raidUplinkIndex + 1)} // ${this.currentCoreAnchorName}`;
+      objectiveProgress = this.raidUplinkProgress;
+      objectivePhase = 'UPLINK';
+      coreStatus = this.coreContested
+        ? 'UPLINK CONTESTED · CLEAR THE RING'
+        : this.raidUplinkProgress > 0
+          ? `${TEAM_LABELS[this.raidUplinkTeam ?? 'azure']} SECURING · ${Math.round(this.raidUplinkProgress * 100)}%`
+          : 'CONTEST UPLINK · 8v8 RAID';
+      nextEventLabel = `UPLINKS ${this.raidUplinksSecured}/${RAID_UPLINK_COUNT}`;
+      nextEventSeconds = 0;
+    }
+    const playerWins = this.matchMode === 'raid' && this.raidUplinksSecured >= RAID_UPLINK_COUNT
+      ? this.raidUplinkTeam === this.teamForOwner('player')
+      : playerMatchScore > opponentMatchScore;
+    const matchDrawn = this.matchMode !== 'raid' && playerMatchScore === opponentMatchScore;
     const matchStatus = this.mode === 'complete'
-      ? this.score > botLead ? 'MATCH WON' : this.score === botLead ? 'MATCH DRAWN' : 'MATCH LOST'
+      ? this.matchMode === 'raid'
+        ? playerWins ? 'RAID COMPLETE' : 'RAID FAILED'
+        : playerWins ? 'MATCH WON' : matchDrawn ? 'MATCH DRAWN' : 'MATCH LOST'
       : this.mode === 'ready'
         ? 'CLICK TO ENTER'
-        : this.mode === 'countdown' ? 'WEAPONS LOCKED' : this.overtime ? 'OVERTIME · NEXT SCORE' : `FIRST TO ${SCORE_LIMIT}`;
+        : this.mode === 'countdown'
+          ? 'WEAPONS LOCKED'
+          : this.overtime
+            ? 'OVERTIME · NEXT SCORE'
+            : modeDefinition.objective.toUpperCase();
     const resolvedMatchStatus = this.mode === 'paused' ? 'MATCH PAUSED' : matchStatus;
     const powerups: string[] = [];
     if (this.damageBoost > 0) powerups.push(`DAMAGE ${Math.ceil(this.damageBoost)}s`);
@@ -5791,20 +6225,19 @@ export class Game {
     powerups.push(this.grenadeCooldown > 0 ? `FRAG ${this.grenadeAmmo} · ${this.grenadeCooldown.toFixed(1)}s` : `FRAG GRENADES ${this.grenadeAmmo}`);
     const rail = this.pickups.find((pickup) => pickup.kind === 'rail');
     const style = this.styleSystem.snapshot();
-    const scores = [this.score, ...this.bots.map((bot) => bot.score)];
-    const leadingScore = Math.max(...scores);
     this.hud.update({
       health: this.health,
       armor: this.armor,
       speed: Math.hypot(this.playerVelocity.x, this.playerVelocity.z),
-      score: this.score,
+      score: playerMatchScore,
       botLead,
+      matchMode: modeDefinition.label.toUpperCase(),
       timeRemaining: this.matchTime,
       weaponId: definition.id,
       weapon: definition.name,
       secondary: definition.secondary.toUpperCase(),
       ammo: this.ammo.get(definition.id) ?? 0,
-      coreProgress: this.coreProgress,
+      coreProgress: objectiveProgress,
       coreStatus,
       matchStatus: resolvedMatchStatus,
       fps: this.fps,
@@ -5814,20 +6247,13 @@ export class Game {
         charge: jetpackEnergy.charge,
         phase: jetpackEnergy.phase,
       },
-      standings: [
-        { callsign: 'RIFT-01', score: this.score, isPlayer: true, isLeader: this.score === leadingScore },
-        ...this.bots.map((bot) => ({
-          callsign: bot.displayName,
-          score: bot.score,
-          isLeader: bot.score === leadingScore,
-        })),
-      ],
+      standings,
       objective: {
         location: coreLocation,
-        phase: this.coreActive ? this.coreContested ? 'CONTESTED' : 'CAPTURE' : coreDirectorState.phase.toUpperCase(),
+        phase: objectivePhase,
         contestState: coreStatus,
-        nextEventLabel: this.coreActive ? 'CAPTURE LIVE' : coreDirectorState.phase === 'telegraph' ? 'CORE ONLINE' : 'NEXT LOCK',
-        nextEventSeconds: this.coreActive ? 0 : this.coreCooldown,
+        nextEventLabel,
+        nextEventSeconds,
       },
       style: style.meter > 0 || style.lastMedal
         ? {
@@ -5990,7 +6416,7 @@ export class Game {
     if (this.mode === 'running') {
       this.mode = 'paused';
       this.hud.showStart('paused');
-      this.startButton.textContent = 'RESUME MATCH';
+      this.startButton.textContent = 'CONTINUE';
       this.input.setPointerLockAllowed(false);
       this.audio.setPaused(true);
     } else if (this.mode === 'paused') {
@@ -6001,20 +6427,30 @@ export class Game {
   private completeMatch(): void {
     this.cancelMatchCountdown();
     this.mode = 'complete';
-    const botLead = Math.max(...this.bots.map((bot) => bot.score));
-    const won = this.score > botLead;
-    this.hud.message(won ? 'RIFT DOMINATED' : this.score === botLead ? 'MATCH DRAWN' : 'MATCH LOST · RE-ENTER');
+    const playerMatchScore = this.playerTeamScore();
+    const opponentMatchScore = this.opposingTeamScore();
+    const won = this.matchMode === 'raid' && this.raidUplinksSecured >= RAID_UPLINK_COUNT
+      ? this.raidUplinkTeam === this.teamForOwner('player')
+      : playerMatchScore > opponentMatchScore;
+    const drawn = this.matchMode !== 'raid' && playerMatchScore === opponentMatchScore;
+    const resultMessage = this.matchMode === 'raid'
+      ? won ? 'RAID COMPLETE · EXTRACT SECURED' : 'RAID FAILED · RE-ENTER'
+      : won ? 'RIFT DOMINATED' : drawn ? 'MATCH DRAWN' : 'MATCH LOST · RE-ENTER';
+    this.hud.message(resultMessage);
     this.input.setPointerLockAllowed(false);
     this.audio.reset();
     this.audio.setPaused(true);
     this.hud.showStart('complete');
     const accuracy = this.playerShots > 0 ? Math.min(100, Math.round(this.playerHits / this.playerShots * 100)) : 0;
     const style = this.styleSystem.snapshot();
-    this.hud.showMatchReport(won ? 'RIFT DOMINATED' : this.score === botLead ? 'STALEMATE' : 'RIFT LOST', [
-      ['Score', `${this.score} / ${botLead}`],
+    const resultTitle = this.matchMode === 'raid' ? won ? 'RAID COMPLETE' : 'RAID FAILED' : won ? 'RIFT DOMINATED' : drawn ? 'STALEMATE' : 'RIFT LOST';
+    const objectiveLabel = this.matchMode === 'ctf' ? 'Captures' : this.matchMode === 'raid' ? 'Uplinks' : 'Core captures';
+    const objectiveValue = this.matchMode === 'ctf' ? String(this.ctfCaptures.azure) : this.matchMode === 'raid' ? String(this.raidUplinksSecured) : String(this.coreCaptures);
+    this.hud.showMatchReport(resultTitle, [
+      ['Score', this.matchMode === 'raid' ? `${this.raidUplinksSecured} / ${RAID_UPLINK_COUNT}` : `${playerMatchScore} / ${opponentMatchScore}`],
       ['Accuracy', `${accuracy}%`],
       ['Deaths', String(this.deaths)],
-      ['Core captures', String(this.coreCaptures)],
+      [objectiveLabel, objectiveValue],
       ['Air frags', String(this.airborneKills)],
       ['Style', `${Math.round(style.meter)} · ×${style.comboMultiplier.toFixed(2)}`],
       ['Top speed', `${Math.round(this.maxPlayerSpeed * 3.6)} km/h`],
@@ -6025,6 +6461,14 @@ export class Game {
   private resetMatch(): void {
     this.cancelMatchCountdown();
     this.score = 0;
+    this.teamScores.azure = 0;
+    this.teamScores.crimson = 0;
+    this.ctfCaptures.azure = 0;
+    this.ctfCaptures.crimson = 0;
+    this.raidUplinkIndex = 0;
+    this.raidUplinkProgress = 0;
+    this.raidUplinksSecured = 0;
+    this.raidUplinkTeam = null;
     this.deaths = 0;
     this.airborneKills = 0;
     this.rocketJumpCount = 0;
@@ -6053,7 +6497,10 @@ export class Game {
     this.coreContested = false;
     this.coreGroup.visible = false;
     this.coreGroup.scale.setScalar(1);
+    this.coreVisualGroup.position.y = 0;
+    this.coreVisualGroup.rotation.set(0, 0, 0);
     this.coreLight.intensity = 0;
+    this.resetFlags();
     this.styleSystem.reset();
     this.recentPlayerKills.length = 0;
     this.weatherSnapshot = this.weatherSystem.reset();
@@ -6158,13 +6605,25 @@ export class Game {
 
   private createScene(): void {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
-    const fogProfile = quickSense ? MAP_FOG_PROFILES.quicksense : MAP_FOG_PROFILES.monsoon;
-    this.scene.background = quickSense
-      ? this.arena.skyTexture ?? new THREE.Color(0x75b6df)
-      : this.arena.skyTexture ?? new THREE.Color(0x8fcddd);
-    this.scene.backgroundIntensity = quickSense
-      ? (this.arena.skyTexture ? 0.84 : 0.96)
-      : 0.78;
+    const bipbeta2 = this.arena.mapInfo.name === 'Bipbeta2';
+    const fogProfile = bipbeta2
+      ? MAP_FOG_PROFILES.bipbeta2
+      : quickSense
+        ? MAP_FOG_PROFILES.quicksense
+        : MAP_FOG_PROFILES.monsoon;
+    this.scene.background = bipbeta2
+      ? this.arena.skyTexture ?? new THREE.Color(0x101a20)
+      : quickSense
+        // The authored panorama supplies real cloud depth and a distant mesa
+        // horizon. The flat procedural dome left the hero view looking like a
+        // brown studio cyclorama and erased the scale cue in the concept.
+        ? this.arena.skyTexture ?? new THREE.Color(0xe3a273)
+        : this.arena.skyTexture ?? new THREE.Color(0x8fcddd);
+    this.scene.backgroundIntensity = bipbeta2
+      ? 0.68
+      : quickSense
+      ? 1
+        : 0.78;
     this.scene.backgroundBlurriness = this.arena.skyTexture ? 0.02 : 0.035;
     this.scene.fog = new THREE.Fog(fogProfile.color, fogProfile.near, fogProfile.far);
     const environmentGenerator = new THREE.PMREMGenerator(this.renderer);
@@ -6174,7 +6633,7 @@ export class Game {
     this.environmentTexture = environmentGenerator.fromScene(new RoomEnvironment(), 0.03).texture;
     this.scene.environment = this.environmentTexture;
     environmentGenerator.dispose();
-    if (!this.arena.skyTexture) this.scene.add(this.createSky(quickSense));
+    if (!this.arena.skyTexture) this.scene.add(this.createSky(quickSense && !bipbeta2));
     this.mapLighting = new MapLightingRig(
       this.arena.mapInfo.name,
       this.arena.mapInfo.bounds,
@@ -6193,9 +6652,11 @@ export class Game {
 
   private updateMapFog(visibilityMultiplier: number): void {
     if (!(this.scene.fog instanceof THREE.Fog)) return;
-    const profile = this.arena.mapInfo.name === 'QuickSense'
-      ? MAP_FOG_PROFILES.quicksense
-      : MAP_FOG_PROFILES.monsoon;
+    const profile = this.arena.mapInfo.name === 'Bipbeta2'
+      ? MAP_FOG_PROFILES.bipbeta2
+      : this.arena.mapInfo.name === 'QuickSense'
+        ? MAP_FOG_PROFILES.quicksense
+        : MAP_FOG_PROFILES.monsoon;
     const visibility = THREE.MathUtils.clamp(visibilityMultiplier, 0.82, 1);
     this.scene.fog.near = profile.near;
     this.scene.fog.far = profile.near + (profile.far - profile.near) * visibility;
@@ -6233,31 +6694,26 @@ export class Game {
     const quickSense = this.arena.mapInfo.name === 'QuickSense';
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    // QuickSense's bloom was intentionally subtle, yet UnrealBloom still runs
-    // a full downsample/blur/composite pyramid. Its authored emissive materials,
-    // soft smoke, and restrained grade already provide the highlights; keep
-    // those and spend the saved GPU synchronization budget on stable combat.
-    if (!quickSense) {
-      composer.addPass(new UnrealBloomPass(
-        new THREE.Vector2(1, 1),
-        this.mobileQuality ? 0.12 : 0.28,
-        0.34,
-        1.08,
-      ));
-    }
+    // Monsoon now carries its highlight hierarchy in authored emissive
+    // materials, sky lighting, wet roughness, and the final color grade.
+    // A full bloom pyramid softened foliage silhouettes and consumed the
+    // headroom reserved for stable 65 FPS combat, so it is intentionally not
+    // part of the gameplay renderer.
     this.inkPass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
         resolution: { value: new THREE.Vector2(1, 1) },
-        edgeStrength: { value: quickSense ? (this.mobileQuality ? 0.035 : 0.05) : (this.mobileQuality ? 0.055 : 0.075) },
-        vignette: { value: quickSense ? 0.07 : 0.09 },
+        // Keep the grade quiet on QuickSense. A stronger Sobel edge pass turns
+        // the large sculpted cliffs into outlined polygons at flight distance.
+        edgeStrength: { value: quickSense ? (this.mobileQuality ? 0.01 : 0.018) : (this.mobileQuality ? 0.055 : 0.075) },
+        vignette: { value: quickSense ? 0.045 : 0.09 },
         gradeStrength: { value: quickSense ? 1 : 0 },
         gradeContrast: { value: quickSense ? 1.055 : 1 },
         neutralDarken: { value: quickSense ? 0.05 : 0 },
-        shadowCool: { value: quickSense ? 0.18 : 0 },
+        shadowCool: { value: quickSense ? 0.24 : 0 },
         shadowLift: { value: quickSense ? 0.018 : 0 },
         routeHueSeparation: { value: quickSense ? 1 : 0 },
-        saturation: { value: quickSense ? 1.09 : 1.035 },
+        saturation: { value: quickSense ? 1.04 : 1.035 },
         speedBlur: { value: 0 },
       },
       vertexShader: `varying vec2 vUv;
@@ -6354,13 +6810,13 @@ export class Game {
 
   private createSky(bright = false): THREE.Mesh {
     const uniforms = {
-      uTop: { value: new THREE.Color(bright ? 0x4a95cc : 0x152a43) },
-      uHorizon: { value: new THREE.Color(bright ? 0xa9d2e4 : 0x83a8b6) },
-      uLower: { value: new THREE.Color(bright ? 0xd0dfe0 : 0x2d5567) },
-      uStorm: { value: new THREE.Color(bright ? 0x789db2 : 0x101c31) },
-      uSunColor: { value: new THREE.Color(0xffd7a4) },
+      uTop: { value: new THREE.Color(bright ? 0xf09a70 : 0x152a43) },
+      uHorizon: { value: new THREE.Color(bright ? 0xffd2a1 : 0x83a8b6) },
+      uLower: { value: new THREE.Color(bright ? 0xd98b5e : 0x2d5567) },
+      uStorm: { value: new THREE.Color(bright ? 0xffc9a5 : 0x101c31) },
+      uSunColor: { value: new THREE.Color(bright ? 0xffe1b0 : 0xffd7a4) },
       uSunDir: { value: new THREE.Vector3(bright ? -0.62 : 0.62, bright ? 0.38 : 0.22, bright ? -0.55 : 0.55).normalize() },
-      uCloudStrength: { value: bright ? 0.1 : 0.88 },
+      uCloudStrength: { value: bright ? 0.58 : 0.88 },
     };
     const sky = new THREE.Mesh(
       new THREE.SphereGeometry(850, 40, 22),
@@ -6386,8 +6842,8 @@ export class Game {
             float cloudNoise = noise(vec2(azimuth * 2.8, vDir.y * 7.0)) * 0.62
               + noise(vec2(azimuth * 6.2 + 4.0, vDir.y * 13.0)) * 0.38;
             float stormSide = smoothstep(-0.3, 0.68, -vDir.x - vDir.z * 0.38);
-            float clouds = smoothstep(0.38, 0.7, cloudNoise + (uCloudStrength < 0.7 ? 0.1 : 0.0) + stormSide * 0.24)
-              * smoothstep(-0.02, 0.42, vDir.y);
+            float clouds = smoothstep(0.34, 0.66, cloudNoise + (uCloudStrength < 0.7 ? 0.1 : 0.0) + stormSide * 0.18)
+              * smoothstep(-0.045, 0.18, vDir.y);
             col = mix(col, uStorm, clouds * uCloudStrength);
             float d = clamp(dot(normalize(vDir), normalize(uSunDir)), 0.0, 1.0);
             col += uSunColor * (pow(d, 900.0) * 1.25 + pow(d, 14.0) * 0.11);
@@ -6401,8 +6857,11 @@ export class Game {
   }
 
   private createBots(): void {
-    for (let id = 0; id < 3; id += 1) {
-      const bot = new Bot(id, BOT_COLORS[id], this.selectSafeSpawn(id), this.arena);
+    const botCount = this.matchMode === 'arena' ? 3 : 15;
+    for (let id = 0; id < botCount; id += 1) {
+      const team = teamForActor(this.matchMode, id);
+      const color = team ? TEAM_COLORS[team] : BOT_COLORS[id];
+      const bot = new Bot(id, color, this.selectSafeSpawn(id), this.arena);
       this.bots.push(bot);
       this.scene.add(bot.group);
     }
@@ -6717,13 +7176,208 @@ export class Game {
   private createCore(): void {
     const shell = new THREE.MeshToonMaterial({ color: 0x6cf6ff, emissive: 0x20dfff, emissiveIntensity: 2 });
     const dark = new THREE.MeshToonMaterial({ color: 0x151a36 });
+    const plinth = new THREE.MeshStandardMaterial({
+      color: 0x111a2b,
+      metalness: 0.82,
+      roughness: 0.3,
+    });
+    const signal = new THREE.MeshStandardMaterial({
+      color: 0x16324a,
+      emissive: 0x1de4ff,
+      emissiveIntensity: 1.35,
+      metalness: 0.28,
+      roughness: 0.22,
+    });
+    const pedestal = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.9, 1.08, 0.2, 8),
+      plinth,
+    );
+    pedestal.name = 'flux-core-pedestal';
+    pedestal.position.y = -2.3;
+    pedestal.receiveShadow = true;
+    const pedestalInset = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.61, 0.72, 0.05, 8),
+      plinth,
+    );
+    pedestalInset.name = 'flux-core-pedestal-inset';
+    pedestalInset.position.y = -2.17;
+    pedestalInset.receiveShadow = true;
+    const pedestalRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.82, 0.045, 6, 24),
+      signal,
+    );
+    pedestalRing.name = 'flux-core-pedestal-ring';
+    pedestalRing.rotation.x = Math.PI * 0.5;
+    pedestalRing.position.y = -2.17;
     const crystal = new THREE.Mesh(new THREE.IcosahedronGeometry(0.9, 1), shell);
+    crystal.name = 'flux-core-crystal';
     const cage = new THREE.Mesh(new THREE.IcosahedronGeometry(1.35, 1), dark);
+    cage.name = 'flux-core-cage';
     cage.material.wireframe = true;
-    this.coreGroup.add(crystal, cage);
+    const halo = new THREE.Mesh(new THREE.TorusGeometry(1.55, 0.028, 6, 28), signal);
+    halo.name = 'flux-core-halo';
+    halo.rotation.x = Math.PI * 0.5;
+    halo.position.y = -0.04;
+    const verticalHalo = new THREE.Mesh(new THREE.TorusGeometry(1.14, 0.022, 6, 24), signal);
+    verticalHalo.name = 'flux-core-vertical-halo';
+    verticalHalo.rotation.y = Math.PI * 0.5;
+    verticalHalo.position.y = -0.04;
+    this.coreVisualGroup.name = 'flux-core-visual';
+    this.coreVisualGroup.add(crystal, cage, halo, verticalHalo);
+    this.coreGroup.add(pedestal, pedestalInset, pedestalRing, this.coreVisualGroup);
     this.coreGroup.position.copy(this.arena.corePosition).add(new THREE.Vector3(0, 2.4, 0));
     this.coreGroup.visible = false;
     this.scene.add(this.coreGroup);
+  }
+
+  private createFlags(): void {
+    if (this.matchMode !== 'ctf') return;
+    const spawnPoints = this.arena.spawnPoints;
+    if (spawnPoints.length === 0) return;
+    const bases = this.ctfBasePositions(spawnPoints);
+    for (const [team, authored] of bases) {
+      // Objective bases can sit on a map-authored courtyard/plinth rather than
+      // raw terrain, so sample the highest walkable support at the exact point.
+      const floor = this.arena.floorHeightAt(authored.x, authored.z, Number.POSITIVE_INFINITY);
+      const basePosition = new THREE.Vector3(authored.x, floor ?? authored.y, authored.z);
+      const group = new THREE.Group();
+      group.name = `ctf-${team}-flag`;
+      const baseGroup = new THREE.Group();
+      baseGroup.name = `ctf-${team}-flag-base`;
+
+      const color = TEAM_COLORS[team];
+      const poleMaterial = new THREE.MeshStandardMaterial({
+        color: 0x283b56,
+        metalness: 0.75,
+        roughness: 0.28,
+      });
+      const flagMaterial = new THREE.MeshStandardMaterial({
+        color,
+        emissive: color,
+        emissiveIntensity: 0.42,
+        roughness: 0.32,
+        metalness: 0.18,
+        side: THREE.DoubleSide,
+      });
+      const baseMaterial = new THREE.MeshStandardMaterial({
+        color: 0x111c2c,
+        metalness: 0.8,
+        roughness: 0.3,
+      });
+      const basePlate = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.92, 1.05, 0.12, 8),
+        baseMaterial,
+      );
+      basePlate.name = 'ctf-base-plate';
+      basePlate.position.y = 0.06;
+      basePlate.receiveShadow = true;
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.055, 2.4, 8), poleMaterial);
+      pole.position.y = 1.2;
+      pole.castShadow = true;
+      const pennantShape = new THREE.Shape()
+        .moveTo(0, 0.24)
+        .lineTo(0.72, 0.24)
+        .lineTo(0.56, 0)
+        .lineTo(0.72, -0.24)
+        .lineTo(0, -0.24)
+        .closePath();
+      const pennant = new THREE.Mesh(
+        new THREE.ExtrudeGeometry(pennantShape, {
+          depth: 0.055,
+          bevelEnabled: true,
+          bevelSegments: 2,
+          bevelSize: 0.012,
+          bevelThickness: 0.01,
+        }),
+        flagMaterial,
+      );
+      pennant.name = 'ctf-faction-pennant';
+      pennant.position.set(0.34, 2.05, 0);
+      pennant.castShadow = true;
+      const baseRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.78, 0.045, 6, 24),
+        flagMaterial,
+      );
+      baseRing.name = 'ctf-base-ring';
+      baseRing.rotation.x = Math.PI * 0.5;
+      baseRing.position.y = 0.14;
+      const baseInset = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.57, 0.68, 0.045, 8),
+        baseMaterial,
+      );
+      baseInset.name = 'ctf-base-inset';
+      baseInset.position.y = 0.15;
+      baseInset.receiveShadow = true;
+      const signal = new THREE.Group();
+      signal.name = 'ctf-signal-beacon';
+      signal.position.set(0, 0.88, 0);
+      const signalCage = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(0.25, 1),
+        baseMaterial,
+      );
+      signalCage.name = 'ctf-signal-cage';
+      signalCage.scale.set(1, 1.15, 1);
+      const signalCore = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(0.14, 1),
+        flagMaterial,
+      );
+      signalCore.name = 'ctf-signal-core';
+      signalCore.userData.ctfSignal = true;
+      signal.add(signalCage, signalCore);
+      const beaconRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.32, 0.025, 6, 18),
+        flagMaterial,
+      );
+      beaconRing.name = 'ctf-beacon-ring';
+      beaconRing.rotation.x = Math.PI * 0.5;
+      signal.add(beaconRing);
+      const flagRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.42, 0.035, 6, 20),
+        flagMaterial,
+      );
+      flagRing.name = 'ctf-flag-ring';
+      flagRing.rotation.x = Math.PI * 0.5;
+      flagRing.position.y = 0.05;
+      baseGroup.add(basePlate, baseInset, baseRing);
+      group.add(pole, pennant, signal, flagRing);
+      group.position.copy(basePosition);
+      baseGroup.position.copy(basePosition);
+      group.userData.basePosition = basePosition.clone();
+      group.userData.phase = team === 'azure' ? 0 : Math.PI;
+      group.visible = this.matchMode === 'ctf';
+      baseGroup.visible = this.matchMode === 'ctf';
+      this.scene.add(group);
+      this.scene.add(baseGroup);
+      this.flags.push({
+        team,
+        group,
+        baseGroup,
+        basePosition,
+        carrier: null,
+        atBase: true,
+        droppedSeconds: 0,
+      });
+    }
+  }
+
+  private ctfBasePositions(spawnPoints: readonly THREE.Vector3[]): Array<[TeamId, THREE.Vector3]> {
+    // These are map landmarks first and spawn-list entries second. The two
+    // Monsoon outpost courtyards already contain attack approaches, blast
+    // walls, and a capture plinth; using their centers makes the objectives
+    // feel authored into the map instead of placed on an exposed hillside.
+    if (this.arena.mapInfo.name === 'Monsoon Divide') {
+      return [
+        ['azure', new THREE.Vector3(-85 * MONSOON_WORLD_SCALE, 0, 130 * MONSOON_WORLD_SCALE - 107)],
+        ['crimson', new THREE.Vector3(95 * MONSOON_WORLD_SCALE, 0, -120 * MONSOON_WORLD_SCALE + 114)],
+      ];
+    }
+    // Bipbeta2's diagonal hall entries preserve a readable center crossing;
+    // QuickSense's terminal spawns frame the outpost's long north/south run.
+    const baseIndices = this.arena.mapInfo.name === 'Bipbeta2' ? [0, 3] : [0, 7];
+    return [
+      ['azure', spawnPoints[Math.min(baseIndices[0], spawnPoints.length - 1)].clone()],
+      ['crimson', spawnPoints[Math.min(baseIndices[1], spawnPoints.length - 1)].clone()],
+    ];
   }
 
   private buildWeaponModel(): void {
@@ -7058,6 +7712,24 @@ export class Game {
     };
     const lowerFloorY = audit.grounding.accessStairs[1].start.y;
     const views: Record<string, { camera: THREE.Vector3; target: THREE.Vector3; fov: number }> = {
+      'concept-overview': {
+        // Reproducible reference-comparison framing, derived from the live
+        // tower bounds instead of coordinates that drift when assets change.
+        camera: new THREE.Vector3(
+          boundsCenter.x + exteriorDistance * 0.98,
+          audit.bounds.min.y + exteriorDistance * 0.68,
+          boundsCenter.z - exteriorDistance * 0.42,
+        ),
+        // Tall aerials make the geometric bounds center much higher than the
+        // inhabited tower mass. Aim at the flight-deck/body transition so the
+        // complete tower and its access ramp remain inside the comparison.
+        target: new THREE.Vector3(
+          boundsCenter.x,
+          audit.bounds.min.y + (audit.bounds.max.y - audit.bounds.min.y) * 0.32,
+          boundsCenter.z,
+        ),
+        fov: 60,
+      },
       'exterior-south': {
         camera: new THREE.Vector3(boundsCenter.x, exteriorCameraY, boundsCenter.z - exteriorDistance),
         target: boundsCenter,
@@ -7265,6 +7937,120 @@ export class Game {
           const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = contact.grounded;
           this.terrainNormal.copy(contact.contactNormal);
+        } else if (name === 'bipbeta2-overlook' || name === 'bipbeta2-apron' || name === 'bipbeta2-gallery' || name === 'bipbeta2-wall' || name === 'bipbeta2-hero' || name === 'bipbeta2-facade' || name === 'bipbeta2-energy' || name === 'bipbeta2-stack' || name === 'bipbeta2-lights' || name === 'bipbeta2-catwalk' || name === 'bipbeta2-tubes' || name === 'bipbeta2-west-tube' || name === 'bipbeta2-east-tube' || name === 'bipbeta2-jumper' || name === 'bipbeta2-lower-drop' || name === 'bipbeta2-gallery-return') {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          this.weaponModel.visible = false;
+          // Keep map captures architectural. Combat actors and first-frame
+          // pickup meshes otherwise dominate the lens and hide the authored
+          // catwalk/shaft silhouette we are auditing against Bipbeta2.
+          for (const bot of this.bots) bot.group.visible = false;
+          for (const drone of this.droneSwarm.drones) drone.visual.root.visible = false;
+          for (const drone of this.droneSwarm.busterDrones) drone.visual.root.visible = false;
+          for (const drone of this.flamethrowerDrones.drones) drone.visual.root.visible = false;
+          for (const fighter of this.fighters) fighter.visual.root.visible = false;
+          for (const pickup of this.pickups) pickup.group.visible = false;
+          this.coreGroup.visible = false;
+          const overview = name === 'bipbeta2-overlook';
+          const gallery = name === 'bipbeta2-gallery';
+          const wall = name === 'bipbeta2-wall';
+          const hero = name === 'bipbeta2-hero';
+          const facade = name === 'bipbeta2-facade';
+          const energy = name === 'bipbeta2-energy';
+          const stack = name === 'bipbeta2-stack';
+          const lights = name === 'bipbeta2-lights';
+          const catwalk = name === 'bipbeta2-catwalk';
+          const tubes = name === 'bipbeta2-tubes';
+          const westTube = name === 'bipbeta2-west-tube';
+          const eastTube = name === 'bipbeta2-east-tube';
+          const jumper = name === 'bipbeta2-jumper';
+          const lowerDrop = name === 'bipbeta2-lower-drop';
+          const galleryReturn = name === 'bipbeta2-gallery-return';
+          // These cameras are authored against the interior route, not the
+          // outer bounds. They frame the same visual idea as the reference:
+          // a high bridge in front, a lower shaft below, and lit purple wall
+          // bays receding through the room.
+          const camera = overview
+            ? new THREE.Vector3(-124, 118, -128)
+            : gallery
+              ? new THREE.Vector3(0, 7.1, -47)
+              : wall
+                ? new THREE.Vector3(84.5, 7.3, 0)
+                : hero || facade
+                ? new THREE.Vector3(0, 9.0, 16)
+                : energy
+                  ? new THREE.Vector3(58, 11.8, 47)
+                : stack
+                  ? new THREE.Vector3(0, 10.1, 47)
+                : lights
+                  ? new THREE.Vector3(-28, 11.8, 47)
+                : catwalk
+                  ? new THREE.Vector3(0, 7.4, -57.2)
+                  : tubes
+                    ? new THREE.Vector3(-78, 10.8, -44)
+                  : westTube
+                    ? new THREE.Vector3(-38, 4.0, -50)
+                  : eastTube
+                    ? new THREE.Vector3(38, 4.0, 50)
+                  : jumper
+                    ? new THREE.Vector3(-38, 2.2, -68)
+                  : lowerDrop
+                    ? new THREE.Vector3(62, 0.8, -48)
+                  : galleryReturn
+                    ? new THREE.Vector3(64, 10.5, -42)
+                : new THREE.Vector3(-58, 0.2, -28);
+          const target = overview
+            ? new THREE.Vector3(0, -1.0, 0)
+            : gallery
+              ? new THREE.Vector3(0, 5.8, 28)
+              : wall
+                ? new THREE.Vector3(108, 12.1, 0)
+                : hero || facade
+                  ? new THREE.Vector3(0, 7.3, 82.0)
+                : energy
+                  ? new THREE.Vector3(45, 14.0, 82.0)
+                : stack
+                  ? new THREE.Vector3(0, 14.0, 82.0)
+                : lights
+                  ? new THREE.Vector3(-28, 14.0, 82.0)
+                : catwalk
+                  ? new THREE.Vector3(0, 12.4, 82.5)
+                  : tubes
+                    ? new THREE.Vector3(-38, 6.0, 22)
+                  : westTube
+                    ? new THREE.Vector3(-38, 5.8, 61)
+                  : eastTube
+                    ? new THREE.Vector3(38, 5.8, -61)
+                  : jumper
+                    ? new THREE.Vector3(-38, 10.3, -48)
+                : lowerDrop
+                    ? new THREE.Vector3(62, 3.6, 28)
+                : galleryReturn
+                    ? new THREE.Vector3(64, 10.8, 42)
+                : new THREE.Vector3(0, 7.4, 28);
+          this.screenshotCameraFov = overview ? 64 : gallery ? 68 : wall ? 62 : hero || facade ? 68 : energy || stack || lights ? 54 : catwalk ? 60 : tubes ? 64 : westTube || eastTube ? 72 : jumper || lowerDrop ? 68 : galleryReturn ? 68 : 70;
+          this.playerPosition.copy(camera);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.copy(target);
+          this.screenshotLookTargetActive = true;
+          const view = target.clone().sub(camera.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          if (overview) {
+            // The overview is a QA cutaway: remove only the sealed roof and
+            // outer shell so the authored floor, shaft, twin tubes, bridges,
+            // and return galleries are visible in one frame.
+            this.arena.group.traverse((object) => {
+              const label = object.name.toLowerCase();
+              if (label.includes('recessed ceiling') || label.includes('shell wall')) object.visible = false;
+            });
+          }
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
         } else if (name === 'tower-combat-review') {
           this.mode = 'running';
           this.audio.setPaused(true);
@@ -7969,7 +8755,10 @@ export class Game {
         ) {
           this.pausedForScreenshot = true;
           this.renderer.shadowMap.autoUpdate = false;
-          this.renderer.shadowMap.needsUpdate = false;
+          // Freeze after one deterministic atlas render, not before the first
+          // shadow pass. The old false/false state made review captures look
+          // flat even though live gameplay had authored sun shadows.
+          this.renderer.shadowMap.needsUpdate = true;
           this.hud.hideStart();
           for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
             document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
@@ -8052,6 +8841,7 @@ export class Game {
         launchSpeed: pad.launchSpeed,
         direction: { x: pad.direction.x, y: pad.direction.y, z: pad.direction.z },
       })),
+      getMovementFlow: () => this.arena.group.userData.movementFlow ?? null,
       sampleLineOfSight: (start, end) => this.arena.hasLineOfSight(
         new THREE.Vector3(start.x, start.y, start.z),
         new THREE.Vector3(end.x, end.y, end.z),
@@ -8292,6 +9082,12 @@ export class Game {
       },
       setFirstPersonWeaponVisible: (visible: boolean) => {
         this.weaponModel.visible = visible;
+      },
+      setLocalPlayerVisualsVisible: (visible: boolean) => {
+        this.playerAvatar.root.visible = visible;
+        this.playerJetpack.root.visible = visible;
+        this.thirdPersonWeaponModel.visible = visible && this.isThirdPerson()
+          && Boolean(this.thirdPersonWeaponVisual);
       },
       parkBotsForScreenshot: () => {
         const spawns = [...this.arena.spawnPoints]
@@ -8667,8 +9463,15 @@ export class Game {
     window.__THREE_GAME_DIAGNOSTICS__ = {
       frame: this.frame,
       elapsed: this.elapsed,
-      score: this.score,
-      targetScore: SCORE_LIMIT,
+      score: this.playerTeamScore(),
+      opponentScore: this.opposingTeamScore(),
+      targetScore: matchModeDefinition(this.matchMode).targetScore,
+      matchMode: this.matchMode,
+      teams: {
+        player: this.teamForOwner('player'),
+        azure: this.bots.filter((bot) => this.teamForOwner(bot.id) === 'azure').length + (this.matchMode === 'arena' ? 0 : 1),
+        crimson: this.bots.filter((bot) => this.teamForOwner(bot.id) === 'crimson').length,
+      },
       complete: this.mode === 'complete',
       state: this.mode,
       viewMode: this.viewMode,
@@ -8691,6 +9494,7 @@ export class Game {
         health: bot.health,
         armor: bot.armor,
         score: bot.score,
+        team: this.teamForOwner(bot.id),
         weapon: bot.weapon,
         targetOwner: bot.targetOwner,
         targetVisible: bot.targetVisible,
@@ -9008,6 +9812,13 @@ export class Game {
         supportY: Number(pickup.group.userData.baseY ?? pickup.group.position.y) - 0.012,
         hasAuthoredWeapon: Boolean(pickup.group.getObjectByName(`${pickup.kind}-pickup-weapon-model`)),
       })),
+      flags: this.flags.map((flag) => ({
+        team: flag.team,
+        carrier: flag.carrier,
+        atBase: flag.atBase,
+        droppedSeconds: flag.droppedSeconds,
+        position: { x: flag.group.position.x, y: flag.group.position.y, z: flag.group.position.z },
+      })),
       coreProgress: this.coreProgress,
       core: {
         phase: coreDirectorState.phase,
@@ -9019,6 +9830,12 @@ export class Game {
         secondsRemaining: coreDirectorState.secondsRemaining,
         cycle: coreDirectorState.cycle,
         captures: coreDirectorState.count,
+      },
+      raid: {
+        uplinksSecured: this.raidUplinksSecured,
+        uplinkTarget: RAID_UPLINK_COUNT,
+        activeUplink: this.raidUplinkIndex,
+        progress: this.raidUplinkProgress,
       },
       style: {
         meter: styleSnapshot.meter,
@@ -9236,8 +10053,15 @@ export class Game {
 
   private render(): void {
     if (this.physicsQaMode && this.physicsQaFrameRendered) return;
+    this.arena.prepareRender?.(this.camera);
     this.renderer.info.reset();
-    if (this.physicsQaMode || (this.softwareRenderer && !this.visualCapture)) {
+    const directBipbetaCapture = this.arena.mapInfo.name === 'Bipbeta2' && this.visualCapture;
+    if (this.physicsQaMode || directBipbetaCapture || (this.softwareRenderer && !this.visualCapture)) {
+      // EffectComposer leaves its last render target bound during the visual
+      // resource warmup. Reset it before the deterministic direct-capture path
+      // so Bipbeta2 screenshots paint the visible canvas instead of an empty
+      // offscreen target.
+      this.renderer.setRenderTarget(null);
       this.renderer.render(this.scene, this.camera);
       if (this.physicsQaMode) this.physicsQaFrameRendered = true;
       return;

@@ -1,0 +1,1245 @@
+{
+  "url": "http://127.0.0.1:37499/?qa=visual&mapSeed=450600",
+  "mode": "desktop",
+  "state": "monsoon-overlook",
+  "seed": 450600,
+  "screenshotPath": "gauntlet/baseline-inspector/desktop/desktop-monsoon-overlook.png",
+  "gpu": {
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4, Unspecified Version)",
+    "vendor": "Google Inc. (Apple)",
+    "softwareRendered": false
+  },
+  "result": {
+    "ok": false,
+    "reason": "low-variance",
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "drawingBuffer": {
+      "width": 1280,
+      "height": 720
+    },
+    "alphaPixels": 4096,
+    "variance": 0,
+    "colorBuckets": 1,
+    "metrics": {
+      "colorBuckets": 2,
+      "colorEntropyBits": 0,
+      "edgeDensity": 0,
+      "luminance": {
+        "mean": 0,
+        "p5": 0,
+        "p95": 0,
+        "contrast": 0
+      },
+      "dominantColorShare": 1,
+      "nonBackgroundShare": 0
+    },
+    "renderBudget": {
+      "tier": "desktop",
+      "note": "starting-point budget; adjust per game and document overrides",
+      "rows": [
+        {
+          "metric": "calls",
+          "actual": 288,
+          "limit": 300,
+          "ok": true
+        },
+        {
+          "metric": "triangles",
+          "actual": 37592,
+          "limit": 750000,
+          "ok": true
+        },
+        {
+          "metric": "geometries",
+          "actual": 102,
+          "limit": 300,
+          "ok": true
+        },
+        {
+          "metric": "textures",
+          "actual": 16,
+          "limit": 60,
+          "ok": true
+        }
+      ],
+      "withinBudget": true
+    },
+    "diagnostics": {
+      "frame": 0,
+      "elapsed": 0,
+      "score": 0,
+      "targetScore": 20,
+      "complete": false,
+      "state": "running",
+      "viewMode": "first-person",
+      "countdown": {
+        "remaining": 0,
+        "cue": null,
+        "armed": false,
+        "weaponsLocked": false
+      },
+      "health": 100,
+      "armor": 50,
+      "worldHealthBars": {
+        "targetCount": 8,
+        "visibleCount": 0,
+        "drawCalls": 1,
+        "categories": {
+          "person": 3,
+          "drone": 5,
+          "craft": 0
+        },
+        "entries": [
+          {
+            "id": "bot-0",
+            "kind": "person",
+            "ratio": 1,
+            "rendered": false
+          },
+          {
+            "id": "bot-1",
+            "kind": "person",
+            "ratio": 1,
+            "rendered": false
+          },
+          {
+            "id": "bot-2",
+            "kind": "person",
+            "ratio": 1,
+            "rendered": false
+          },
+          {
+            "id": "drone-1",
+            "kind": "drone",
+            "ratio": 1,
+            "rendered": false
+          },
+          {
+            "id": "drone-2",
+            "kind": "drone",
+            "ratio": 1,
+            "rendered": false
+          },
+          {
+            "id": "drone-3",
+            "kind": "drone",
+            "ratio": 1,
+            "rendered": false
+          },
+          {
+            "id": "buster-1",
+            "kind": "drone",
+            "ratio": 1,
+            "rendered": false
+          },
+          {
+            "id": "buster-2",
+            "kind": "drone",
+            "ratio": 1,
+            "rendered": false
+          }
+        ]
+      },
+      "weapon": "disc",
+      "botsAlive": 3,
+      "bots": [
+        {
+          "id": 0,
+          "displayName": "VIPER",
+          "archetype": "hunter",
+          "alive": true,
+          "health": 100,
+          "armor": 50,
+          "score": 0,
+          "weapon": "machine",
+          "targetOwner": null,
+          "targetVisible": false,
+          "wantsToFire": false,
+          "facingDot": -1,
+          "grounded": true,
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "stepSuccesses": 0,
+          "shotsFired": 0,
+          "navigationTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "modelReady": true,
+          "modelHeight": 1.7799999713897705,
+          "modelCenterY": 0.8899999856948817,
+          "modelWidth": 0.7241649843503524,
+          "modelDepth": 0.5479855509064322,
+          "modelCenterX": -0.01480874463334203,
+          "modelCenterZ": 0.07999925173632505,
+          "modelMeshCount": 6,
+          "renderedMeshCount": 0,
+          "characterSource": "combat-trooper",
+          "runtimeBoneCount": 62,
+          "runtimeAnimationCount": 24,
+          "sourceTriangleCount": 30757,
+          "sourceTextureCount": 24,
+          "animationName": "idle_gun",
+          "roleHardwareProfile": "HUNTER",
+          "roleHardwareMeshCount": 0,
+          "weaponModel": null,
+          "weaponSupportGripError": 0,
+          "weaponSwitches": 0,
+          "bunnyHops": 0,
+          "jetpackActive": false,
+          "jetpackBursts": 0,
+          "jetpackCharge": 1,
+          "jetpackLocked": false,
+          "dashCooldown": 0,
+          "dashesUsed": 0,
+          "aimErrorDegrees": 0,
+          "aimTracking": 0,
+          "reactionRemaining": 0.09639999999999999,
+          "grenadesThrown": 0,
+          "grapplesUsed": 0,
+          "grenadesRemaining": 3,
+          "grappleActive": false,
+          "collisionRecoveries": 0,
+          "stalledFor": 0,
+          "wallContacts": 0,
+          "ceilingContacts": 0,
+          "position": {
+            "x": -120,
+            "y": 30.75626361575542,
+            "z": -116
+          }
+        },
+        {
+          "id": 1,
+          "displayName": "BASTION",
+          "archetype": "anchor",
+          "alive": true,
+          "health": 100,
+          "armor": 50,
+          "score": 0,
+          "weapon": "rocket",
+          "targetOwner": null,
+          "targetVisible": false,
+          "wantsToFire": false,
+          "facingDot": -1,
+          "grounded": true,
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "stepSuccesses": 0,
+          "shotsFired": 0,
+          "navigationTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "modelReady": true,
+          "modelHeight": 1.7799999713897705,
+          "modelCenterY": 0.8899999856948781,
+          "modelWidth": 0.7241649843503808,
+          "modelDepth": 0.5479864896795874,
+          "modelCenterX": -0.014811665260936024,
+          "modelCenterZ": 0.07999972112286713,
+          "modelMeshCount": 6,
+          "renderedMeshCount": 0,
+          "characterSource": "combat-trooper",
+          "runtimeBoneCount": 62,
+          "runtimeAnimationCount": 24,
+          "sourceTriangleCount": 30757,
+          "sourceTextureCount": 24,
+          "animationName": "idle_gun",
+          "roleHardwareProfile": "ANCHOR",
+          "roleHardwareMeshCount": 0,
+          "weaponModel": null,
+          "weaponSupportGripError": 0,
+          "weaponSwitches": 0,
+          "bunnyHops": 0,
+          "jetpackActive": false,
+          "jetpackBursts": 0,
+          "jetpackCharge": 1,
+          "jetpackLocked": false,
+          "dashCooldown": 0,
+          "dashesUsed": 0,
+          "aimErrorDegrees": 0,
+          "aimTracking": 0,
+          "reactionRemaining": 0.27356,
+          "grenadesThrown": 0,
+          "grapplesUsed": 0,
+          "grenadesRemaining": 3,
+          "grappleActive": false,
+          "collisionRecoveries": 0,
+          "stalledFor": 0,
+          "wallContacts": 0,
+          "ceilingContacts": 0,
+          "position": {
+            "x": -218,
+            "y": 34.49516594892716,
+            "z": -44
+          }
+        },
+        {
+          "id": 2,
+          "displayName": "SLIPSTREAM",
+          "archetype": "runner",
+          "alive": true,
+          "health": 100,
+          "armor": 50,
+          "score": 0,
+          "weapon": "plasma",
+          "targetOwner": null,
+          "targetVisible": false,
+          "wantsToFire": false,
+          "facingDot": -1,
+          "grounded": true,
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "stepSuccesses": 0,
+          "shotsFired": 0,
+          "navigationTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "modelReady": true,
+          "modelHeight": 1.7799999713897705,
+          "modelCenterY": 0.8899999856948817,
+          "modelWidth": 0.7241752734896636,
+          "modelDepth": 0.5479888366124612,
+          "modelCenterX": -0.014805008110954532,
+          "modelCenterZ": 0.0800008945892614,
+          "modelMeshCount": 6,
+          "renderedMeshCount": 0,
+          "characterSource": "combat-trooper",
+          "runtimeBoneCount": 62,
+          "runtimeAnimationCount": 24,
+          "sourceTriangleCount": 30757,
+          "sourceTextureCount": 24,
+          "animationName": "idle_gun",
+          "roleHardwareProfile": "RUNNER",
+          "roleHardwareMeshCount": 0,
+          "weaponModel": null,
+          "weaponSupportGripError": 0,
+          "weaponSwitches": 0,
+          "bunnyHops": 0,
+          "jetpackActive": false,
+          "jetpackBursts": 0,
+          "jetpackCharge": 1,
+          "jetpackLocked": false,
+          "dashCooldown": 0,
+          "dashesUsed": 0,
+          "aimErrorDegrees": 0,
+          "aimTracking": 0,
+          "reactionRemaining": 0.17904,
+          "grenadesThrown": 0,
+          "grapplesUsed": 0,
+          "grenadesRemaining": 3,
+          "grappleActive": false,
+          "collisionRecoveries": 0,
+          "stalledFor": 0,
+          "wallContacts": 0,
+          "ceilingContacts": 0,
+          "position": {
+            "x": 178,
+            "y": 28.28845741687878,
+            "z": 136
+          }
+        }
+      ],
+      "fighters": [],
+      "drones": [
+        {
+          "id": "drone-1",
+          "alive": true,
+          "health": 225,
+          "maxHealth": 225,
+          "state": "patrol",
+          "targetOwner": null,
+          "respawnSeconds": 0,
+          "shotsFired": 0,
+          "beamActive": false,
+          "beamVisible": false,
+          "beamUptimeSeconds": 0,
+          "beamDamageTicks": 0,
+          "beamMissTicks": 0,
+          "beamOnTarget": false,
+          "aimErrorDegrees": 0,
+          "beamLayers": 4,
+          "beamHalos": 6,
+          "beamParticles": 24,
+          "explosions": 0,
+          "respawns": 0,
+          "collisionRadius": 1.7,
+          "collisionHits": 0,
+          "modelReady": true,
+          "modelMeshCount": 4,
+          "modelWidth": 2.677316399902395,
+          "modelHeight": 3.4000000000000057,
+          "modelDepth": 2.988525199118783,
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": 178.5170852905443,
+            "y": 64.9511844566594,
+            "z": 70.67991411545816
+          },
+          "velocity": {
+            "x": -1.4724982107387117,
+            "y": 0,
+            "z": 3.719105943553006
+          }
+        },
+        {
+          "id": "drone-2",
+          "alive": true,
+          "health": 225,
+          "maxHealth": 225,
+          "state": "patrol",
+          "targetOwner": null,
+          "respawnSeconds": 0,
+          "shotsFired": 0,
+          "beamActive": false,
+          "beamVisible": false,
+          "beamUptimeSeconds": 0,
+          "beamDamageTicks": 0,
+          "beamMissTicks": 0,
+          "beamOnTarget": false,
+          "aimErrorDegrees": 0,
+          "beamLayers": 4,
+          "beamHalos": 6,
+          "beamParticles": 24,
+          "explosions": 0,
+          "respawns": 0,
+          "collisionRadius": 1.7,
+          "collisionHits": 0,
+          "modelReady": true,
+          "modelMeshCount": 4,
+          "modelWidth": 2.677316399902395,
+          "modelHeight": 3.3999999999999986,
+          "modelDepth": 2.988525199118783,
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": -150.46914380656122,
+            "y": 35.46344644096582,
+            "z": 119.26037381343562
+          },
+          "velocity": {
+            "x": -2.484591121113242,
+            "y": 0,
+            "z": -3.134773829303359
+          }
+        },
+        {
+          "id": "drone-3",
+          "alive": true,
+          "health": 225,
+          "maxHealth": 225,
+          "state": "patrol",
+          "targetOwner": null,
+          "respawnSeconds": 0,
+          "shotsFired": 0,
+          "beamActive": false,
+          "beamVisible": false,
+          "beamUptimeSeconds": 0,
+          "beamDamageTicks": 0,
+          "beamMissTicks": 0,
+          "beamOnTarget": false,
+          "aimErrorDegrees": 0,
+          "beamLayers": 4,
+          "beamHalos": 6,
+          "beamParticles": 24,
+          "explosions": 0,
+          "respawns": 0,
+          "collisionRadius": 1.7,
+          "collisionHits": 0,
+          "modelReady": true,
+          "modelMeshCount": 4,
+          "modelWidth": 2.677316399902395,
+          "modelHeight": 3.3999999999999986,
+          "modelDepth": 2.9885251991188113,
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": -28.047941483983188,
+            "y": 46.74424356603476,
+            "z": -189.94028792889372
+          },
+          "velocity": {
+            "x": 3.957089331851953,
+            "y": 0,
+            "z": -0.5843321142496497
+          }
+        }
+      ],
+      "flamethrowerDrones": [
+        {
+          "id": "grenadier-1",
+          "kind": "grenadier",
+          "alive": true,
+          "health": 280,
+          "maxHealth": 280,
+          "state": "patrol",
+          "targetOwner": null,
+          "fireCooldown": 1.4,
+          "jumpCooldown": 5.5,
+          "respawnSeconds": 0,
+          "shotsFired": 0,
+          "jumps": 0,
+          "landings": 0,
+          "distanceWalked": 0,
+          "collisionRadius": 1.48,
+          "collisionHits": 0,
+          "modelReady": true,
+          "partCount": 9,
+          "rigNodeCount": 10,
+          "sourceTriangles": 165472,
+          "sourceAnimationCount": 0,
+          "sourceSkinCount": 0,
+          "animationSource": "runtime-rigid",
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": -120,
+            "y": 30.75626361575542,
+            "z": -116
+          },
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "id": "grenadier-2",
+          "kind": "grenadier",
+          "alive": true,
+          "health": 280,
+          "maxHealth": 280,
+          "state": "patrol",
+          "targetOwner": null,
+          "fireCooldown": 1.95,
+          "jumpCooldown": 7.2,
+          "respawnSeconds": 0,
+          "shotsFired": 0,
+          "jumps": 0,
+          "landings": 0,
+          "distanceWalked": 0,
+          "collisionRadius": 1.48,
+          "collisionHits": 0,
+          "modelReady": true,
+          "partCount": 9,
+          "rigNodeCount": 10,
+          "sourceTriangles": 165472,
+          "sourceAnimationCount": 0,
+          "sourceSkinCount": 0,
+          "animationSource": "runtime-rigid",
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": 320,
+            "y": 60.674139492639654,
+            "z": -80
+          },
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "id": "grenadier-3",
+          "kind": "grenadier",
+          "alive": true,
+          "health": 280,
+          "maxHealth": 280,
+          "state": "patrol",
+          "targetOwner": null,
+          "fireCooldown": 2.5,
+          "jumpCooldown": 8.9,
+          "respawnSeconds": 0,
+          "shotsFired": 0,
+          "jumps": 0,
+          "landings": 0,
+          "distanceWalked": 0,
+          "collisionRadius": 1.48,
+          "collisionHits": 0,
+          "modelReady": true,
+          "partCount": 9,
+          "rigNodeCount": 10,
+          "sourceTriangles": 165472,
+          "sourceAnimationCount": 0,
+          "sourceSkinCount": 0,
+          "animationSource": "runtime-rigid",
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": 12,
+            "y": 59.497712477751385,
+            "z": -280
+          },
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ],
+      "flamethrowerGrenade": {
+        "launched": 0,
+        "explosions": 0,
+        "botHits": 0,
+        "lastBotHit": null,
+        "sourceId": "",
+        "targetOwner": null,
+        "origin": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "velocity": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "lastExplosionPosition": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        }
+      },
+      "busterDrones": [
+        {
+          "id": "buster-1",
+          "kind": "buster",
+          "alive": true,
+          "health": 337.5,
+          "maxHealth": 337.5,
+          "healthMultiplier": 1.5,
+          "state": "spool",
+          "flightPattern": "figure-eight",
+          "targetOwner": null,
+          "respawnSeconds": 0,
+          "collisionRadius": 2.45,
+          "collisionHits": 0,
+          "shotsFired": 0,
+          "shardsFired": 0,
+          "shardHits": 0,
+          "shardWorldImpacts": 0,
+          "activeShards": 0,
+          "gazeDot": -1,
+          "gazeThreshold": 0.9902680687415704,
+          "lookingAtTarget": false,
+          "aimErrorDegrees": 0,
+          "takeoffElapsed": 0,
+          "takeoffs": 0,
+          "landings": 0,
+          "grounded": true,
+          "explosions": 0,
+          "respawns": 0,
+          "modelReady": true,
+          "modelMeshCount": 38,
+          "modelWidth": 5.400000000000034,
+          "modelHeight": 3.4620465812279804,
+          "modelDepth": 3.1370130791654844,
+          "rigNodeCount": 34,
+          "animationClipName": "Start_Liftoff",
+          "animationClipDuration": 25,
+          "animationTime": 3.6,
+          "animationPlaying": true,
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": 163.18054137566455,
+            "y": 66.4691252974431,
+            "z": -197.25139015060205
+          },
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "id": "buster-2",
+          "kind": "buster",
+          "alive": true,
+          "health": 337.5,
+          "maxHealth": 337.5,
+          "healthMultiplier": 1.5,
+          "state": "spool",
+          "flightPattern": "vertical-sweep",
+          "targetOwner": null,
+          "respawnSeconds": 0,
+          "collisionRadius": 2.45,
+          "collisionHits": 0,
+          "shotsFired": 0,
+          "shardsFired": 0,
+          "shardHits": 0,
+          "shardWorldImpacts": 0,
+          "activeShards": 0,
+          "gazeDot": -1,
+          "gazeThreshold": 0.9902680687415704,
+          "lookingAtTarget": false,
+          "aimErrorDegrees": 0,
+          "takeoffElapsed": 0,
+          "takeoffs": 0,
+          "landings": 0,
+          "grounded": true,
+          "explosions": 0,
+          "respawns": 0,
+          "modelReady": true,
+          "modelMeshCount": 38,
+          "modelWidth": 5.400000000000034,
+          "modelHeight": 3.4620465812279804,
+          "modelDepth": 3.1370130791654844,
+          "rigNodeCount": 34,
+          "animationClipName": "Start_Liftoff",
+          "animationClipDuration": 25,
+          "animationTime": 3.6,
+          "animationPlaying": true,
+          "loadError": null,
+          "targetedByBots": 0,
+          "position": {
+            "x": -163.1805413756645,
+            "y": 49.34693705451306,
+            "z": 197.2513901506021
+          },
+          "velocity": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ],
+      "busterShardPool": {
+        "active": 0,
+        "capacity": 36,
+        "speed": 68,
+        "damage": 17,
+        "lastSourceId": "",
+        "lastTargetOwner": null,
+        "lastWorldImpact": false,
+        "lastOrigin": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "lastImpact": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        }
+      },
+      "projectiles": 0,
+      "grenades": 0,
+      "grenadeStates": [],
+      "grapple": {
+        "active": false,
+        "anchor": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "length": 0,
+        "distance": 501.6661537785251,
+        "maxLength": 60.96
+      },
+      "tracers": 0,
+      "pickups": [
+        {
+          "kind": "health",
+          "active": true,
+          "modelName": "health-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": -116,
+            "y": 34.08489541014921,
+            "z": -84
+          },
+          "supportY": 34.07289541014921,
+          "hasAuthoredWeapon": false
+        },
+        {
+          "kind": "health",
+          "active": true,
+          "modelName": "health-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": 136,
+            "y": 45.14935915053862,
+            "z": 68
+          },
+          "supportY": 45.13735915053862,
+          "hasAuthoredWeapon": false
+        },
+        {
+          "kind": "armor",
+          "active": true,
+          "modelName": "armor-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": -196,
+            "y": 40.25361297389803,
+            "z": 56
+          },
+          "supportY": 40.24161297389803,
+          "hasAuthoredWeapon": false
+        },
+        {
+          "kind": "damage",
+          "active": true,
+          "modelName": "damage-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": 0,
+            "y": 12.936670285216287,
+            "z": -62
+          },
+          "supportY": 12.924670285216287,
+          "hasAuthoredWeapon": false
+        },
+        {
+          "kind": "speed",
+          "active": true,
+          "modelName": "speed-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": 224,
+            "y": 91.02442065921356,
+            "z": -176
+          },
+          "supportY": 91.01242065921356,
+          "hasAuthoredWeapon": false
+        },
+        {
+          "kind": "rail",
+          "active": true,
+          "modelName": "rail-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": -316,
+            "y": 106.44417688036714,
+            "z": 192
+          },
+          "supportY": 106.43217688036714,
+          "hasAuthoredWeapon": true
+        },
+        {
+          "kind": "rocket",
+          "active": true,
+          "modelName": "rocket-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": -296,
+            "y": 102.00605771672092,
+            "z": -172
+          },
+          "supportY": 101.99405771672092,
+          "hasAuthoredWeapon": true
+        },
+        {
+          "kind": "disc",
+          "active": true,
+          "modelName": "disc-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": -292.8,
+            "y": 103.6062723712496,
+            "z": -173.8
+          },
+          "supportY": 103.5942723712496,
+          "hasAuthoredWeapon": true
+        },
+        {
+          "kind": "plasma",
+          "active": true,
+          "modelName": "plasma-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": 226,
+            "y": 54.38513488339386,
+            "z": 126
+          },
+          "supportY": 54.37313488339386,
+          "hasAuthoredWeapon": true
+        },
+        {
+          "kind": "shotgun",
+          "active": true,
+          "modelName": "shotgun-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": 32,
+            "y": 29.769161773304006,
+            "z": -172
+          },
+          "supportY": 29.757161773304006,
+          "hasAuthoredWeapon": true
+        },
+        {
+          "kind": "sniper",
+          "active": true,
+          "modelName": "sniper-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": 278,
+            "y": 70.06395633082464,
+            "z": 186
+          },
+          "supportY": 70.05195633082464,
+          "hasAuthoredWeapon": true
+        },
+        {
+          "kind": "laser",
+          "active": true,
+          "modelName": "laser-grounded-pickup",
+          "groundOffset": 0,
+          "position": {
+            "x": -156,
+            "y": 65.88475644665324,
+            "z": 272
+          },
+          "supportY": 65.87275644665324,
+          "hasAuthoredWeapon": true
+        }
+      ],
+      "coreProgress": 0,
+      "core": {
+        "phase": "telegraph",
+        "active": false,
+        "contested": false,
+        "owner": null,
+        "location": "RIFT NEXUS",
+        "nextLocation": "RIFT NEXUS",
+        "secondsRemaining": 6,
+        "cycle": 0,
+        "captures": 0
+      },
+      "style": {
+        "meter": 0,
+        "comboCount": 0,
+        "comboMultiplier": 1,
+        "lastMedal": null
+      },
+      "weather": {
+        "phase": "calm",
+        "label": "CLEAR CONDITIONS",
+        "secondsRemaining": 42,
+        "severity": 0,
+        "windDirection": {
+          "x": 0.7783147246631186,
+          "z": -0.6278743420244006
+        },
+        "windStrength": 0,
+        "multipliers": {
+          "airControlMultiplier": 1,
+          "groundFrictionMultiplier": 1,
+          "groundTractionMultiplier": 1,
+          "projectileDriftMultiplier": 0,
+          "visibilityMultiplier": 1
+        },
+        "visuals": {
+          "source": "autonomous",
+          "phase": "autonomous",
+          "label": "AUTONOMOUS WEATHER",
+          "severity": 0,
+          "rainIntensity": 0.07,
+          "visualWindStrength": 0.58,
+          "windDirection": {
+            "x": 0.8843847528469697,
+            "z": 0.4667586195581229
+          },
+          "visibilityMultiplier": 1
+        }
+      },
+      "map": {
+        "name": "Monsoon Divide",
+        "seed": 450600,
+        "generationVersion": 6,
+        "ready": true,
+        "topologyHash": "7a2fae86",
+        "bounds": {
+          "width": 960,
+          "depth": 800
+        },
+        "altitudeRange": {
+          "min": -38,
+          "max": 163.2616006532987
+        },
+        "renderTriangles": 24000,
+        "collisionTriangles": 32412,
+        "spawnCount": 15,
+        "pickupCount": 11,
+        "jumpPadCount": 6,
+        "skiRoutes": 6
+      },
+      "lighting": {
+        "profile": "monsoon",
+        "key": {
+          "color": "#ffe1b7",
+          "intensity": 3.45,
+          "position": {
+            "x": 155,
+            "y": 228,
+            "z": 118
+          },
+          "target": {
+            "x": 0,
+            "y": 18.61307951858832,
+            "z": 0
+          }
+        },
+        "fillIntensity": 0.23,
+        "rimIntensity": 0.38,
+        "environmentIntensity": 0.58,
+        "exposure": 0.95,
+        "shadow": {
+          "type": "PCFShadowMap",
+          "mapSize": 2048,
+          "extent": 499.20000000000005,
+          "bias": -0.00008,
+          "normalBias": 0.032,
+          "casters": 60,
+          "receivers": 196
+        },
+        "contactShadows": {
+          "sources": 12,
+          "visible": 8,
+          "drawCalls": 1
+        }
+      },
+      "fog": {
+        "type": "linear",
+        "color": "#86a2aa",
+        "near": 260,
+        "far": 1300
+      },
+      "player": {
+        "position": {
+          "x": -336,
+          "y": 168,
+          "z": 332
+        },
+        "velocity": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "speed": 0,
+        "rocketJumpCount": 0,
+        "grounded": false,
+        "skiing": false,
+        "jetpacking": false,
+        "jetpackCharge": 1,
+        "jetpackLocked": false,
+        "jetpackPhase": "ready",
+        "jetpackRechargeDelay": 0,
+        "jetpackRestartIn": 0,
+        "jetpackArmed": false,
+        "dashCooldown": 0,
+        "jumpPadCooldown": 0,
+        "wallJumpCount": 0,
+        "wallJumpCooldown": 0,
+        "wallJumpAirLockout": false,
+        "doubleJumpCount": 0,
+        "knockbackLockout": 0,
+        "wallContact": false,
+        "ceilingContact": false,
+        "yaw": -0.7913861157813615,
+        "pitch": -0.30630604852847304,
+        "modelReady": true,
+        "modelMeshCount": 6,
+        "modelHeight": 1.7799999713897705,
+        "modelWidth": 0.7223762035673644,
+        "modelDepth": 0.7220316809619476,
+        "avatarVisible": false,
+        "firstPersonWeaponVisible": true,
+        "thirdPersonWeaponVisible": false,
+        "thirdPersonWeapon": "disc",
+        "thirdPersonWeaponMeshes": 26,
+        "characterSource": "combat-trooper",
+        "runtimeBoneCount": 62,
+        "runtimeAnimationCount": 24,
+        "sourceTriangleCount": 30757,
+        "sourceTextureCount": 24,
+        "animationName": "idle_gun",
+        "weaponSupportGripError": 0
+      },
+      "camera": {
+        "distance": 0.9642857142857224,
+        "position": {
+          "x": -336,
+          "y": 168.96428571428572,
+          "z": 332
+        },
+        "thirdPersonObstructed": false
+      },
+      "speedEffects": {
+        "thresholdKmh": 70,
+        "fullIntensityKmh": 402.336,
+        "playerSpeedKmh": 0,
+        "blurIntensity": 0,
+        "activeTrailSources": 0
+      },
+      "skiMomentum": {
+        "speedKmh": 0,
+        "resistance": 0,
+        "dragAcceleration": 0
+      },
+      "physics": {
+        "engine": "fixed-step-capsule-heightfield-bvh",
+        "timestep": 0.008333333333333333,
+        "bodies": 4,
+        "colliders": 32415,
+        "ccdBodies": 1,
+        "sensors": 12,
+        "contacts": 0,
+        "groundNormal": {
+          "x": 0,
+          "y": 1,
+          "z": 0
+        },
+        "ccd": {
+          "sweeps": 0,
+          "wallHits": 0,
+          "ceilingHits": 0,
+          "boundaryHits": 0
+        },
+        "stairs": {
+          "attempts": 0,
+          "successes": 0,
+          "lastReason": "none",
+          "lastRise": 0,
+          "blockedDistance": 0,
+          "travelDistance": 0,
+          "inputDistance": 0,
+          "raisedSpeed": 0,
+          "startSpeed": 0,
+          "finalSpeed": 0
+        }
+      },
+      "renderer": {
+        "calls": 288,
+        "triangles": 37592,
+        "geometries": 102,
+        "textures": 16,
+        "activeWeaponVfx": 0,
+        "activeSurfaceMarks": 0,
+        "activeTracers": 0,
+        "activeSoftSmoke": 0,
+        "smokeTextureSource": "procedural-soft-density",
+        "tracerTextureSource": "procedural-longitudinal-energy-ramp",
+        "weaponWearMaterials": 5,
+        "weaponWearTextures": 4,
+        "weaponAssetSource": "procedural",
+        "weaponModelMeshes": 296,
+        "weaponRenderMeshes": 26,
+        "weaponModelTriangles": 68552,
+        "weaponTuck": 0,
+        "weaponObstructionDistance": 3.35,
+        "weaponViewPosition": {
+          "x": 0.3,
+          "y": -0.54,
+          "z": -0.5
+        },
+        "weaponViewRotation": {
+          "x": 0.011367704632738165,
+          "y": 0.006315705498437864,
+          "z": 0
+        },
+        "weaponMuzzleDistance": 1.579632009117519,
+        "weaponMuzzleForwardDistance": 1.4910503791336203,
+        "weaponMuzzleOccluded": false,
+        "weaponPulseIntensity": 0
+      },
+      "combat": {
+        "lastDamageDirection": "",
+        "lastDamageBearing": 0,
+        "lastHitDamage": 0,
+        "weaponCooldown": 0,
+        "secondaryAbility": "Overdrive ricochet",
+        "altFireHeld": false,
+        "continuousLaserActive": false,
+        "continuousLaserBend": 0,
+        "lastPelletCount": 0,
+        "lastPelletSpread": 0,
+        "discBounceCount": 0,
+        "lastDiscBouncePosition": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "lastShotWeapon": null,
+        "lastShotOrigin": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "lastMuzzlePosition": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "lastProjectileOrigin": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "muzzleOffset": 0,
+        "projectileMuzzleOffset": null
+      },
+      "canvas": {
+        "clientWidth": 1280,
+        "clientHeight": 720,
+        "width": 1280,
+        "height": 720,
+        "dpr": 1
+      },
+      "pointerLocked": false,
+      "scope": {
+        "active": false,
+        "blend": 0,
+        "range": 190.00000000000003,
+        "zoom": 1
+      },
+      "audio": {
+        "supported": true,
+        "contextState": "uninitialized",
+        "unlocked": false,
+        "muted": false,
+        "paused": true,
+        "visibilitySuspended": false,
+        "loading": false,
+        "expectedAssets": 111,
+        "loadedAssets": 0,
+        "missingAssets": 0,
+        "fallbackMode": false,
+        "activeVoices": 0,
+        "activeVoicesByPool": {},
+        "jetpackActive": false,
+        "laserBeamActive": false,
+        "droneBeamVoices": 0,
+        "droneBeamAssetReady": false,
+        "lastEvent": "",
+        "playCounts": {},
+        "resets": 0
+      }
+    }
+  },
+  "consoleErrors": [],
+  "pageErrors": []
+}

@@ -1076,6 +1076,83 @@ body[data-view-mode="third-person"] #scope-overlay {
   }
 }
 
+.mode-picker {
+  margin-top: 18px;
+}
+
+.mode-picker-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.mode-choice {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-height: 72px;
+  padding: 11px 12px;
+  border: 1px solid rgba(103, 214, 255, 0.18);
+  color: var(--text);
+  background: rgba(7, 15, 29, 0.62);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.mode-choice:hover,
+.mode-choice:focus-visible {
+  border-color: rgba(67, 232, 255, 0.72);
+  background: rgba(17, 36, 58, 0.78);
+  transform: translateY(-1px);
+}
+
+.mode-choice.active {
+  border-color: var(--cyan);
+  background: linear-gradient(135deg, rgba(67, 232, 255, 0.16), rgba(255, 61, 141, 0.08));
+  box-shadow: inset 3px 0 0 var(--cyan), 0 0 18px rgba(67, 232, 255, 0.08);
+}
+
+.mode-choice-index {
+  color: var(--cyan);
+  font-family: var(--font-display);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+}
+
+.mode-choice-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.mode-choice-copy strong {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+}
+
+.mode-choice-copy small {
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.25;
+}
+
+.standing-row[data-team="AZURE"] .standing-state {
+  color: var(--cyan);
+}
+
+.standing-row[data-team="CRIMSON"] .standing-state,
+.standing-row[data-team="HOSTILES"] .standing-state {
+  color: var(--danger);
+}
+
+@media (max-width: 560px) {
+  .mode-picker-options {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Star Sparrow vehicle affordance and cockpit rail. */
 #fighter-prompt {
   position: fixed;
@@ -2825,6 +2902,464 @@ body[data-piloting-fighter="true"] #crosshair { opacity: 0; }
   .deploy-rail {
     margin: 0 -22px 10px;
     padding: 0 22px;
+  }
+}
+
+/* Continuation CTA: final cascade over the legacy menu layers. */
+#start-button:not([data-loading="true"]) {
+  min-height: 58px;
+  padding: 0 12px 0 20px;
+  overflow: hidden;
+  border: 1px solid rgba(104, 235, 255, 0.72);
+  border-right-color: rgba(164, 248, 255, 0.94);
+  background: linear-gradient(90deg, rgba(7, 29, 39, 0.98) 0 76%, rgba(18, 105, 121, 0.98) 76% 100%);
+  color: #e6fbff;
+  text-shadow: 0 0 12px rgba(106, 239, 255, 0.22);
+  box-shadow: inset 0 1px 0 rgba(224, 253, 255, 0.22), inset 0 -1px 0 rgba(1, 8, 13, 0.84), 0 0 26px rgba(72, 232, 255, 0.1);
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, filter 140ms linear, transform 100ms ease;
+}
+
+#start-button:not([data-loading="true"])::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--cyan);
+  box-shadow: 0 0 16px rgba(72, 232, 255, 0.68);
+}
+
+#start-button:not([data-loading="true"])::after {
+  position: absolute;
+  right: 11px;
+  bottom: 7px;
+  left: 20px;
+  width: auto;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, rgba(72, 232, 255, 0.8), rgba(72, 232, 255, 0.12) 62%, transparent);
+  box-shadow: none;
+}
+
+#start-button:not([data-loading="true"]) span {
+  position: relative;
+  z-index: 1;
+  letter-spacing: 0.18em;
+}
+
+#start-button:not([data-loading="true"]) i {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin-left: 18px;
+  border-left: 1px solid rgba(190, 249, 255, 0.34);
+  color: #c9f9ff;
+  font-size: 1.8rem;
+  line-height: 1;
+  text-shadow: 0 0 14px rgba(72, 232, 255, 0.6);
+}
+
+#start-button:not([data-loading="true"]):hover {
+  border-color: rgba(188, 250, 255, 0.96);
+  background: linear-gradient(90deg, rgba(9, 42, 53, 0.99) 0 76%, rgba(30, 141, 156, 0.99) 76% 100%);
+  box-shadow: inset 0 1px 0 rgba(240, 255, 255, 0.3), 0 0 32px rgba(72, 232, 255, 0.2);
+  filter: none;
+}
+
+#start-button:not([data-loading="true"]):focus-visible {
+  outline: 1px solid rgba(218, 253, 255, 0.98);
+  outline-offset: 4px;
+}
+
+#start-button:not([data-loading="true"]):active {
+  transform: translateY(2px);
+  filter: brightness(0.86);
+}
+
+#start-button:disabled {
+  box-shadow: none;
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"]) {
+  border-color: rgba(255, 198, 81, 0.78);
+  border-right-color: rgba(255, 231, 157, 0.94);
+  background: linear-gradient(90deg, rgba(40, 29, 13, 0.98) 0 76%, rgba(145, 91, 16, 0.98) 76% 100%);
+  color: #fff1c8;
+  text-shadow: 0 0 12px rgba(255, 191, 62, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255, 246, 204, 0.2), inset 0 -1px 0 rgba(13, 7, 1, 0.84), 0 0 26px rgba(255, 184, 47, 0.12);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"])::before {
+  background: var(--amber);
+  box-shadow: 0 0 16px rgba(255, 194, 71, 0.72);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"])::after {
+  background: linear-gradient(90deg, rgba(255, 194, 71, 0.86), rgba(255, 194, 71, 0.12) 62%, transparent);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"]):hover {
+  border-color: rgba(255, 236, 170, 0.98);
+  background: linear-gradient(90deg, rgba(57, 39, 13, 0.99) 0 76%, rgba(183, 119, 21, 0.99) 76% 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 250, 222, 0.28), 0 0 32px rgba(255, 184, 47, 0.2);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"]) {
+  border-color: rgba(255, 101, 158, 0.8);
+  border-right-color: rgba(255, 190, 216, 0.94);
+  background: linear-gradient(90deg, rgba(43, 10, 29, 0.98) 0 76%, rgba(145, 35, 82, 0.98) 76% 100%);
+  color: #ffe4ef;
+  text-shadow: 0 0 12px rgba(255, 63, 134, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255, 230, 241, 0.2), inset 0 -1px 0 rgba(14, 2, 8, 0.84), 0 0 26px rgba(255, 63, 134, 0.12);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"])::before {
+  background: var(--magenta);
+  box-shadow: 0 0 16px rgba(255, 63, 134, 0.72);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"])::after {
+  background: linear-gradient(90deg, rgba(255, 63, 134, 0.86), rgba(255, 63, 134, 0.12) 62%, transparent);
+}
+
+@media (pointer: coarse), (max-width: 760px) {
+  #start-button:not([data-loading="true"]) {
+    min-height: 54px;
+    padding-left: 17px;
+  }
+
+  #start-button:not([data-loading="true"]) i {
+    width: 34px;
+    height: 34px;
+    margin-left: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #start-button:not([data-loading="true"]) {
+    transition: none;
+  }
+}
+
+/* Final cascade for the continuation action. The CTA is treated as a
+   flight-system control: dark graphite body, hard cuts, and a single signal
+   color that follows the overlay state. */
+#start-button:not([data-loading="true"]) {
+  min-height: 58px;
+  padding: 0 12px 0 20px;
+  overflow: hidden;
+  border: 1px solid rgba(104, 235, 255, 0.72);
+  border-right-color: rgba(164, 248, 255, 0.94);
+  background:
+    linear-gradient(90deg, rgba(7, 29, 39, 0.98) 0 76%, rgba(18, 105, 121, 0.98) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 8px);
+  color: #e6fbff;
+  text-shadow: 0 0 12px rgba(106, 239, 255, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(224, 253, 255, 0.22),
+    inset 0 -1px 0 rgba(1, 8, 13, 0.84),
+    0 0 26px rgba(72, 232, 255, 0.1);
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, filter 140ms linear, transform 100ms ease;
+}
+
+#start-button:not([data-loading="true"])::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--cyan);
+  box-shadow: 0 0 16px rgba(72, 232, 255, 0.68);
+}
+
+#start-button:not([data-loading="true"])::after {
+  position: absolute;
+  right: 11px;
+  bottom: 7px;
+  left: 20px;
+  width: auto;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, rgba(72, 232, 255, 0.8), rgba(72, 232, 255, 0.12) 62%, transparent);
+  box-shadow: none;
+}
+
+#start-button:not([data-loading="true"]) span {
+  position: relative;
+  z-index: 1;
+  letter-spacing: 0.18em;
+}
+
+#start-button:not([data-loading="true"]) i {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin-left: 18px;
+  border-left: 1px solid rgba(190, 249, 255, 0.34);
+  color: #c9f9ff;
+  font-size: 1.8rem;
+  line-height: 1;
+  text-shadow: 0 0 14px rgba(72, 232, 255, 0.6);
+}
+
+#start-button:not([data-loading="true"]):hover {
+  border-color: rgba(188, 250, 255, 0.96);
+  background:
+    linear-gradient(90deg, rgba(9, 42, 53, 0.99) 0 76%, rgba(30, 141, 156, 0.99) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 8px);
+  box-shadow: inset 0 1px 0 rgba(240, 255, 255, 0.3), 0 0 32px rgba(72, 232, 255, 0.2);
+  filter: none;
+}
+
+#start-button:not([data-loading="true"]):focus-visible {
+  outline: 1px solid rgba(218, 253, 255, 0.98);
+  outline-offset: 4px;
+}
+
+#start-button:not([data-loading="true"]):active {
+  transform: translateY(2px);
+  filter: brightness(0.86);
+}
+
+#start-button:disabled {
+  box-shadow: none;
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"]) {
+  border-color: rgba(255, 198, 81, 0.78);
+  border-right-color: rgba(255, 231, 157, 0.94);
+  background:
+    linear-gradient(90deg, rgba(40, 29, 13, 0.98) 0 76%, rgba(145, 91, 16, 0.98) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.045) 0 1px, transparent 1px 8px);
+  color: #fff1c8;
+  text-shadow: 0 0 12px rgba(255, 191, 62, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255, 246, 204, 0.2), inset 0 -1px 0 rgba(13, 7, 1, 0.84), 0 0 26px rgba(255, 184, 47, 0.12);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"])::before {
+  background: var(--amber);
+  box-shadow: 0 0 16px rgba(255, 194, 71, 0.72);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"])::after {
+  background: linear-gradient(90deg, rgba(255, 194, 71, 0.86), rgba(255, 194, 71, 0.12) 62%, transparent);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"]):hover {
+  border-color: rgba(255, 236, 170, 0.98);
+  background:
+    linear-gradient(90deg, rgba(57, 39, 13, 0.99) 0 76%, rgba(183, 119, 21, 0.99) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 8px);
+  box-shadow: inset 0 1px 0 rgba(255, 250, 222, 0.28), 0 0 32px rgba(255, 184, 47, 0.2);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"]) {
+  border-color: rgba(255, 101, 158, 0.8);
+  border-right-color: rgba(255, 190, 216, 0.94);
+  background:
+    linear-gradient(90deg, rgba(43, 10, 29, 0.98) 0 76%, rgba(145, 35, 82, 0.98) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.045) 0 1px, transparent 1px 8px);
+  color: #ffe4ef;
+  text-shadow: 0 0 12px rgba(255, 63, 134, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255, 230, 241, 0.2), inset 0 -1px 0 rgba(14, 2, 8, 0.84), 0 0 26px rgba(255, 63, 134, 0.12);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"])::before {
+  background: var(--magenta);
+  box-shadow: 0 0 16px rgba(255, 63, 134, 0.72);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"])::after {
+  background: linear-gradient(90deg, rgba(255, 63, 134, 0.86), rgba(255, 63, 134, 0.12) 62%, transparent);
+}
+
+@media (pointer: coarse), (max-width: 760px) {
+  #start-button:not([data-loading="true"]) {
+    min-height: 54px;
+    padding-left: 17px;
+  }
+
+  #start-button:not([data-loading="true"]) i {
+    width: 34px;
+    height: 34px;
+    margin-left: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #start-button:not([data-loading="true"]) {
+    transition: none;
+  }
+}
+
+/* The continuation action should read like a flight-system control, not a
+   generic web button: graphite body, hard cuts, and one deliberate signal
+   color per overlay state. Keep this after the legacy menu layers so the
+   paused state is identical on desktop and touch layouts. */
+#start-button:not([data-loading="true"]) {
+  min-height: 58px;
+  padding: 0 12px 0 20px;
+  overflow: hidden;
+  border: 1px solid rgba(104, 235, 255, 0.72);
+  border-right-color: rgba(164, 248, 255, 0.94);
+  background:
+    linear-gradient(90deg, rgba(7, 29, 39, 0.98) 0 76%, rgba(18, 105, 121, 0.98) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 8px);
+  color: #e6fbff;
+  text-shadow: 0 0 12px rgba(106, 239, 255, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(224, 253, 255, 0.22),
+    inset 0 -1px 0 rgba(1, 8, 13, 0.84),
+    0 0 26px rgba(72, 232, 255, 0.1);
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, filter 140ms linear, transform 100ms ease;
+}
+
+#start-button:not([data-loading="true"])::before {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--cyan);
+  box-shadow: 0 0 16px rgba(72, 232, 255, 0.68);
+}
+
+#start-button:not([data-loading="true"])::after {
+  position: absolute;
+  right: 11px;
+  bottom: 7px;
+  left: 20px;
+  width: auto;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, rgba(72, 232, 255, 0.8), rgba(72, 232, 255, 0.12) 62%, transparent);
+  box-shadow: none;
+}
+
+#start-button:not([data-loading="true"]) span {
+  position: relative;
+  z-index: 1;
+  letter-spacing: 0.18em;
+}
+
+#start-button:not([data-loading="true"]) i {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin-left: 18px;
+  border-left: 1px solid rgba(190, 249, 255, 0.34);
+  color: #c9f9ff;
+  font-size: 1.8rem;
+  line-height: 1;
+  text-shadow: 0 0 14px rgba(72, 232, 255, 0.6);
+}
+
+#start-button:not([data-loading="true"]):hover {
+  border-color: rgba(188, 250, 255, 0.96);
+  background:
+    linear-gradient(90deg, rgba(9, 42, 53, 0.99) 0 76%, rgba(30, 141, 156, 0.99) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 8px);
+  box-shadow:
+    inset 0 1px 0 rgba(240, 255, 255, 0.3),
+    0 0 32px rgba(72, 232, 255, 0.2);
+  filter: none;
+}
+
+#start-button:not([data-loading="true"]):focus-visible {
+  outline: 1px solid rgba(218, 253, 255, 0.98);
+  outline-offset: 4px;
+}
+
+#start-button:not([data-loading="true"]):active {
+  transform: translateY(2px);
+  filter: brightness(0.86);
+}
+
+#start-button:disabled {
+  box-shadow: none;
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"]) {
+  border-color: rgba(255, 198, 81, 0.78);
+  border-right-color: rgba(255, 231, 157, 0.94);
+  background:
+    linear-gradient(90deg, rgba(40, 29, 13, 0.98) 0 76%, rgba(145, 91, 16, 0.98) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.045) 0 1px, transparent 1px 8px);
+  color: #fff1c8;
+  text-shadow: 0 0 12px rgba(255, 191, 62, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 204, 0.2),
+    inset 0 -1px 0 rgba(13, 7, 1, 0.84),
+    0 0 26px rgba(255, 184, 47, 0.12);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"])::before {
+  background: var(--amber);
+  box-shadow: 0 0 16px rgba(255, 194, 71, 0.72);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"])::after {
+  background: linear-gradient(90deg, rgba(255, 194, 71, 0.86), rgba(255, 194, 71, 0.12) 62%, transparent);
+}
+
+#start-overlay[data-mode="paused"] #start-button:not([data-loading="true"]):hover {
+  border-color: rgba(255, 236, 170, 0.98);
+  background:
+    linear-gradient(90deg, rgba(57, 39, 13, 0.99) 0 76%, rgba(183, 119, 21, 0.99) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 8px);
+  box-shadow: inset 0 1px 0 rgba(255, 250, 222, 0.28), 0 0 32px rgba(255, 184, 47, 0.2);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"]) {
+  border-color: rgba(255, 101, 158, 0.8);
+  border-right-color: rgba(255, 190, 216, 0.94);
+  background:
+    linear-gradient(90deg, rgba(43, 10, 29, 0.98) 0 76%, rgba(145, 35, 82, 0.98) 76% 100%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.045) 0 1px, transparent 1px 8px);
+  color: #ffe4ef;
+  text-shadow: 0 0 12px rgba(255, 63, 134, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 230, 241, 0.2),
+    inset 0 -1px 0 rgba(14, 2, 8, 0.84),
+    0 0 26px rgba(255, 63, 134, 0.12);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"])::before {
+  background: var(--magenta);
+  box-shadow: 0 0 16px rgba(255, 63, 134, 0.72);
+}
+
+#start-overlay[data-mode="complete"] #start-button:not([data-loading="true"])::after {
+  background: linear-gradient(90deg, rgba(255, 63, 134, 0.86), rgba(255, 63, 134, 0.12) 62%, transparent);
+}
+
+@media (pointer: coarse), (max-width: 760px) {
+  #start-button:not([data-loading="true"]) {
+    min-height: 54px;
+    padding-left: 17px;
+  }
+
+  #start-button:not([data-loading="true"]) i {
+    width: 34px;
+    height: 34px;
+    margin-left: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #start-button:not([data-loading="true"]) {
+    transition: none;
   }
 }
 

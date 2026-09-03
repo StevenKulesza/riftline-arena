@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" role="img" aria-label="Procedural Bipbeta2 vector chamber map preview">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop stop-color="#0d171e"/>
+      <stop offset="1" stop-color="#253943"/>
+    </linearGradient>
+    <linearGradient id="deck" x1="0" x2="0" y1="0" y2="1">
+      <stop stop-color="#718791"/>
+      <stop offset="1" stop-color="#354852"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <g opacity=".18" stroke="#9bc1cc" stroke-width="1">
+    <path d="M40 60h560M40 120h560M40 180h560M40 240h560M40 300h560"/>
+    <path d="M80 30v300M160 30v300M240 30v300M320 30v300M400 30v300M480 30v300M560 30v300"/>
+  </g>
+  <g transform="translate(320 180)">
+    <rect x="-270" y="-145" width="540" height="290" rx="18" fill="#1a272e" stroke="#8aa0a8" stroke-width="3"/>
+    <rect x="-238" y="-102" width="476" height="204" rx="10" fill="#4b5b63" stroke="#a6b7ba" stroke-width="2"/>
+    <rect x="-194" y="-73" width="388" height="146" rx="8" fill="#36474f" stroke="#80959b" stroke-width="2"/>
+    <rect x="-53" y="-96" width="106" height="192" rx="7" fill="#27383f" stroke="#bac7c8" stroke-width="2"/>
+    <path d="M-156-73L-67-33v66l-89 40zM15673L677-33v66l8940z" fill="#637984" opacity=".9"/>
+    <path d="M-238-102h476M-238102h476M-238-102v204M238-102v204" stroke="#ffb84d" stroke-width="4" stroke-dasharray="11 9" opacity=".85"/>
+    <path d="M-238-102L-194-73M238-102L194-73M-238102L-19473M238102L19473" stroke="#16d8eb" stroke-width="9" opacity=".9" filter="url(#glow)"/>
+    <path d="M-53-96L-194-73M53-96L194-73M-53 96L-194 73M53 96L194 73" stroke="#ff4c75" stroke-width="9" opacity=".9" filter="url(#glow)"/>
+    <circle r="20" fill="#f9bd50" stroke="#ffe4a0" stroke-width="3" filter="url(#glow)"/>
+    <circle cx="-162" cy="0" r="7" fill="#16d8eb"/><circle cx="162" cy="0" r="7" fill="#ff4c75"/>
+  </g>
+  <text x="34" y="38" fill="#dcecef" font-family="Arial, sans-serif" font-size="18" font-weight="700" letter-spacing="3">BIPBETA2</text>
+  <text x="35" y="337" fill="#8ba9b2" font-family="Arial, sans-serif" font-size="11" letter-spacing="2">VECTOR CHAMBER / FAST MOVEMENT</text>
+</svg>

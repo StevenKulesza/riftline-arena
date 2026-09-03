@@ -58,7 +58,9 @@ export type MapLightingDiagnostics = Readonly<{
   }>;
 }>;
 
-const MAX_CONTACT_SHADOWS = 16;
+// Reserve room for a full 8v8 roster plus vehicles and hostile drones. The
+// instanced contact layer stays a single draw even when every source is live.
+const MAX_CONTACT_SHADOWS = 32;
 const UP = new THREE.Vector3(0, 0, 1);
 const FLOOR_UP = new THREE.Vector3(0, 1, 0);
 const HIDDEN_POSITION = new THREE.Vector3(0, -1_000, 0);
@@ -86,25 +88,46 @@ const PROFILES = {
     skyIntensity: 0.76,
   },
   quicksense: {
-    ambientColor: 0x526a78,
-    ambientIntensity: 0.05,
-    environmentIntensity: 0.55,
-    exposure: 1,
-    fillColor: 0x8fc5e0,
-    fillIntensity: 0.22,
-    fillPosition: [20, 112, -245],
-    groundColor: 0x202726,
-    keyColor: 0xffd7ad,
-    keyIntensity: 3.4,
-    keyPosition: [-195, 260, -145],
+    // Warm desert key/fill preserves the concept's late-afternoon orange
+    // bounce while the restrained cyan rim keeps the route language legible.
+    ambientColor: 0x829ca8,
+    ambientIntensity: 0.13,
+    environmentIntensity: 0.64,
+    exposure: 1.03,
+    fillColor: 0x8fbad0,
+    fillIntensity: 0.34,
+    fillPosition: [-40, 132, 245],
+    groundColor: 0x3d2a20,
+    keyColor: 0xffd3a5,
+    keyIntensity: 2.78,
+    keyPosition: [255, 310, -210],
     normalBias: 0.022,
-    rimColor: 0x6fc4ff,
-    rimIntensity: 0.38,
+    rimColor: 0x6bc4dc,
+    rimIntensity: 0.34,
     rimPosition: [170, 118, 190],
-    skyColor: 0xa9ccdf,
-    skyIntensity: 0.63,
+    skyColor: 0xffc292,
+    skyIntensity: 0.72,
   },
-} as const satisfies Readonly<Record<'monsoon' | 'quicksense', LightingProfile>>;
+  bipbeta2: {
+    ambientColor: 0x9c8ab0,
+    ambientIntensity: 0.16,
+    environmentIntensity: 0.42,
+    exposure: 0.96,
+    fillColor: 0xa8c6d5,
+    fillIntensity: 0.34,
+    fillPosition: [-120, 92, 180],
+    groundColor: 0x101118,
+    keyColor: 0xffe3ca,
+    keyIntensity: 2.1,
+    keyPosition: [86, 150, 42],
+    normalBias: 0.025,
+    rimColor: 0xc786ff,
+    rimIntensity: 0.62,
+    rimPosition: [-120, 84, -140],
+    skyColor: 0x2a2034,
+    skyIntensity: 0.48,
+  },
+} as const satisfies Readonly<Record<'monsoon' | 'quicksense' | 'bipbeta2', LightingProfile>>;
 
 function createContactShadowTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
@@ -143,7 +166,7 @@ export class MapLightingRig {
   readonly environmentIntensity: number;
   readonly exposure: number;
 
-  private readonly profileName: 'monsoon' | 'quicksense';
+  private readonly profileName: 'monsoon' | 'quicksense' | 'bipbeta2';
   private readonly profile: LightingProfile;
   private readonly hemisphere: THREE.HemisphereLight;
   private readonly fill: THREE.DirectionalLight;
@@ -167,7 +190,7 @@ export class MapLightingRig {
     corePosition: THREE.Vector3,
     mobileQuality: boolean,
   ) {
-    this.profileName = mapName === 'QuickSense' ? 'quicksense' : 'monsoon';
+    this.profileName = mapName === 'QuickSense' ? 'quicksense' : mapName === 'Bipbeta2' ? 'bipbeta2' : 'monsoon';
     this.profile = PROFILES[this.profileName];
     this.environmentIntensity = this.profile.environmentIntensity;
     this.exposure = this.profile.exposure;
@@ -218,11 +241,11 @@ export class MapLightingRig {
     this.contactMaterial = new THREE.MeshBasicMaterial({
       name: 'SharedGroundingContactShadow',
       alphaMap: this.contactTexture,
-      color: this.profileName === 'quicksense' ? 0x10171c : 0x111b17,
+      color: this.profileName === 'quicksense' ? 0x10171c : this.profileName === 'bipbeta2' ? 0x100d16 : 0x111b17,
       depthTest: true,
       depthWrite: false,
       fog: true,
-      opacity: this.profileName === 'quicksense' ? 0.44 : 0.38,
+      opacity: this.profileName === 'quicksense' ? 0.44 : this.profileName === 'bipbeta2' ? 0.34 : 0.38,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       side: THREE.DoubleSide,

@@ -40,11 +40,13 @@ type RendererCounters = {
 
 async function loadHarness(): Promise<{
   computeFrameMetrics: (deltas: number[]) => FrameMetrics;
+  computeRenderedFrameMetrics: (samples: Array<{ frame: number; renderedAtMs: number }>) => FrameMetrics;
   summarizeRendererCounters: (diagnostics: unknown) => RendererCounters;
 }> {
   const harnessUrl = new URL('../scripts/profile-performance.mjs', import.meta.url).href;
   return import(harnessUrl) as Promise<{
     computeFrameMetrics: (deltas: number[]) => FrameMetrics;
+    computeRenderedFrameMetrics: (samples: Array<{ frame: number; renderedAtMs: number }>) => FrameMetrics;
     summarizeRendererCounters: (diagnostics: unknown) => RendererCounters;
   }>;
 }
@@ -81,6 +83,26 @@ test('1% low averages the full slowest percentile for larger captures', async ()
   expect(metrics.frameTimeMs.slowestOnePercentMean).toBeCloseTo(22.4, 5);
   expect(metrics.onePercentLowFps).toBeCloseTo(44.64, 2);
   expect(metrics.frameTimeMs.max).toBe(120);
+});
+
+test('strict FPS counts actual renders instead of skipped high-refresh callbacks', async () => {
+  const { computeRenderedFrameMetrics } = await loadHarness();
+  const samples = Array.from({ length: 201 }, (_, callback) => ({
+    frame: Math.floor(callback / 2),
+    renderedAtMs: Math.floor(callback / 2) * 20,
+  }));
+  const metrics = computeRenderedFrameMetrics(samples);
+  expect(metrics.frames).toBe(100);
+  expect(metrics.fps).toBe(50);
+  expect(metrics.onePercentLowFps).toBe(50);
+});
+
+test('strict rendered-frame metrics retain all stalls and reject missing instrumentation', async () => {
+  const { computeRenderedFrameMetrics } = await loadHarness();
+  const samples = Array.from({ length: 100 }, (_, frame) => ({ frame, renderedAtMs: frame * 10 }));
+  samples.push({ frame: 100, renderedAtMs: 1_100 });
+  expect(computeRenderedFrameMetrics(samples).onePercentLowFps).toBeCloseTo(1_000 / 110);
+  expect(() => computeRenderedFrameMetrics([])).toThrow('At least one positive finite frame delta');
 });
 
 test('renderer summary exposes stable draw, resource, VFX, and canvas counters', async () => {

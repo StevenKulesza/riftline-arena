@@ -18,6 +18,8 @@ export class Loop {
   private running = false;
   private readonly timing = {
     frame: 0,
+    renderedAtMs: 0,
+    frameIntervalMs: 0,
     refreshHz: 0,
     workStride: 1,
     updateMs: 0,
@@ -84,7 +86,8 @@ export class Loop {
       return;
     }
     const frameStartedAt = performance.now();
-    const deltaSeconds = Math.min((time - this.lastTime) / 1000, 0.05);
+    const frameIntervalMs = time - this.lastTime;
+    const deltaSeconds = Math.min(frameIntervalMs / 1000, 0.05);
     this.lastTime = time;
     this.update(deltaSeconds, time / 1000);
     const updateFinishedAt = performance.now();
@@ -92,6 +95,8 @@ export class Loop {
     const renderFinishedAt = performance.now();
     this.frame += 1;
     this.timing.frame = this.frame;
+    this.timing.frameIntervalMs = frameIntervalMs;
+    this.timing.renderedAtMs = time;
     this.timing.updateMs = updateFinishedAt - frameStartedAt;
     this.timing.renderMs = renderFinishedAt - updateFinishedAt;
     this.timing.totalMs = renderFinishedAt - frameStartedAt;

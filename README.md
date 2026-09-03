@@ -63,7 +63,7 @@ GitHub project Pages path as well as a root or custom domain.
 
 ## Match rules
 
-The six-minute match ends when a combatant reaches 20 points or time expires. Kills award one point. The central Flux Core activates after 30 seconds, requires an uncontested four-second hold, awards three points, and then cools down for 45 seconds. Damage and speed boosts last 15 seconds and respawn every 60 seconds. The railgun provides three shots and respawns every 45 seconds.
+The default Arena protocol is a six-minute free-for-all: the first combatant to 20 points wins, or the highest score wins at time. Optional team protocols are available with `?mode=tdm`, `?mode=ctf`, and `?mode=raid`. All three are true 8v8 matches (player + 7 allies versus 8 opponents); TDM reaches 20 team frags first, CTF reaches three captures, and Raid contests three uplinks while hostile drones add pressure. Friendly fire is disabled in team protocols. The Flux Core remains the Arena/TDM objective, while damage and speed boosts last 15 seconds and respawn every 60 seconds. The railgun provides three shots and respawns every 45 seconds.
 
 Riftline's game code, procedural weapon geometry, UI, and generated audio implementation are
 project work. The arena includes converted WCA1/Funpark geometry and selected materials from

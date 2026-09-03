@@ -4,6 +4,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { acceleratedRaycast, MeshBVH } from 'three-mesh-bvh';
 import { assetUrl } from '../assets/assetUrl';
 import type { WeatherGameplaySnapshot, WeatherPhase } from '../systems/WeatherGameplaySystem';
+import { GroundCoverCulling, partitionGroundCover, type GroundCoverProfile } from '../systems/GroundCoverCulling';
 import { MOVEMENT } from './config';
 import {
   MONSOON_DIVIDE,
@@ -22,11 +23,13 @@ import {
   type LaunchRampSpec,
 } from './maps/FlowGeometry';
 import { QuickSenseArena } from './maps/QuickSenseArena';
+import { Bipbeta2Arena } from './maps/Bipbeta2Arena';
 import { buildMonsoonDistantWorld } from './maps/MonsoonDistantWorld';
 import { buildMonsoonEncounterArt } from './maps/MonsoonEncounterArt';
 import { buildMonsoonOutpostTowers } from './maps/MonsoonOutpostTowers';
 import { buildMonsoonRouteInfrastructure } from './maps/MonsoonRouteInfrastructure';
 import { buildMonsoonWorldArt } from './maps/MonsoonWorldArt';
+import { buildMonsoonRockField, type MonsoonRockFieldBuild } from './maps/MonsoonRockField';
 
 // Runtime placement, traversal, and support all use the exact rendered
 // triangles. The analytic field remains the terrain generator's source only.
@@ -89,6 +92,7 @@ export interface ArenaRuntime {
   readonly itemPoints: Record<string, THREE.Vector3>;
   readonly mapInfo: ArenaMapInfo;
   update(elapsed: number, reducedMotion: boolean): void;
+  prepareRender?(camera: THREE.PerspectiveCamera): void;
   setWeatherGameplaySnapshot(snapshot: WeatherGameplaySnapshot | null): void;
   getWeatherVisualDiagnostics(): ArenaWeatherVisualDiagnostics;
   setPlayerInfluence(position: THREE.Vector3): void;
@@ -184,12 +188,6 @@ type AmbientLifeMeshes = {
   shadows: THREE.InstancedMesh;
   beetles: THREE.InstancedMesh;
   birds: THREE.InstancedMesh;
-};
-
-type ScatteredRock = {
-  position: THREE.Vector3;
-  quaternion: THREE.Quaternion;
-  scale: THREE.Vector3;
 };
 
 type GroundMark = {
@@ -323,12 +321,13 @@ export class Arena implements ArenaRuntime {
     wetRoughness: number;
   }> = [];
   private readonly geometries: THREE.BufferGeometry[] = [];
+  private readonly groundCoverCulling = new GroundCoverCulling();
   private readonly textures: THREE.Texture[] = [];
   private readonly colliders: ArenaCollider[] = [];
   private readonly rampSurfaces: RampSurface[] = [];
   private readonly platformSurfaces: PlatformSurface[] = [];
   private readonly concreteBoxes: THREE.Box3[] = [];
-  private readonly scatteredRocks: ScatteredRock[] = [];
+  private rockField!: MonsoonRockFieldBuild;
   private readonly animatedProps: AnimatedProp[] = [];
   private readonly collisionGeometry: THREE.BufferGeometry;
   private readonly boundsTree: MeshBVH;
@@ -430,7 +429,11 @@ export class Arena implements ArenaRuntime {
   private groundMarksDirty = false;
 
   static async load(): Promise<ArenaRuntime> {
-    if (new URLSearchParams(window.location.search).get('map') === 'quicksense') {
+    const map = new URLSearchParams(window.location.search).get('map');
+    if (map === 'bipbeta2') {
+      return Bipbeta2Arena.load(mapSeedFromLocation());
+    }
+    if (map === 'quicksense') {
       return QuickSenseArena.load(mapSeedFromLocation());
     }
     let skyTexture: THREE.Texture | undefined;
@@ -444,10 +447,16 @@ export class Arena implements ArenaRuntime {
     } catch (error) {
       console.warn('Monsoon sky panorama unavailable; using procedural fallback.', error);
     }
-    return new Arena(mapSeedFromLocation(), skyTexture);
+    return new Arena(
+      mapSeedFromLocation(),
+      skyTexture,
+    );
   }
 
-  private constructor(seed: number, skyTexture?: THREE.Texture) {
+  private constructor(
+    seed: number,
+    skyTexture?: THREE.Texture,
+  ) {
     this.seed = seed;
     this.skyTexture = skyTexture;
     if (skyTexture) this.textures.push(skyTexture);
@@ -487,7 +496,6 @@ export class Arena implements ArenaRuntime {
     this.registerGameplayColliders();
     this.registerConcreteTraversal();
     this.registerCoverLayout();
-    this.registerRockField();
     const worldArt = buildMonsoonWorldArt(seed);
     this.group.add(worldArt.group);
     this.geometries.push(...worldArt.geometries);
@@ -616,6 +624,9 @@ export class Arena implements ArenaRuntime {
     this.textures.push(...distantWorld.textures);
     this.distantWorldUpdate = distantWorld.update;
     this.group.userData.distantWorld = distantWorld.diagnostics;
+    // Place rocks after every building, platform, and stair is registered so
+    // the entire boulder footprint can respect their approaches.
+    this.registerRockField();
     const collisionParts = [this.positionOnlyGeometry(terrain.geometry)];
     for (const collider of this.colliders) collisionParts.push(this.geometryFromBox(collider.box));
     for (const ramp of this.rampSurfaces) {
@@ -781,6 +792,10 @@ export class Arena implements ArenaRuntime {
       ...this.weatherVisualDiagnostics,
       windDirection: { ...this.weatherVisualDiagnostics.windDirection },
     };
+  }
+
+  prepareRender(camera: THREE.PerspectiveCamera): void {
+    this.groundCoverCulling.update(camera);
   }
 
   setPlayerInfluence(position: THREE.Vector3): void {
@@ -1214,8 +1229,10 @@ export class Arena implements ArenaRuntime {
   }
 
   dispose(): void {
+    this.groundCoverCulling.clear();
     this.group.traverse((object) => {
       if ((object as THREE.SkinnedMesh).isSkinnedMesh) (object as THREE.SkinnedMesh).skeleton.dispose();
+      if ((object as THREE.InstancedMesh).isInstancedMesh) (object as THREE.InstancedMesh).dispose();
     });
     for (const ramp of this.rampSurfaces) ramp.flow.geometry.dispose();
     for (const geometry of new Set(this.geometries)) geometry.dispose();
@@ -1384,75 +1401,29 @@ export class Arena implements ArenaRuntime {
   }
 
   private registerRockField(): void {
-    const random = randomFactory(this.seed ^ 0x71a55eed);
-    const talusCenters: ReadonlyArray<readonly [number, number, number, number]> = [
-      [-184, 82, 34, 20], [-151, -62, 39, 24], [-56, 151, 43, 18],
-      [132, 101, 38, 24], [169, -74, 44, 21], [24, -151, 48, 18],
-      [-193, -116, 31, 17], [196, 38, 30, 23], [-18, 24, 51, 19],
+    const structureBoxes = [
+      ...this.colliders.map(({ box }) => box),
+      ...this.concreteBoxes,
+      ...this.platformSurfaces.map((platform) => new THREE.Box3(
+        new THREE.Vector3(platform.minX, 0, platform.minZ), new THREE.Vector3(platform.maxX, 0, platform.maxZ),
+      )),
+      ...this.rampSurfaces.map((ramp) => {
+        ramp.flow.geometry.computeBoundingBox();
+        return ramp.flow.geometry.boundingBox!;
+      }),
     ];
-    const clearOfCtfBases = (x: number, z: number): boolean => (
-      Math.hypot(x - mw(-85), z - mw(130)) > 250
-      && Math.hypot(x - mw(95), z - mw(-120)) > 250
-    );
-    const findPlacement = (): THREE.Vector3 => {
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        let x: number;
-        let z: number;
-        if (random() < 0.82) {
-          const [centerX, centerZ, radiusX, radiusZ] = talusCenters[Math.floor(random() * talusCenters.length)];
-          const angle = random() * Math.PI * 2;
-          const radius = Math.sqrt(random());
-          x = mw(centerX + Math.cos(angle) * radiusX * radius);
-          z = mw(centerZ + Math.sin(angle) * radiusZ * radius);
-        } else {
-          x = (random() - 0.5) * mw(440);
-          z = (random() - 0.5) * mw(370);
-        }
-        const y = sampleMonsoonHeight(x, z, this.seed);
-        const masks = sampleMonsoonMasks(x, z);
-        const normalY = sampleMonsoonNormal(x, z, new THREE.Vector3(), this.seed).y;
-        if (
-          y > MONSOON_DIVIDE.waterY + 3.5
-          && masks.route < 0.3
-          && masks.coast < 0.91
-          && normalY > 0.48
-          && clearOfCtfBases(x, z)
-          && !this.isConcreteFootprint(x, z)
-        ) {
-          return new THREE.Vector3(x, y, z);
-        }
-      }
-      return new THREE.Vector3(0, -100, 0);
-    };
-    for (let index = 0; index < 760; index += 1) {
-      const base = findPlacement();
-      const quaternion = new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(random() * 0.45, random() * Math.PI, random() * 0.35),
-      );
-      const sizeRoll = random();
-      const size = sizeRoll > 0.95
-        ? 5.5 + random() * 7.5
-        : sizeRoll > 0.72
-          ? 2.1 + random() * 3.8
-          : 0.55 + random() * 1.9;
-      const scale = new THREE.Vector3(
-        size * (0.72 + random() * 0.72),
-        size * (0.55 + random() * 0.72),
-        size * (0.7 + random() * 0.68),
-      );
-      const position = base.clone().add(new THREE.Vector3(0, scale.y * 0.26, 0));
-      this.scatteredRocks.push({ position, quaternion, scale });
-      if (base.y < -50 || size < 2.2) continue;
-      const halfX = Math.max(0.22, scale.x * 0.46);
-      const halfZ = Math.max(0.22, scale.z * 0.46);
-      this.colliders.push({
-        name: `talus-boulder-${index}`,
-        box: new THREE.Box3(
-          new THREE.Vector3(position.x - halfX, base.y, position.z - halfZ),
-          new THREE.Vector3(position.x + halfX, base.y + Math.max(0.48, scale.y * 0.86), position.z + halfZ),
-        ),
-      });
-    }
+    this.rockField = buildMonsoonRockField(this.seed, (x, z, radius) => (
+      structureBoxes.some((box) => Math.hypot(
+        x - THREE.MathUtils.clamp(x, box.min.x - 3, box.max.x + 3),
+        z - THREE.MathUtils.clamp(z, box.min.z - 3, box.max.z + 3),
+      ) <= radius)
+    ));
+    this.colliders.push(...this.rockField.colliderBoxes);
+    this.geometries.push(...this.rockField.geometries);
+    this.materials.push(this.rockField.material);
+    this.textures.push(...this.rockField.textures);
+    this.weatherResponsiveMaterials.push({ material: this.rockField.material, dryRoughness: 0.94, wetRoughness: 0.67 });
+    this.group.userData.rockField = this.rockField.diagnostics;
   }
 
   private registerConcreteTraversal(): void {
@@ -3023,14 +2994,16 @@ export class Arena implements ArenaRuntime {
       for (const [leafY, leafSide] of [[0.28, -1], [0.43, 1]] as const) {
         const center = root.clone().addScaledVector(bend, leafY / height).add(new THREE.Vector3(0, leafY, 0));
         const outward = side.clone().multiplyScalar(leafSide);
-        const tip = center.clone().addScaledVector(outward, 0.3).add(new THREE.Vector3(0, 0.09, 0));
-        const shoulderA = center.clone().addScaledVector(outward, 0.13).addScaledVector(forward, 0.07);
-        const shoulderB = center.clone().addScaledVector(outward, 0.13).addScaledVector(forward, -0.07);
+        const leafReach = 0.13 + stalk * 0.012;
+        const leafWidth = 0.024 + (stalk % 2) * 0.006;
+        const tip = center.clone().addScaledVector(outward, leafReach).add(new THREE.Vector3(0, 0.055, 0));
+        const shoulderA = center.clone().addScaledVector(outward, leafReach * 0.38).addScaledVector(forward, leafWidth);
+        const shoulderB = center.clone().addScaledVector(outward, leafReach * 0.38).addScaledVector(forward, -leafWidth);
         push([center, shoulderA, tip, center, tip, shoulderB], normal, leafColor);
       }
-      const headSide = side.clone().multiplyScalar(0.095);
-      const headBottom = top.clone().add(new THREE.Vector3(0, -0.08, 0));
-      const headTop = top.clone().add(new THREE.Vector3(0, 0.16, 0));
+      const headSide = side.clone().multiplyScalar(0.038 + (stalk % 2) * 0.008);
+      const headBottom = top.clone().add(new THREE.Vector3(0, -0.035, 0));
+      const headTop = top.clone().add(new THREE.Vector3(0, 0.09 + stalk * 0.008, 0));
       push([headBottom.clone().add(headSide), headBottom.clone().sub(headSide), headTop], normal, seedColor);
     }
     const geometry = new THREE.BufferGeometry();
@@ -3042,35 +3015,89 @@ export class Arena implements ArenaRuntime {
     return geometry;
   }
 
-  private createBoulderGeometry(variant: 0 | 1 | 2): THREE.BufferGeometry {
-    const geometry = new THREE.IcosahedronGeometry(1, 1);
-    const positions = geometry.getAttribute('position');
-    const point = new THREE.Vector3();
-    for (let index = 0; index < positions.count; index += 1) {
-      point.fromBufferAttribute(positions, index);
-      const direction = point.clone().normalize();
-      const fracture = 1
-        + Math.sin(direction.x * (7.1 + variant * 1.9) + direction.z * (3.1 + variant)) * (0.075 + variant * 0.018)
-        + Math.sin(direction.y * (10.3 + variant * 1.4) - direction.x * 4.6) * (0.055 + variant * 0.012)
-        + Math.sin((direction.x + direction.z) * (15.1 + variant * 2.8)) * 0.04;
-      point.multiplyScalar(fracture);
-      if (variant === 0) {
-        point.x *= 1.12;
-        point.y *= 0.82 + Math.max(0, direction.y) * 0.1;
-      } else if (variant === 1) {
-        point.z *= 1.18;
-        point.y *= 1.02 + Math.max(0, direction.y) * 0.16;
-        point.x += direction.y * 0.09;
-      } else {
-        point.x *= 0.92;
-        point.z *= 0.86;
-        point.y *= 1.2 + Math.max(0, direction.y) * 0.18;
-        point.z -= direction.y * 0.12;
+  /**
+   * Low-cost fern silhouette used for the mass understory tier. Nearby hero
+   * ferns keep individual leaflets; this tier keeps the radial,
+   * arcing fern read with broad segmented fronds at roughly one seventh of the
+   * vertex cost, which is the difference between a few patches and a jungle.
+   */
+  private createFernLodGeometry(variant: 0 | 1 | 2): THREE.BufferGeometry {
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const baseColor = new THREE.Color(variant === 0 ? 0x537d52 : variant === 1 ? 0x3f7150 : 0x688b5c);
+    const tipColor = new THREE.Color(variant === 0 ? 0x86a874 : variant === 1 ? 0x6d9a65 : 0x9eb781);
+    const stemColor = new THREE.Color(0x415f3c);
+    const frondCount = variant === 0 ? 5 : variant === 1 ? 6 : 4;
+    const leafletPairs = variant === 0 ? 6 : variant === 1 ? 7 : 5;
+    const pushTriangle = (
+      a: THREE.Vector3,
+      b: THREE.Vector3,
+      c: THREE.Vector3,
+      normal: THREE.Vector3,
+      color: THREE.Color,
+    ): void => {
+      for (const point of [a, b, c]) {
+        positions.push(point.x, point.y, point.z);
+        normals.push(normal.x, normal.y, normal.z);
+        colors.push(color.r, color.g, color.b);
       }
-      positions.setXYZ(index, point.x, point.y, point.z);
+    };
+    for (let frond = 0; frond < frondCount; frond += 1) {
+      const angle = frond / frondCount * Math.PI * 2 + variant * 0.29 + (frond % 2) * 0.13;
+      const forward = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+      const side = new THREE.Vector3(-forward.z, 0, forward.x);
+      const normal = new THREE.Vector3(forward.x * 0.2, 0.96, forward.z * 0.2).normalize();
+      const reach = (variant === 0 ? 1.06 : variant === 1 ? 1.32 : 0.88) * (0.9 + (frond % 3) * 0.08);
+      const rise = variant === 0 ? 0.92 : variant === 1 ? 0.66 : 1.1;
+      const curve = variant === 1 ? 0.68 : 0.42;
+      const sample = (t: number): THREE.Vector3 => forward.clone()
+        .multiplyScalar(reach * (t - t * t * 0.09))
+        .add(new THREE.Vector3(0, 0.035 + rise * (t - curve * t * t * 0.58), 0));
+      for (let segment = 0; segment < leafletPairs; segment += 1) {
+        const t0 = segment / leafletPairs;
+        const t1 = (segment + 1) / leafletPairs;
+        const stemA = sample(t0);
+        const stemB = sample(t1);
+        const stemWidth = 0.018 * (1 - t0 * 0.62);
+        pushTriangle(
+          stemA.clone().addScaledVector(side, stemWidth),
+          stemA.clone().addScaledVector(side, -stemWidth),
+          stemB,
+          normal,
+          stemColor,
+        );
+        if (segment === 0) continue;
+        const t = (segment + 0.12) / leafletPairs;
+        const center = sample(t);
+        const along = sample(Math.min(1, t + 0.06)).sub(center).normalize();
+        const taper = Math.sin(Math.PI * Math.pow(t, 0.86));
+        const leafLength = (variant === 1 ? 0.27 : variant === 2 ? 0.19 : 0.23) * (0.28 + taper * 0.86);
+        const leafWidth = leafLength * (0.14 + variant * 0.025);
+        const tint = baseColor.clone().lerp(tipColor, t * 0.68 + (frond % 3) * 0.06);
+        for (const leafSide of [-1, 1]) {
+          const outward = side.clone().multiplyScalar(leafSide);
+          const base = center.clone().addScaledVector(outward, 0.018);
+          const tip = base.clone()
+            .addScaledVector(outward, leafLength)
+            .addScaledVector(along, leafLength * 0.18)
+            .add(new THREE.Vector3(0, -leafLength * (variant === 1 ? 0.16 : 0.08), 0));
+          const shoulderA = base.clone()
+            .addScaledVector(outward, leafLength * 0.42)
+            .addScaledVector(along, leafWidth);
+          const shoulderB = base.clone()
+            .addScaledVector(outward, leafLength * 0.38)
+            .addScaledVector(along, -leafWidth * 0.76);
+          pushTriangle(base, shoulderA, tip, normal, tint);
+          pushTriangle(base, tip, shoulderB, normal, tint);
+        }
+      }
     }
-    positions.needsUpdate = true;
-    geometry.computeVertexNormals();
+    const geometry = new THREE.BufferGeometry();
+    geometry.name = `MonsoonProceduralMassFern${variant + 1}`;
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
     return geometry;
@@ -3084,7 +3111,7 @@ export class Arena implements ArenaRuntime {
     const tipColor = new THREE.Color(variant === 0 ? 0x9bb77a : variant === 1 ? 0x7eaa68 : 0xb0c587);
     const stemColor = new THREE.Color(0x536e45);
     const frondCount = variant === 0 ? 7 : variant === 1 ? 9 : 6;
-    const leafletPairs = variant === 2 ? 5 : 7;
+    const leafletPairs = variant === 0 ? 10 : variant === 1 ? 12 : 8;
     const pushTriangle = (
       a: THREE.Vector3,
       b: THREE.Vector3,
@@ -3122,8 +3149,8 @@ export class Arena implements ArenaRuntime {
         const t = (segment + 0.16) / leafletPairs;
         const center = sample(t);
         const taper = Math.sin(Math.PI * Math.pow(t, 0.82));
-        const leafLength = (variant === 1 ? 0.34 : variant === 2 ? 0.27 : 0.31) * (0.3 + taper * 0.86);
-        const leafWidth = leafLength * (variant === 1 ? 0.24 : 0.34);
+        const leafLength = (variant === 1 ? 0.23 : variant === 2 ? 0.18 : 0.21) * (0.28 + taper * 0.82);
+        const leafWidth = leafLength * (variant === 1 ? 0.18 : variant === 2 ? 0.24 : 0.21);
         const along = sample(Math.min(1, t + 0.05)).sub(center).normalize();
         for (const leafSide of [-1, 1]) {
           const outward = side.clone().multiplyScalar(leafSide);
@@ -3168,153 +3195,23 @@ export class Arena implements ArenaRuntime {
     return geometry;
   }
 
-  private createFoliageClumpGeometry(color: number, variation: number): THREE.BufferGeometry {
-    const source = new THREE.IcosahedronGeometry(1, 1);
-    const geometry = source.index ? source.toNonIndexed() : source;
-    if (geometry !== source) source.dispose();
-    const positions = geometry.getAttribute('position');
-    const normalAttribute = geometry.getAttribute('normal');
-    const point = new THREE.Vector3();
-    const base = new THREE.Color(color);
-    const shadow = base.clone().multiplyScalar(0.68);
-    const sunward = base.clone().lerp(new THREE.Color(0xc6d99a), 0.24);
-    const colors = new Float32Array(positions.count * 3);
-    for (let index = 0; index < positions.count; index += 1) {
-      point.fromBufferAttribute(positions, index);
-      const direction = point.clone().normalize();
-      const tuft = 1
-        + Math.sin(direction.x * (6.4 + variation) + direction.z * 3.7) * 0.09
-        + Math.sin(direction.y * 8.8 - direction.x * (3.2 + variation * 0.4)) * 0.065
-        + Math.cos((direction.x - direction.z) * 11.6 + variation) * 0.035;
-      point.multiplyScalar(tuft);
-      point.x += direction.y * Math.sin(variation * 1.7) * 0.06;
-      point.z += direction.y * Math.cos(variation * 1.3) * 0.05;
-      positions.setXYZ(index, point.x, point.y, point.z);
-      normalAttribute.setXYZ(index, direction.x, direction.y, direction.z);
-      const brightness = THREE.MathUtils.clamp(direction.y * 0.46 + direction.x * 0.12 + 0.48, 0, 1);
-      const tint = shadow.clone().lerp(sunward, brightness);
-      colors[index * 3] = tint.r;
-      colors[index * 3 + 1] = tint.g;
-      colors[index * 3 + 2] = tint.b;
-    }
-    positions.needsUpdate = true;
-    normalAttribute.needsUpdate = true;
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geometry.computeBoundingBox();
-    geometry.computeBoundingSphere();
-    return geometry;
-  }
-
-  private createLeafSprayGeometry(color: number, variation: number): THREE.BufferGeometry {
-    const positions: number[] = [];
-    const normals: number[] = [];
-    const colors: number[] = [];
-    const uvs: number[] = [];
-    const base = new THREE.Color(color);
-    const highlight = base.clone().lerp(new THREE.Color(0xd4dfa6), 0.3);
-    const leafCount = 16;
-    for (let leaf = 0; leaf < leafCount; leaf += 1) {
-      const azimuth = leaf * 2.399963 + variation * 0.37;
-      const elevation = -0.58 + (leaf % 6) * 0.23 + Math.sin(leaf * 1.7 + variation) * 0.08;
-      const direction = new THREE.Vector3(
-        Math.cos(azimuth) * Math.cos(elevation),
-        Math.sin(elevation),
-        Math.sin(azimuth) * Math.cos(elevation),
-      ).normalize();
-      const center = direction.clone().multiplyScalar(0.66 + (leaf % 4) * 0.065);
-      const tangent = new THREE.Vector3(-Math.sin(azimuth), 0.16 * Math.sin(elevation), Math.cos(azimuth)).normalize();
-      const longitudinal = tangent.clone().cross(direction).normalize();
-      const length = 0.25 + (leaf % 3) * 0.045;
-      const width = 0.105 + (leaf % 2) * 0.025;
-      const root = center.clone().addScaledVector(longitudinal, -length * 0.45);
-      const tip = center.clone().addScaledVector(longitudinal, length * 0.62).addScaledVector(direction, 0.035);
-      const left = center.clone().addScaledVector(tangent, width);
-      const right = center.clone().addScaledVector(tangent, -width);
-      const tint = base.clone().lerp(highlight, (leaf % 5) / 7);
-      for (const [point, u, v] of [
-        [root, 0.5, 0], [left, 0, 0.52], [tip, 0.5, 1],
-        [root, 0.5, 0], [tip, 0.5, 1], [right, 1, 0.52],
-      ] as const) {
-        positions.push(point.x, point.y, point.z);
-        normals.push(direction.x, direction.y, direction.z);
-        colors.push(tint.r, tint.g, tint.b);
-        uvs.push(u, v);
-      }
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    geometry.computeBoundingBox();
-    geometry.computeBoundingSphere();
-    return geometry;
-  }
-
-  private createShrubGeometry(variant: 0 | 1): THREE.BufferGeometry {
+  private createShrubGeometry(variant: 0 | 1 | 2 | 3): THREE.BufferGeometry {
+    const configs = [
+      { height: 1.65, spread: 1.22, stems: 8, leaves: 64, leafLength: 0.42, leafWidth: 0.18 },
+      { height: 2.15, spread: 0.9, stems: 7, leaves: 58, leafLength: 0.5, leafWidth: 0.16 },
+      { height: 1.08, spread: 1.72, stems: 9, leaves: 76, leafLength: 0.34, leafWidth: 0.16 },
+      { height: 1.82, spread: 1.38, stems: 6, leaves: 54, leafLength: 0.68, leafWidth: 0.24 },
+    ] as const;
+    const config = configs[variant];
+    const random = randomFactory(0x4a9f213d ^ (variant * 0x9e3779b9));
     const parts: THREE.BufferGeometry[] = [];
-    const broadleaf = variant === 0;
-    const branchSpecs: ReadonlyArray<readonly [number, number, number, number, number, number]> = broadleaf
-      ? [[-0.5, 0.25, 0.15, -0.84, 1.05, 0.28], [0.42, 0.24, -0.08, 0.72, 1.18, -0.18], [0, 0.22, 0.2, 0.08, 1.35, 0.36]]
-      : [[-0.1, 0.22, 0, 0.74, 1.1, 0.12], [0.04, 0.2, -0.12, 1.02, 0.78, -0.42], [-0.04, 0.18, 0.1, 0.6, 1.38, 0.44]];
-    const branchBetween = (spec: readonly [number, number, number, number, number, number], radius: number): THREE.BufferGeometry => {
-      const start = new THREE.Vector3(spec[0], spec[1], spec[2]);
-      const end = new THREE.Vector3(spec[3], spec[4], spec[5]);
+    const branchEnds: THREE.Vector3[] = [];
+    const branchBetween = (start: THREE.Vector3, end: THREE.Vector3, radius: number): void => {
       const direction = end.clone().sub(start);
-      const length = direction.length();
-      const branch = this.colorizeProceduralGeometry(new THREE.CylinderGeometry(radius * 0.72, radius, length, 6), 0x584d3b);
-      branch.applyMatrix4(new THREE.Matrix4().compose(
-        start.clone().add(end).multiplyScalar(0.5),
-        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
-        new THREE.Vector3(1, 1, 1),
-      ));
-      return branch;
-    };
-    branchSpecs.forEach((spec, index) => parts.push(branchBetween(spec, 0.055 + index * 0.009)));
-    const clumps: ReadonlyArray<readonly [number, number, number, number, number, number, number]> = broadleaf
-      ? [
-        [-0.92, 0.92, 0.18, 0.72, 0.58, 0.66, 0x6f925d], [-0.45, 1.18, -0.35, 0.82, 0.62, 0.72, 0x7fa064],
-        [0.08, 1.38, 0.3, 0.86, 0.68, 0.76, 0x8baa68], [0.64, 1.12, -0.24, 0.78, 0.6, 0.7, 0x698b59],
-        [0.98, 0.86, 0.28, 0.62, 0.5, 0.58, 0x91ad70], [0.18, 0.86, -0.62, 0.74, 0.58, 0.65, 0x5e8153],
-        [-0.22, 0.68, 0.65, 0.69, 0.48, 0.64, 0x789b61],
-      ]
-      : [
-        [0.18, 0.72, 0.1, 0.76, 0.43, 0.58, 0x718c55], [0.68, 0.96, -0.28, 0.92, 0.47, 0.64, 0x819961],
-        [1.18, 0.82, 0.26, 0.8, 0.4, 0.58, 0x657f4e], [0.7, 1.34, 0.34, 0.72, 0.46, 0.62, 0x91a76a],
-        [1.54, 0.58, -0.18, 0.58, 0.34, 0.5, 0x788e58], [0.2, 0.52, -0.5, 0.62, 0.34, 0.54, 0x596f49],
-      ];
-    clumps.forEach(([x, y, z, sx, sy, sz, color], index) => {
-      const clump = this.createFoliageClumpGeometry(color, index + variant * 7.3);
-      const transform = new THREE.Matrix4().compose(
-        new THREE.Vector3(x, y, z),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(index * 0.13, index * 0.67, index * 0.08)),
-        new THREE.Vector3(sx, sy, sz),
+      const branch = this.colorizeProceduralGeometry(
+        new THREE.CylinderGeometry(radius * 0.38, radius, direction.length(), 6, 1, true),
+        variant === 3 ? 0x5f5540 : 0x4a4435,
       );
-      clump.applyMatrix4(transform);
-      const leafSpray = this.createLeafSprayGeometry(color, index + variant * 3.1);
-      leafSpray.applyMatrix4(transform);
-      parts.push(clump, leafSpray);
-    });
-    const merged = mergeGeometries(parts, false);
-    parts.forEach((part) => part.dispose());
-    if (!merged) throw new Error('Failed to build Monsoon shrub geometry.');
-    merged.computeBoundingBox();
-    merged.computeBoundingSphere();
-    return merged;
-  }
-
-  private createStormTreeGeometry(variant: 0 | 1 | 2): THREE.BufferGeometry {
-    const parts: THREE.BufferGeometry[] = [];
-    const branchBetween = (
-      start: THREE.Vector3,
-      end: THREE.Vector3,
-      startRadius: number,
-      endRadius: number,
-      color = 0x594a36,
-    ): void => {
-      const direction = end.clone().sub(start);
-      const length = direction.length();
-      const branch = this.colorizeProceduralGeometry(new THREE.CylinderGeometry(endRadius, startRadius, length, 7), color);
       branch.applyMatrix4(new THREE.Matrix4().compose(
         start.clone().add(end).multiplyScalar(0.5),
         new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
@@ -3322,94 +3219,546 @@ export class Arena implements ArenaRuntime {
       ));
       parts.push(branch);
     };
-    if (variant === 0) {
-      branchBetween(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.58, 7.6, 0.05), 0.48, 0.18, 0x514839);
-      for (let tier = 0; tier < 6; tier += 1) {
-        const y = 2.5 + tier * 0.9;
-        const radius = 2.35 - tier * 0.25;
-        const crownColor = tier % 3 === 0 ? 0x52724f : tier % 3 === 1 ? 0x64835a : 0x789567;
-        const crown = this.colorizeProceduralGeometry(
-          new THREE.ConeGeometry(radius, 2.25, 10, 3),
-          crownColor,
-        );
-        const transform = new THREE.Matrix4().compose(
-          new THREE.Vector3(0.16 + tier * 0.11, y, tier % 2 ? 0.14 : -0.12),
-          new THREE.Quaternion().setFromEuler(new THREE.Euler(0.02, tier * 0.53, -0.055)),
-          new THREE.Vector3(1.28, 1, 0.92),
-        );
-        crown.applyMatrix4(transform);
-        const needleSpray = this.createLeafSprayGeometry(crownColor, tier + 21.4);
-        needleSpray.scale(radius * 0.92, 0.9, radius * 0.7);
-        needleSpray.translate(0.16 + tier * 0.11, y, tier % 2 ? 0.14 : -0.12);
-        parts.push(crown, needleSpray);
+    for (let stem = 0; stem < config.stems; stem += 1) {
+      const angle = stem / config.stems * Math.PI * 2 + variant * 0.41 + (random() - 0.5) * 0.34;
+      const start = new THREE.Vector3((random() - 0.5) * 0.22, 0.04, (random() - 0.5) * 0.22);
+      const reach = config.spread * (0.55 + random() * 0.45);
+      const end = new THREE.Vector3(
+        Math.cos(angle) * reach,
+        config.height * (0.62 + random() * 0.42),
+        Math.sin(angle) * reach,
+      );
+      branchBetween(start, end, 0.045 + random() * 0.025);
+      branchEnds.push(end);
+      if (stem % 2 === 0) {
+        const forkStart = start.clone().lerp(end, 0.58);
+        const forkAngle = angle + (stem % 4 === 0 ? 0.56 : -0.48);
+        const forkEnd = end.clone().add(new THREE.Vector3(
+          Math.cos(forkAngle) * reach * 0.42,
+          0.18 + random() * 0.32,
+          Math.sin(forkAngle) * reach * 0.42,
+        ));
+        branchBetween(forkStart, forkEnd, 0.032 + random() * 0.014);
+        branchEnds.push(forkEnd);
       }
-    } else if (variant === 1) {
-      branchBetween(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.24, 5.5, 0), 0.58, 0.25, 0x5b4934);
-      const branchEnds = [
-        new THREE.Vector3(-2.6, 5.9, 0.55), new THREE.Vector3(2.9, 6.4, -0.45),
-        new THREE.Vector3(-1.2, 7.25, -1.9), new THREE.Vector3(1.65, 7.45, 1.75),
-        new THREE.Vector3(0.72, 8.1, -0.25),
-      ];
-      branchEnds.forEach((end, index) => {
-        const start = new THREE.Vector3(0.08 + index * 0.04, 4.1 + (index % 3) * 0.45, 0);
-        branchBetween(start, end, 0.22, 0.08);
-      });
-      const crownSpecs: ReadonlyArray<readonly [number, number, number, number, number, number, number]> = [
-        [-2.8, 6.2, 0.7, 2.25, 1.55, 1.8, 0x668656], [-1.5, 7.25, -1.55, 2.4, 1.7, 1.95, 0x789763],
-        [0.05, 7.55, 0.2, 2.75, 1.9, 2.15, 0x88a66b], [2.25, 6.85, -0.65, 2.45, 1.65, 1.92, 0x5f7e52],
-        [1.65, 7.65, 1.72, 2.1, 1.52, 1.8, 0x78975f], [0.52, 8.75, -0.48, 1.95, 1.45, 1.7, 0x91ac72],
-        [-0.72, 6.32, 1.82, 2.15, 1.38, 1.72, 0x6d8d59], [3.42, 6.02, 0.72, 1.55, 1.2, 1.42, 0x829e68],
-      ];
-      crownSpecs.forEach(([x, y, z, sx, sy, sz, color], index) => {
-        const crown = this.createFoliageClumpGeometry(color, index + 11.7);
-        const transform = new THREE.Matrix4().compose(
-          new THREE.Vector3(x, y, z),
-          new THREE.Quaternion().setFromEuler(new THREE.Euler(index * 0.11, index * 0.51, index * 0.07)),
-          new THREE.Vector3(sx, sy, sz),
-        );
-        crown.applyMatrix4(transform);
-        const leafSpray = this.createLeafSprayGeometry(color, index + 13.1);
-        leafSpray.applyMatrix4(transform);
-        parts.push(crown, leafSpray);
-      });
-    } else {
-      branchBetween(new THREE.Vector3(0, 0, 0), new THREE.Vector3(-0.28, 4.6, 0.12), 0.62, 0.3, 0x594735);
-      const branchEnds = [
-        new THREE.Vector3(-1.9, 7.5, 0.35), new THREE.Vector3(1.25, 7.05, -0.72),
-        new THREE.Vector3(3.65, 6.55, 0.18), new THREE.Vector3(2.82, 7.85, 0.94),
-        new THREE.Vector3(-3.15, 6.4, -0.62), new THREE.Vector3(0.35, 8.55, 0.12),
-      ];
-      branchEnds.forEach((end, index) => {
-        const start = new THREE.Vector3(-0.2 + (index % 2) * 0.18, 3.85 + (index % 3) * 0.38, 0.08);
-        branchBetween(start, end, 0.24 - (index % 2) * 0.025, 0.075);
-      });
-      const crownSpecs: ReadonlyArray<readonly [number, number, number, number, number, number, number]> = [
-        [-3.25, 6.55, -0.5, 1.65, 1.22, 1.45, 0x607e53], [-1.9, 7.55, 0.36, 2.05, 1.45, 1.62, 0x75945f],
-        [-0.45, 8.35, 0.08, 2.15, 1.52, 1.72, 0x89a76b], [1.2, 7.22, -0.78, 2.28, 1.46, 1.7, 0x658557],
-        [2.75, 7.68, 0.8, 2.18, 1.4, 1.62, 0x7c9a62], [4.02, 6.58, 0.22, 1.82, 1.18, 1.46, 0x58784d],
-        [2.22, 6.12, -1.2, 1.75, 1.12, 1.42, 0x6d8c59], [0.35, 8.92, -0.1, 1.72, 1.2, 1.4, 0x96af75],
-        [-0.72, 6.76, 1.58, 1.9, 1.2, 1.52, 0x78965f],
-      ];
-      crownSpecs.forEach(([x, y, z, sx, sy, sz, color], index) => {
-        const transform = new THREE.Matrix4().compose(
-          new THREE.Vector3(x, y, z),
-          new THREE.Quaternion().setFromEuler(new THREE.Euler(index * 0.07, index * 0.49, -0.04 + index * 0.015)),
-          new THREE.Vector3(sx, sy, sz),
-        );
-        const crown = this.createFoliageClumpGeometry(color, index + 28.4);
-        crown.applyMatrix4(transform);
-        const leafSpray = this.createLeafSprayGeometry(color, index + 31.2);
-        leafSpray.applyMatrix4(transform);
-        parts.push(crown, leafSpray);
-      });
     }
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const uvs: number[] = [];
+    const palettes = [
+      [0x315d3a, 0x467348, 0x5d8755, 0x789c66],
+      [0x284f39, 0x386345, 0x4b7951, 0x668e5c],
+      [0x3b633c, 0x52794a, 0x6d8f58, 0x87a56c],
+      [0x2b5b3c, 0x3e7149, 0x568652, 0x77a064],
+    ].map((palette) => palette.map((color) => new THREE.Color(color)));
+    const palette = palettes[variant];
+    const push = (point: THREE.Vector3, normal: THREE.Vector3, color: THREE.Color, u: number, v: number): void => {
+      positions.push(point.x, point.y, point.z);
+      normals.push(normal.x, normal.y, normal.z);
+      colors.push(color.r, color.g, color.b);
+      uvs.push(u, v);
+    };
+    for (let leaf = 0; leaf < config.leaves; leaf += 1) {
+      const anchor = branchEnds[Math.floor(random() * branchEnds.length)];
+      const center = anchor.clone().add(new THREE.Vector3(
+        (random() - 0.5) * config.spread * 0.72,
+        (random() - 0.5) * config.height * 0.48,
+        (random() - 0.5) * config.spread * 0.72,
+      ));
+      const yaw = random() * Math.PI * 2;
+      const axis = new THREE.Vector3(Math.cos(yaw), -0.24 + random() * 0.64, Math.sin(yaw)).normalize();
+      const facing = new THREE.Vector3((random() - 0.5) * 0.45, 0.8, (random() - 0.5) * 0.45).normalize();
+      const right = new THREE.Vector3().crossVectors(facing, axis);
+      if (right.lengthSq() < 0.02) right.set(-axis.z, 0, axis.x);
+      right.normalize();
+      const normal = new THREE.Vector3().crossVectors(axis, right).normalize();
+      const length = config.leafLength * (0.72 + random() * 0.58);
+      const width = config.leafWidth * (0.72 + random() * 0.54);
+      const boundary = [
+        center.clone().addScaledVector(axis, -length * 0.54),
+        center.clone().addScaledVector(axis, -length * 0.18).addScaledVector(right, width * 0.84),
+        center.clone().addScaledVector(axis, length * 0.18).addScaledVector(right, width),
+        center.clone().addScaledVector(axis, length * 0.56),
+        center.clone().addScaledVector(axis, length * 0.18).addScaledVector(right, -width),
+        center.clone().addScaledVector(axis, -length * 0.18).addScaledVector(right, -width * 0.84),
+      ];
+      const tint = palette[Math.floor(random() * palette.length)].clone().multiplyScalar(0.9 + random() * 0.16);
+      for (let edge = 0; edge < boundary.length; edge += 1) {
+        const a = boundary[edge];
+        const b = boundary[(edge + 1) % boundary.length];
+        push(center, normal, tint, 0.5, 0.5);
+        push(a, normal, tint, 0.5 + (a.x - center.x), 0.5 + (a.z - center.z));
+        push(b, normal, tint, 0.5 + (b.x - center.x), 0.5 + (b.z - center.z));
+      }
+    }
+    const leafGeometry = new THREE.BufferGeometry();
+    leafGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    leafGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    leafGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    leafGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    parts.push(leafGeometry);
     const merged = mergeGeometries(parts, false);
     parts.forEach((part) => part.dispose());
-    if (!merged) throw new Error('Failed to build Monsoon storm-tree geometry.');
+    if (!merged) throw new Error('Failed to build Monsoon procedural tropical shrub.');
+    merged.name = `MonsoonProceduralTropicalShrub${variant + 1}`;
     merged.computeBoundingBox();
     merged.computeBoundingSphere();
     return merged;
   }
+
+  private createProceduralTropicalLeafTexture(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Failed to create procedural tropical leaf texture.');
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    const random = randomFactory(0x5eaf71c3);
+    const widths = [82, 62, 94, 54];
+    const shoulders = [142, 126, 158, 112];
+    for (let cell = 0; cell < 4; cell += 1) {
+      const offsetX = (cell % 2) * 256;
+      const offsetY = Math.floor(cell / 2) * 256;
+      const width = widths[cell];
+      const shoulder = shoulders[cell];
+      const path = new Path2D();
+      path.moveTo(offsetX + 128, offsetY + 246);
+      path.bezierCurveTo(
+        offsetX + 128 - width * 0.18,
+        offsetY + 224,
+        offsetX + 128 - width,
+        offsetY + shoulder + 28,
+        offsetX + 128 - width * 0.78,
+        offsetY + shoulder,
+      );
+      path.bezierCurveTo(
+        offsetX + 128 - width * 0.62,
+        offsetY + 78,
+        offsetX + 128 - width * 0.2,
+        offsetY + 28,
+        offsetX + 128,
+        offsetY + 10,
+      );
+      path.bezierCurveTo(
+        offsetX + 128 + width * 0.2,
+        offsetY + 28,
+        offsetX + 128 + width * 0.62,
+        offsetY + 78,
+        offsetX + 128 + width * 0.78,
+        offsetY + shoulder,
+      );
+      path.bezierCurveTo(
+        offsetX + 128 + width,
+        offsetY + shoulder + 28,
+        offsetX + 128 + width * 0.18,
+        offsetY + 224,
+        offsetX + 128,
+        offsetY + 246,
+      );
+      path.closePath();
+      context.save();
+      context.clip(path);
+      const gradient = context.createLinearGradient(0, offsetY + 246, 0, offsetY + 8);
+      gradient.addColorStop(0, 'rgb(165, 176, 148)');
+      gradient.addColorStop(0.45, 'rgb(226, 233, 210)');
+      gradient.addColorStop(1, 'rgb(242, 246, 226)');
+      context.fillStyle = gradient;
+      context.fillRect(offsetX, offsetY, 256, 256);
+      for (let fleck = 0; fleck < 150; fleck += 1) {
+        const x = offsetX + 36 + random() * 184;
+        const y = offsetY + 18 + random() * 218;
+        const radius = 0.35 + random() * 1.2;
+        context.fillStyle = random() > 0.36 ? 'rgba(70,91,61,.12)' : 'rgba(255,255,235,.13)';
+        context.beginPath();
+        context.arc(x, y, radius, 0, Math.PI * 2);
+        context.fill();
+      }
+      context.strokeStyle = 'rgba(65, 82, 57, .52)';
+      context.lineWidth = cell === 3 ? 2.2 : 2.8;
+      context.beginPath();
+      context.moveTo(offsetX + 128, offsetY + 246);
+      context.quadraticCurveTo(offsetX + 125, offsetY + 130, offsetX + 128, offsetY + 13);
+      context.stroke();
+      context.lineWidth = 1;
+      context.strokeStyle = 'rgba(76, 98, 67, .31)';
+      for (let vein = 1; vein <= 9; vein += 1) {
+        const t = vein / 10;
+        const y = offsetY + 238 - t * 206;
+        const reach = Math.sin(Math.PI * t) * width * 0.66;
+        context.beginPath();
+        context.moveTo(offsetX + 128, y);
+        context.quadraticCurveTo(offsetX + 128 - reach * 0.35, y - 8, offsetX + 128 - reach, y - 15);
+        context.moveTo(offsetX + 128, y);
+        context.quadraticCurveTo(offsetX + 128 + reach * 0.35, y - 8, offsetX + 128 + reach, y - 15);
+        context.stroke();
+      }
+      context.restore();
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.name = 'MonsoonProceduralTropicalLeafAtlas';
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.userData.procedural = true;
+    return texture;
+  }
+
+  private createProceduralTropicalBarkTexture(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Failed to create procedural tropical bark texture.');
+    const random = randomFactory(0x8b3f62d1);
+    const gradient = context.createLinearGradient(0, 0, 256, 0);
+    gradient.addColorStop(0, '#82745d');
+    gradient.addColorStop(0.28, '#a09273');
+    gradient.addColorStop(0.62, '#746951');
+    gradient.addColorStop(1, '#92836a');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 256, 256);
+    for (let fiber = 0; fiber < 190; fiber += 1) {
+      const x = random() * 256;
+      const width = 0.35 + random() * 2.2;
+      const sway = (random() - 0.5) * 7;
+      context.strokeStyle = random() > 0.48
+        ? `rgba(42, 38, 30, ${0.08 + random() * 0.18})`
+        : `rgba(224, 213, 178, ${0.05 + random() * 0.13})`;
+      context.lineWidth = width;
+      context.beginPath();
+      context.moveTo(x, -8);
+      context.bezierCurveTo(x + sway, 70, x - sway * 0.5, 174, x + sway * 0.35, 264);
+      context.stroke();
+    }
+    for (let scar = 0; scar < 46; scar += 1) {
+      const x = random() * 248;
+      const y = random() * 256;
+      const width = 5 + random() * 24;
+      context.strokeStyle = `rgba(38, 43, 31, ${0.08 + random() * 0.17})`;
+      context.lineWidth = 0.8 + random() * 1.6;
+      context.beginPath();
+      context.moveTo(x, y);
+      context.quadraticCurveTo(x + width * 0.5, y + (random() - 0.5) * 5, x + width, y + (random() - 0.5) * 3);
+      context.stroke();
+    }
+    for (let moss = 0; moss < 115; moss += 1) {
+      const x = random() * 256;
+      const y = random() * 256;
+      const radius = 0.5 + random() * 3.2;
+      context.fillStyle = `rgba(55, 77, 46, ${0.035 + random() * 0.095})`;
+      context.beginPath();
+      context.arc(x, y, radius, 0, Math.PI * 2);
+      context.fill();
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.name = 'MonsoonProceduralTropicalBark';
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(1.4, 3.2);
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.userData.procedural = true;
+    return texture;
+  }
+
+  private createTropicalTreeLodGeometries(variant: 0 | 1 | 2 | 3): [THREE.BufferGeometry, THREE.BufferGeometry] {
+    const configs = [
+      { height: 7.2, leanX: 0.28, leanZ: -0.16, branches: 8, spread: 2.7, crownLift: 2.4, leaves: 850, leafSize: 0.55 },
+      { height: 9.3, leanX: -0.18, leanZ: 0.24, branches: 7, spread: 2.5, crownLift: 3.05, leaves: 720, leafSize: 0.49 },
+      { height: 7.8, leanX: 0.48, leanZ: 0.12, branches: 9, spread: 3.15, crownLift: 2.05, leaves: 960, leafSize: 0.61 },
+      { height: 8.5, leanX: -0.42, leanZ: -0.28, branches: 8, spread: 2.85, crownLift: 2.7, leaves: 800, leafSize: 0.53 },
+    ] as const;
+    const config = configs[variant];
+    const random = randomFactory(0x71c4a90d ^ (variant * 0x45d9f3b));
+    const woodParts: THREE.BufferGeometry[] = [];
+    const branchBetween = (
+      start: THREE.Vector3,
+      end: THREE.Vector3,
+      startRadius: number,
+      endRadius: number,
+      color: number,
+      radialSegments = 7,
+    ): void => {
+      const direction = end.clone().sub(start);
+      const branch = this.colorizeProceduralGeometry(
+        new THREE.CylinderGeometry(endRadius, startRadius, direction.length(), radialSegments, 1, true),
+        color,
+      );
+      branch.applyMatrix4(new THREE.Matrix4().compose(
+        start.clone().add(end).multiplyScalar(0.5),
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
+        new THREE.Vector3(1, 1, 1),
+      ));
+      woodParts.push(branch);
+    };
+    const trunkAt = (t: number): THREE.Vector3 => new THREE.Vector3(
+      config.leanX * t * t + Math.sin(t * Math.PI * 1.35 + variant) * 0.08,
+      config.height * t,
+      config.leanZ * t * t + Math.sin(t * Math.PI * 1.7 + variant * 0.7) * 0.07,
+    );
+    const trunkSegments = variant === 1 ? 7 : 6;
+    for (let segment = 0; segment < trunkSegments; segment += 1) {
+      const t0 = segment / trunkSegments;
+      const t1 = (segment + 1) / trunkSegments;
+      branchBetween(
+        trunkAt(t0),
+        trunkAt(t1),
+        THREE.MathUtils.lerp(0.56, 0.2, t0),
+        THREE.MathUtils.lerp(0.56, 0.16, t1),
+        segment % 2 === 0 ? 0x766a54 : 0x7c7058,
+        9,
+      );
+    }
+    for (let root = 0; root < 6; root += 1) {
+      const angle = root / 6 * Math.PI * 2 + variant * 0.27;
+      const radial = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+      const tangent = new THREE.Vector3(-radial.z, 0, radial.x);
+      const reach = 1.34 + (root % 2) * 0.3;
+      const top = radial.clone().multiplyScalar(0.3).add(new THREE.Vector3(0, 1.42 + (root % 3) * 0.11, 0));
+      const innerLeft = radial.clone().multiplyScalar(0.3).addScaledVector(tangent, 0.34);
+      const innerRight = radial.clone().multiplyScalar(0.3).addScaledVector(tangent, -0.34);
+      const outerLeft = radial.clone().multiplyScalar(reach).addScaledVector(tangent, 0.12).setY(0.025);
+      const outerRight = radial.clone().multiplyScalar(reach).addScaledVector(tangent, -0.12).setY(0.025);
+      const buttressPositions: number[] = [];
+      const pushFace = (a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): void => {
+        for (const point of [a, b, c, a, c, b]) buttressPositions.push(point.x, point.y, point.z);
+      };
+      pushFace(top, innerLeft, outerLeft);
+      pushFace(top, outerLeft, outerRight);
+      pushFace(top, outerRight, innerRight);
+      pushFace(innerLeft, innerRight, outerRight);
+      pushFace(innerLeft, outerRight, outerLeft);
+      const buttress = new THREE.BufferGeometry();
+      buttress.setAttribute('position', new THREE.Float32BufferAttribute(buttressPositions, 3));
+      buttress.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(buttressPositions.length / 3 * 2), 2));
+      buttress.computeVertexNormals();
+      woodParts.push(this.colorizeProceduralGeometry(buttress, root % 2 === 0 ? 0x6b5f4b : 0x756750));
+    }
+    const crownCenters: THREE.Vector3[] = [trunkAt(1).add(new THREE.Vector3(0, config.crownLift * 0.72, 0))];
+    for (let branch = 0; branch < config.branches; branch += 1) {
+      const angle = branch / config.branches * Math.PI * 2 + variant * 0.63 + (random() - 0.5) * 0.38;
+      const attach = 0.48 + (branch % 4) * 0.075 + random() * 0.06;
+      const start = trunkAt(Math.min(0.86, attach));
+      const reach = config.spread * (0.72 + random() * 0.5);
+      const end = new THREE.Vector3(
+        start.x + Math.cos(angle) * reach,
+        config.height + config.crownLift * (0.35 + random() * 0.7),
+        start.z + Math.sin(angle) * reach,
+      );
+      branchBetween(start, end, 0.17 - (branch % 3) * 0.018, 0.04, branch % 2 === 0 ? 0x665b49 : 0x5b5242);
+      crownCenters.push(end.clone());
+      if (branch % 2 === variant % 2) {
+        const forkStart = start.clone().lerp(end, 0.62);
+        const forkAngle = angle + (branch % 3 === 0 ? 0.48 : -0.42);
+        const forkEnd = end.clone().add(new THREE.Vector3(
+          Math.cos(forkAngle) * reach * 0.38,
+          0.5 + random() * 0.85,
+          Math.sin(forkAngle) * reach * 0.38,
+        ));
+        branchBetween(forkStart, forkEnd, 0.085, 0.022, 0x574e3f, 6);
+        crownCenters.push(forkEnd);
+      }
+    }
+    const wood = mergeGeometries(woodParts, false);
+    woodParts.forEach((part) => part.dispose());
+    if (!wood) throw new Error('Failed to build Monsoon tropical tree wood.');
+    wood.name = `MonsoonProceduralTropicalTree${variant + 1}Wood`;
+    wood.computeBoundingBox();
+    wood.computeBoundingSphere();
+
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const uvs: number[] = [];
+    const palettes = [
+      [0x214f34, 0x2f6840, 0x477c4d, 0x658f5c],
+      [0x1e4935, 0x2a5e40, 0x3e744b, 0x587f54],
+      [0x28583a, 0x376c42, 0x4d814f, 0x6d985f],
+      [0x244c38, 0x315f43, 0x46764e, 0x628a59],
+    ].map((palette) => palette.map((color) => new THREE.Color(color)));
+    const palette = palettes[variant];
+    const pushVertex = (point: THREE.Vector3, normal: THREE.Vector3, color: THREE.Color, u: number, v: number): void => {
+      positions.push(point.x, point.y, point.z);
+      normals.push(normal.x, normal.y, normal.z);
+      colors.push(color.r, color.g, color.b);
+      uvs.push(u, v);
+    };
+    for (let leaf = 0; leaf < config.leaves; leaf += 1) {
+      const lobe = crownCenters[Math.floor(random() * crownCenters.length)];
+      const theta = random() * Math.PI * 2;
+      const radius = Math.pow(random(), 0.58);
+      const vertical = (random() - 0.5) * (1.65 + variant * 0.08);
+      const center = new THREE.Vector3(
+        lobe.x + Math.cos(theta) * config.spread * 0.72 * radius,
+        lobe.y + vertical,
+        lobe.z + Math.sin(theta) * config.spread * 0.68 * radius,
+      );
+      const directionAngle = theta + (random() - 0.5) * 1.45;
+      const axis = new THREE.Vector3(
+        Math.cos(directionAngle),
+        -0.26 + random() * 0.62,
+        Math.sin(directionAngle),
+      ).normalize();
+      const facing = new THREE.Vector3(
+        (random() - 0.5) * 0.72,
+        0.68 + random() * 0.58,
+        (random() - 0.5) * 0.72,
+      ).normalize();
+      const right = new THREE.Vector3().crossVectors(facing, axis);
+      if (right.lengthSq() < 0.02) right.set(-axis.z, 0, axis.x);
+      right.normalize();
+      const normal = new THREE.Vector3().crossVectors(axis, right).normalize();
+      const length = config.leafSize * (0.72 + random() * 0.72);
+      const halfWidth = length * (0.18 + random() * 0.1);
+      const root = center.clone().addScaledVector(axis, -length * 0.5);
+      const tip = center.clone().addScaledVector(axis, length * 0.5);
+      const a = root.clone().addScaledVector(right, halfWidth);
+      const b = root.clone().addScaledVector(right, -halfWidth);
+      const c = tip.clone().addScaledVector(right, -halfWidth);
+      const d = tip.clone().addScaledVector(right, halfWidth);
+      const tint = palette[Math.floor(random() * palette.length)].clone().multiplyScalar(0.9 + random() * 0.16);
+      const atlasCell = (variant + leaf) % 4;
+      const u0 = (atlasCell % 2) * 0.5 + 0.006;
+      const v0 = Math.floor(atlasCell / 2) * 0.5 + 0.006;
+      const u1 = u0 + 0.488;
+      const v1 = v0 + 0.488;
+      pushVertex(a, normal, tint, u0, v0);
+      pushVertex(b, normal, tint, u1, v0);
+      pushVertex(c, normal, tint, u1, v1);
+      pushVertex(a, normal, tint, u0, v0);
+      pushVertex(c, normal, tint, u1, v1);
+      pushVertex(d, normal, tint, u0, v1);
+    }
+    const leaves = new THREE.BufferGeometry();
+    leaves.name = `MonsoonProceduralTropicalTree${variant + 1}LeafCanopy`;
+    leaves.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    leaves.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    leaves.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    leaves.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    leaves.computeBoundingBox();
+    leaves.computeBoundingSphere();
+    return [wood, leaves];
+  }
+
+  private createTropicalPalmGeometries(variant: 0 | 1): [THREE.BufferGeometry, THREE.BufferGeometry] {
+    const woodParts: THREE.BufferGeometry[] = [];
+    const woodColor = variant === 0 ? 0x675a43 : 0x594c38;
+    const segmentCount = variant === 0 ? 7 : 8;
+    const lean = variant === 0 ? new THREE.Vector2(0.85, -0.38) : new THREE.Vector2(-0.62, 0.5);
+    let previous = new THREE.Vector3(0, 0, 0);
+    for (let segment = 0; segment < segmentCount; segment += 1) {
+      const t = (segment + 1) / segmentCount;
+      const next = new THREE.Vector3(
+        lean.x * t * t,
+        (variant === 0 ? 11.2 : 13.4) * t,
+        lean.y * t * t,
+      );
+      const direction = next.clone().sub(previous);
+      const radius0 = THREE.MathUtils.lerp(0.44, 0.19, segment / segmentCount);
+      const radius1 = THREE.MathUtils.lerp(0.44, 0.16, (segment + 1) / segmentCount);
+      const trunk = this.colorizeProceduralGeometry(
+        new THREE.CylinderGeometry(radius1, radius0, direction.length(), 7, 1, false),
+        segment % 2 === 0 ? woodColor : new THREE.Color(woodColor).multiplyScalar(0.86).getHex(),
+      );
+      trunk.applyMatrix4(new THREE.Matrix4().compose(
+        previous.clone().add(next).multiplyScalar(0.5),
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
+        new THREE.Vector3(1, 1, 1),
+      ));
+      woodParts.push(trunk);
+      previous = next;
+    }
+    for (let root = 0; root < 5; root += 1) {
+      const angle = root / 5 * Math.PI * 2 + variant * 0.36;
+      const start = new THREE.Vector3(0, 0.28, 0);
+      const end = new THREE.Vector3(Math.cos(angle) * 1.45, 0.04, Math.sin(angle) * 1.45);
+      const direction = end.clone().sub(start);
+      const buttress = this.colorizeProceduralGeometry(
+        new THREE.CylinderGeometry(0.04, 0.18, direction.length(), 5, 1, false),
+        woodColor,
+      );
+      buttress.applyMatrix4(new THREE.Matrix4().compose(
+        start.clone().add(end).multiplyScalar(0.5),
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
+        new THREE.Vector3(1, 1, 1),
+      ));
+      woodParts.push(buttress);
+    }
+    const wood = mergeGeometries(woodParts, false);
+    woodParts.forEach((part) => part.dispose());
+    if (!wood) throw new Error('Failed to build Monsoon tropical palm wood.');
+    wood.name = `MonsoonTropicalPalm${variant + 1}Wood`;
+    wood.computeBoundingBox();
+    wood.computeBoundingSphere();
+
+    const crown = previous.clone().add(new THREE.Vector3(0, -0.02, 0));
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const random = randomFactory(0x2f98c6d1 ^ (variant * 0x9e3779b9));
+    const dark = new THREE.Color(variant === 0 ? 0x2c6540 : 0x245a3d);
+    const light = new THREE.Color(variant === 0 ? 0x6f9b5d : 0x5f8f58);
+    const pushTriangle = (
+      a: THREE.Vector3,
+      b: THREE.Vector3,
+      c: THREE.Vector3,
+      normal: THREE.Vector3,
+      color: THREE.Color,
+    ): void => {
+      for (const point of [a, b, c]) {
+        positions.push(point.x, point.y, point.z);
+        normals.push(normal.x, normal.y, normal.z);
+        colors.push(color.r, color.g, color.b);
+      }
+    };
+    const frondCount = variant === 0 ? 13 : 15;
+    const leafletPairs = variant === 0 ? 9 : 11;
+    for (let frond = 0; frond < frondCount; frond += 1) {
+      const angle = frond / frondCount * Math.PI * 2 + random() * 0.12;
+      const outward = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+      const side = new THREE.Vector3(-outward.z, 0, outward.x);
+      const reach = (variant === 0 ? 4.9 : 5.65) * (0.86 + random() * 0.24);
+      const lift = frond % 4 === 0 ? 1.25 : frond % 3 === 0 ? 0.45 : -0.35 - random() * 0.7;
+      const centerAt = (t: number): THREE.Vector3 => crown.clone()
+        .addScaledVector(outward, reach * (t - t * t * 0.08))
+        .add(new THREE.Vector3(0, lift * t - t * t * (variant === 0 ? 1.15 : 1.5), 0));
+      const normal = new THREE.Vector3(outward.x * 0.18, 0.96, outward.z * 0.18).normalize();
+      for (let pair = 0; pair < leafletPairs; pair += 1) {
+        const t = (pair + 0.45) / leafletPairs;
+        const center = centerAt(t);
+        const taper = Math.sin(Math.PI * t);
+        const leafLength = (0.54 + taper * 0.72) * (variant === 0 ? 1 : 1.08);
+        const leafWidth = 0.12 + taper * 0.11;
+        const along = centerAt(Math.min(1, t + 0.035)).sub(center).normalize();
+        for (const leafSide of [-1, 1]) {
+          const direction = side.clone().multiplyScalar(leafSide);
+          const root = center.clone().addScaledVector(direction, 0.05);
+          const tip = center.clone()
+            .addScaledVector(direction, leafLength)
+            .addScaledVector(along, leafLength * 0.18)
+            .add(new THREE.Vector3(0, -leafLength * 0.1, 0));
+          const shoulderA = root.clone().addScaledVector(direction, leafLength * 0.34).addScaledVector(along, leafWidth);
+          const shoulderB = root.clone().addScaledVector(direction, leafLength * 0.34).addScaledVector(along, -leafWidth);
+          const color = dark.clone().lerp(light, t * 0.7 + random() * 0.18);
+          pushTriangle(root, shoulderA, tip, normal, color);
+          pushTriangle(root, tip, shoulderB, normal, color);
+        }
+      }
+    }
+    const leaves = new THREE.BufferGeometry();
+    leaves.name = `MonsoonTropicalPalm${variant + 1}Fronds`;
+    leaves.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    leaves.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    leaves.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    leaves.computeBoundingBox();
+    leaves.computeBoundingSphere();
+    return [wood, leaves];
+  }
+
 
   private createGroundMarks(): void {
     const footprintCanvas = document.createElement('canvas');
@@ -3560,22 +3909,13 @@ export class Arena implements ArenaRuntime {
     const random = randomFactory(this.seed ^ 0x6a7a55e1);
     const biomeGroup = new THREE.Group();
     biomeGroup.name = 'MonsoonAuthoredHighlandBiome';
-    const rockGeometries = ([0, 1, 2] as const).map((variant) => this.createBoulderGeometry(variant));
-    const rockMaterial = new THREE.MeshStandardMaterial({
-      color: 0x8799a0,
-      roughness: 0.93,
-      metalness: 0.015,
-      flatShading: true,
-    });
-    rockMaterial.name = 'MonsoonBiomeRockMaterial';
-    const rockCount = this.scatteredRocks.length;
-    const rockGroup = new THREE.Group();
-    rockGroup.name = 'MonsoonClusteredTalusAndBoulderFamilies';
+    const rockCount = this.rockField.rocks.length;
+    const rockGroup = this.rockField.group;
     const grassGeometry = this.createGrassBladeGeometry();
     const grassMaterial = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       depthWrite: false,
-      opacity: 0.68,
+      opacity: 0.22,
       side: THREE.DoubleSide,
       transparent: true,
       vertexColors: true,
@@ -3616,7 +3956,7 @@ export class Arena implements ArenaRuntime {
     // Spatial chunks retain the continuous blade field while letting the
     // renderer reject vegetation behind the camera. The old map-wide mesh was
     // effectively never culled and animated ~1.4M blade vertices every frame.
-    const grassCount = mobile ? 9_000 : 26_000;
+    const grassCount = mobile ? 9_000 : 29_000;
     const grassGroup = new THREE.Group();
     grassGroup.name = 'MonsoonLayeredWindGrass';
     const weedGeometry = this.createWeedGeometry();
@@ -3631,7 +3971,7 @@ export class Arena implements ArenaRuntime {
     weedMaterial.name = 'MonsoonBiomeWeedMaterial';
     weedMaterial.customProgramCacheKey = () => 'monsoon-reactive-weeds-v1';
     weedMaterial.onBeforeCompile = grassMaterial.onBeforeCompile;
-    const weedCount = mobile ? 480 : 1_450;
+    const weedCount = mobile ? 620 : 2_200;
     const weedGroup = new THREE.Group();
     weedGroup.name = 'MonsoonMixedWeedsAndSeedHeads';
     const fernGeometries = ([0, 1, 2] as const).map((variant) => this.createFernGeometry(variant));
@@ -3647,10 +3987,15 @@ export class Arena implements ArenaRuntime {
     fernMaterial.name = 'MonsoonBiomeFernMaterial';
     fernMaterial.customProgramCacheKey = () => 'monsoon-reactive-pinnate-ferns-v2';
     fernMaterial.onBeforeCompile = grassMaterial.onBeforeCompile;
-    const fernCount = mobile ? 1_250 : 4_800;
+    const fernCount = mobile ? 360 : 1_200;
     const fernGroup = new THREE.Group();
-    fernGroup.name = 'MonsoonPinnateFernFamilies';
-    const shrubGeometries = ([0, 1] as const).map((variant) => this.createShrubGeometry(variant));
+    fernGroup.name = 'MonsoonHeroPinnateFernFamilies';
+    const massFernGeometries = ([0, 1, 2] as const).map((variant) => this.createFernLodGeometry(variant));
+    const massFernCount = mobile ? 2_500 : 10_500;
+    const massFernGroup = new THREE.Group();
+    massFernGroup.name = 'MonsoonMassUnderstoryFernFamilies';
+    const shrubCount = mobile ? 720 : 3_200;
+    const shrubGeometries = ([0, 1, 2, 3] as const).map((variant) => this.createShrubGeometry(variant));
     const shrubMaterial = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       emissive: 0x172515,
@@ -3658,34 +4003,161 @@ export class Arena implements ArenaRuntime {
       roughness: 0.94,
       metalness: 0,
       vertexColors: true,
+      side: THREE.DoubleSide,
     });
-    shrubMaterial.name = 'MonsoonBiomeShrubMaterial';
-    const shrubCount = mobile ? 360 : 1_180;
+    shrubMaterial.name = 'MonsoonBiomeProceduralTropicalShrubMaterial';
+    this.groundCoverCulling.configureMaterial(grassMaterial, 'grass');
+    this.groundCoverCulling.configureMaterial(weedMaterial, 'weed');
+    this.groundCoverCulling.configureMaterial(fernMaterial, 'fern');
+    this.groundCoverCulling.configureMaterial(shrubMaterial, 'shrub');
     const shrubGroup = new THREE.Group();
-    shrubGroup.name = 'MonsoonBroadleafAndWindScrubFamilies';
-    const treeGeometries = ([0, 1, 2] as const).map((variant) => this.createStormTreeGeometry(variant));
+    shrubGroup.name = 'MonsoonProceduralTropicalShrubFamilies';
+    // Keep the legacy faceted tree builder out of Monsoon. The runtime forest
+    // uses project-original procedural branch, leaf-card, and palm geometry.
+    const treeCount: number = 0;
+    const treeGeometries: THREE.BufferGeometry[] = [];
     const treeMaterial = new THREE.MeshStandardMaterial({
       color: 0xffffff,
-      emissive: 0x101a10,
-      emissiveIntensity: 0.1,
-      roughness: 0.9,
+      visible: false,
+    });
+    treeMaterial.name = 'MonsoonDisabledLegacyTreeMaterial';
+    const treeGroup = new THREE.Group();
+    treeGroup.name = 'MonsoonDisabledLegacyTreeFamilies';
+    type TreeTier = {
+      geometries: THREE.BufferGeometry[];
+      partMaterials: THREE.Material[];
+      partVariants: number[];
+      variantNames: string[];
+      variantHeights: number[];
+    };
+    const emptyTreeTier: TreeTier = {
+      geometries: [],
+      partMaterials: [],
+      partVariants: [],
+      variantNames: [],
+      variantHeights: [],
+    };
+    const proceduralBarkTexture = this.createProceduralTropicalBarkTexture();
+    const treeWoodMaterial = new THREE.MeshStandardMaterial({
+      name: 'MonsoonBiomeProceduralTropicalWoodMaterial',
+      color: 0xffffff,
+      map: proceduralBarkTexture,
+      emissive: 0x211c16,
+      emissiveIntensity: 0.12,
+      roughness: 0.94,
       metalness: 0,
-      flatShading: false,
       vertexColors: true,
     });
-    treeMaterial.name = 'MonsoonBiomeTreeMaterial';
-    const treeCount = mobile ? 84 : 300;
-    const treeGroup = new THREE.Group();
-    treeGroup.name = 'MonsoonConiferAndStormCanopyFamilies';
+    const proceduralLeafTexture = this.createProceduralTropicalLeafTexture();
+    const treeLeafMaterial = new THREE.MeshStandardMaterial({
+      name: 'MonsoonBiomeProceduralTropicalLeafMaterial',
+      color: 0xffffff,
+      map: proceduralLeafTexture,
+      alphaTest: 0.34,
+      transparent: false,
+      depthWrite: true,
+      emissive: 0x102317,
+      emissiveIntensity: 0.14,
+      roughness: 0.88,
+      metalness: 0,
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      shadowSide: THREE.DoubleSide,
+    });
+    const palmLeafMaterial = new THREE.MeshStandardMaterial({
+      name: 'MonsoonBiomeProceduralPalmLeafMaterial',
+      color: 0xffffff,
+      emissive: 0x0d2115,
+      emissiveIntensity: 0.14,
+      roughness: 0.9,
+      metalness: 0,
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      shadowSide: THREE.DoubleSide,
+    });
+    const applyProceduralCanopyWind = (
+      material: THREE.MeshStandardMaterial,
+      cacheKey: string,
+      strength: number,
+    ): void => {
+      material.customProgramCacheKey = () => cacheKey;
+      material.onBeforeCompile = (shader) => {
+        shader.uniforms.uTime = this.grassUniforms.uTime;
+        shader.uniforms.uWind = this.grassUniforms.uWind;
+        shader.vertexShader = shader.vertexShader
+          .replace(
+            '#include <common>',
+            `#include <common>
+            uniform float uTime;
+            uniform float uWind;`,
+          )
+          .replace(
+            '#include <begin_vertex>',
+            `#include <begin_vertex>
+            #ifdef USE_INSTANCING
+              vec3 monsoonCanopyRoot = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+              float monsoonCanopyWave = sin(uTime * 0.74 + monsoonCanopyRoot.x * 0.021 + monsoonCanopyRoot.z * 0.017)
+                + sin(uTime * 1.31 + monsoonCanopyRoot.z * 0.028) * 0.32;
+              float monsoonCanopyFlutter = sin(uTime * 2.2 + position.x * 2.7 + position.z * 2.1) * 0.18;
+              transformed.x += (monsoonCanopyWave + monsoonCanopyFlutter) * uWind * ${strength.toFixed(3)};
+              transformed.z += monsoonCanopyWave * uWind * ${
+                (strength * 0.56).toFixed(3)
+              };
+            #endif`,
+          );
+      };
+    };
+    applyProceduralCanopyWind(treeLeafMaterial, 'monsoon-procedural-broadleaf-wind-v1', 0.12);
+    applyProceduralCanopyWind(palmLeafMaterial, 'monsoon-procedural-palm-wind-v1', 0.2);
+    const proceduralTreeBuilds = [
+      this.createTropicalTreeLodGeometries(0),
+      this.createTropicalTreeLodGeometries(1),
+      this.createTropicalTreeLodGeometries(2),
+      this.createTropicalTreeLodGeometries(3),
+      this.createTropicalPalmGeometries(0),
+      this.createTropicalPalmGeometries(1),
+    ];
+    const massCanopyTier: TreeTier = {
+      geometries: proceduralTreeBuilds.flatMap(([wood, leaves]) => [wood, leaves]),
+      partMaterials: proceduralTreeBuilds.flatMap((_, variant) => [
+        treeWoodMaterial,
+        variant >= 4 ? palmLeafMaterial : treeLeafMaterial,
+      ]),
+      partVariants: proceduralTreeBuilds.flatMap((_, variant) => [variant, variant]),
+      variantNames: [
+        'RainforestBroadleaf',
+        'HighlandEmergent',
+        'SpreadingKapok',
+        'StormCanopyBroadleaf',
+        'WindwardPalm',
+        'CrownPalm',
+      ],
+      variantHeights: proceduralTreeBuilds.map(([wood, leaves]) => Math.max(
+        wood.boundingBox ? wood.boundingBox.max.y - Math.min(0, wood.boundingBox.min.y) : 0,
+        leaves.boundingBox ? leaves.boundingBox.max.y - Math.min(0, leaves.boundingBox.min.y) : 0,
+        1,
+      )),
+    };
+    const heroTreeTier = emptyTreeTier;
+    const heroTreeCount = 0;
+    const massCanopyTreeCount = mobile ? 360 : 1_400;
+    const heroTreeGroup = new THREE.Group();
+    heroTreeGroup.name = 'MonsoonDisabledImportedTreeTier';
+    const massCanopyTreeGroup = new THREE.Group();
+    massCanopyTreeGroup.name = 'MonsoonProceduralTropicalTreeFamilies';
     this.geometries.push(
-      ...rockGeometries,
       grassGeometry,
       weedGeometry,
       ...fernGeometries,
+      ...massFernGeometries,
       ...shrubGeometries,
       ...treeGeometries,
+      ...heroTreeTier.geometries,
+      ...massCanopyTier.geometries,
     );
-    this.materials.push(rockMaterial, grassMaterial, weedMaterial, fernMaterial, shrubMaterial, treeMaterial);
+    this.materials.push(grassMaterial, weedMaterial, fernMaterial, shrubMaterial, treeMaterial);
+    this.materials.push(treeWoodMaterial, treeLeafMaterial, palmLeafMaterial);
+    this.textures.push(proceduralBarkTexture, proceduralLeafTexture);
     const matrix = new THREE.Matrix4();
     const quaternion = new THREE.Quaternion();
     const euler = new THREE.Euler();
@@ -3694,8 +4166,11 @@ export class Arena implements ArenaRuntime {
     const grassBuckets = Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]);
     const weedBuckets = Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]);
     const fernBuckets = fernGeometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
+    const massFernBuckets = massFernGeometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
     const shrubBuckets = shrubGeometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
     const treeBuckets = treeGeometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
+    const heroTreeBuckets = heroTreeTier.geometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
+    const massCanopyTreeBuckets = massCanopyTier.geometries.map(() => Array.from({ length: VEGETATION_CHUNK_COUNT }, () => [] as number[]));
     const chunkFor = (x: number, z: number): number => {
       const column = THREE.MathUtils.clamp(
         Math.floor((x / MONSOON_DIVIDE.width + 0.5) * VEGETATION_CHUNK_COLUMNS),
@@ -3723,17 +4198,26 @@ export class Arena implements ArenaRuntime {
         [120, -48, 46, 28, 0.82], [8, -139, 68, 18, 0.92], [-154, -18, 34, 32, 0.7],
       ],
       fern: [
-        [-112, 58, 46, 22, 1.28], [-56, -101, 57, 23, 1.16], [73, 62, 50, 24, 1.22],
-        [116, -52, 42, 27, 0.92], [3, -138, 65, 18, 1.05], [-151, -20, 31, 32, 0.76],
-        [-8, 24, 36, 25, 0.88],
+        [-176, 92, 34, 21, 0.82], [-136, 64, 54, 29, 1.32], [-91, 103, 46, 24, 1.12],
+        [-42, 121, 52, 24, 0.92], [28, 116, 54, 25, 0.88], [83, 82, 52, 29, 1.18],
+        [142, 54, 43, 32, 0.94], [164, -12, 35, 38, 0.74], [128, -59, 48, 31, 1.02],
+        [78, -101, 56, 26, 0.92], [18, -142, 75, 21, 1.04], [-54, -108, 66, 30, 1.25],
+        [-116, -82, 49, 34, 1.02], [-164, -28, 39, 41, 0.84], [-19, 43, 45, 28, 0.82],
+        [43, 34, 42, 28, 0.78],
       ],
       shrub: [
-        [-124, 66, 45, 25, 1.12], [-53, -105, 54, 28, 1.16], [82, 69, 49, 27, 1.02],
-        [126, -49, 40, 29, 0.92], [1, -144, 61, 18, 0.78], [-161, -12, 33, 36, 0.68],
+        [-174, 88, 31, 19, 0.75], [-132, 62, 49, 28, 1.2], [-78, 108, 45, 23, 0.96],
+        [-20, 120, 54, 23, 0.78], [48, 104, 49, 26, 0.82], [91, 72, 48, 29, 1.08],
+        [148, 40, 37, 34, 0.78], [150, -28, 35, 37, 0.7], [122, -65, 46, 31, 0.98],
+        [68, -111, 53, 25, 0.82], [4, -145, 70, 19, 0.88], [-59, -108, 60, 29, 1.18],
+        [-121, -76, 47, 33, 0.9], [-166, -20, 35, 38, 0.72],
       ],
       tree: [
-        [-126, 61, 39, 20, 1.16], [-61, -109, 46, 21, 1.2], [78, 67, 42, 21, 1.05],
-        [126, -54, 34, 22, 0.82], [0, -146, 52, 15, 0.72], [-162, -19, 27, 28, 0.62],
+        [-171, 91, 28, 17, 0.72], [-131, 62, 44, 24, 1.22], [-72, 109, 40, 20, 0.88],
+        [-14, 120, 48, 20, 0.7], [48, 105, 42, 22, 0.76], [91, 70, 42, 25, 1.04],
+        [148, 38, 31, 28, 0.68], [151, -26, 29, 31, 0.62], [124, -61, 40, 26, 0.94],
+        [64, -111, 47, 21, 0.74], [2, -146, 61, 16, 0.78], [-61, -109, 53, 25, 1.2],
+        [-122, -73, 40, 28, 0.82], [-165, -19, 29, 31, 0.64],
       ],
     };
     const routeLimits: Readonly<Record<VegetationProfile, number>> = {
@@ -3818,25 +4302,11 @@ export class Arena implements ArenaRuntime {
       }
       return null;
     };
-    for (let family = 0; family < rockGeometries.length; family += 1) {
-      const familyRocks = this.scatteredRocks.filter((_, index) => index % rockGeometries.length === family);
-      const mesh = new THREE.InstancedMesh(rockGeometries[family], rockMaterial, familyRocks.length);
-      mesh.name = `MonsoonFracturedBoulderFamily${family + 1}`;
-      familyRocks.forEach((rock, index) => {
-        matrix.compose(rock.position, rock.quaternion, rock.scale);
-        mesh.setMatrixAt(index, matrix);
-        const palette = family === 0 ? [0x8da0a6, 0x71878f] : family === 1 ? [0x788d96, 0x617681] : [0x96a5a5, 0x738888];
-        mesh.setColorAt(index, instanceColor.setHex(palette[index % palette.length]));
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      mesh.computeBoundingBox();
-      mesh.computeBoundingSphere();
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      rockGroup.add(mesh);
-    }
-    const placedCounts = { grass: 0, weed: 0, fern: [0, 0, 0], shrub: [0, 0], tree: [0, 0, 0] };
+    const placedCounts = { grass: 0, weed: 0, fern: [0, 0, 0], shrub: [0, 0, 0, 0], tree: [0, 0, 0] };
+    const placedMassFernCounts = massFernGeometries.map(() => 0);
+    const placedHeroTreeCounts = heroTreeTier.variantNames.map(() => 0);
+    const placedMassCanopyTreeCounts = massCanopyTier.variantNames.map(() => 0);
+    const treeRepresentativePositions = massCanopyTier.variantNames.map(() => [] as Array<{ x: number; y: number; z: number }>);
     const pack = (bucket: number[], position: THREE.Vector3, yaw: number, sx: number, sy: number, sz: number, color: number): void => {
       bucket.push(position.x, position.y, position.z, yaw, sx, sy, sz, color);
     };
@@ -3866,23 +4336,43 @@ export class Arena implements ArenaRuntime {
       const familyRoll = random();
       const family = familyRoll > 0.73 ? 2 : familyRoll > 0.36 ? 1 : 0;
       const yaw = random() * Math.PI * 2;
-      const hero = random() > 0.94 ? 1.42 : 1;
-      const width = (0.72 + random() * 1.62) * hero;
+      const hero = random() > 0.94 ? 1.32 : 1;
+      const width = (0.42 + random() * 0.78) * hero;
       const height = width * (family === 2 ? 1.04 + random() * 0.32 : 0.72 + random() * 0.32);
       const pick = random();
       const color = pick > 0.82 ? 0xd7e1bd : pick > 0.4 ? 0xb9ce9f : 0x9eb989;
       pack(fernBuckets[family][chunkFor(position.x, position.z)], position.setY(position.y + 0.024), yaw, width, height, width * (0.88 + random() * 0.24), color);
       placedCounts.fern[family] += 1;
     }
+    for (let index = 0; index < massFernCount; index += 1) {
+      const position = findPlacement('fern');
+      if (!position) continue;
+      const familyRoll = random();
+      const family = familyRoll > 0.76 ? 2 : familyRoll > 0.38 ? 1 : 0;
+      const scale = (0.54 + random() * 1.12) * (random() > 0.96 ? 1.35 : 1);
+      const colorRoll = random();
+      const color = colorRoll > 0.82 ? 0xc1d7aa : colorRoll > 0.38 ? 0x96b989 : 0x78a078;
+      pack(
+        massFernBuckets[family][chunkFor(position.x, position.z)],
+        position.setY(position.y + 0.018),
+        random() * Math.PI * 2,
+        scale * (0.82 + random() * 0.36),
+        scale * (0.78 + random() * 0.42),
+        scale * (0.82 + random() * 0.36),
+        color,
+      );
+      placedMassFernCounts[family] += 1;
+    }
     for (let index = 0; index < shrubCount; index += 1) {
       const position = findPlacement('shrub');
       if (!position) continue;
-      const family = random() > 0.56 ? 1 : 0;
+      const familyRoll = random();
+      const family = familyRoll > 0.79 ? 3 : familyRoll > 0.52 ? 2 : familyRoll > 0.25 ? 1 : 0;
       const yaw = random() * Math.PI * 2;
       const hero = random() > 0.9 ? 1.38 : 1;
       const width = (0.9 + random() * 1.65) * hero;
-      const height = width * (family === 0 ? 0.88 + random() * 0.28 : 0.7 + random() * 0.24);
-      const color = random() > 0.5 ? 0xe8efd7 : 0xcddbbd;
+      const height = width * (family === 0 ? 0.88 + random() * 0.28 : family === 1 ? 0.7 + random() * 0.24 : 0.5 + random() * 0.18);
+      const color = random() > 0.5 ? 0xc3d1b9 : 0x9fb69b;
       pack(shrubBuckets[family][chunkFor(position.x, position.z)], position.setY(position.y + 0.03), yaw, width, height, width * (0.82 + random() * 0.34), color);
       placedCounts.shrub[family] += 1;
     }
@@ -3893,25 +4383,89 @@ export class Arena implements ArenaRuntime {
       const family = familyRoll > 0.78 ? 2 : familyRoll > 0.4 ? 1 : 0;
       const yaw = random() * Math.PI * 2;
       const scale = family === 0 ? 0.9 + random() * 1.25 : family === 1 ? 0.82 + random() * 1.18 : 0.78 + random() * 1.12;
-      const color = random() > 0.5 ? 0xf3f5e9 : 0xdde7d4;
+      const color = random() > 0.5 ? 0xd7e1ce : 0xbfd1bb;
       pack(treeBuckets[family][chunkFor(position.x, position.z)], position.setY(position.y + 0.04), yaw, scale * (0.86 + random() * 0.34), scale * (0.94 + random() * 0.28), scale, color);
       placedCounts.tree[family] += 1;
     }
+    const placeTreeTier = (
+      tier: TreeTier,
+      count: number,
+      buckets: number[][][],
+      placed: number[],
+      minimumHeight: number,
+      maximumHeight: number,
+      massCanopy: boolean,
+    ): void => {
+      for (let index = 0; index < count; index += 1) {
+        const position = findPlacement('tree');
+        if (!position) continue;
+        const masks = sampleMonsoonMasks(position.x, position.z);
+        const designY = position.y / MONSOON_WORLD_SCALE;
+        const palmHabitat = masks.coast < 0.72 && designY < 48;
+        const variant = massCanopy && tier.variantNames.length === 6
+          ? palmHabitat && random() > 0.72
+            ? random() > 0.5 ? 4 : 5
+            : (() => {
+              const roll = random();
+              return roll > 0.82 ? 1 : roll > 0.6 ? 3 : roll > 0.3 ? 2 : 0;
+            })()
+          : index % tier.variantNames.length;
+        const speciesMinimum = variant === 1
+          ? Math.max(minimumHeight, 24)
+          : variant >= 4
+            ? Math.max(minimumHeight, 18)
+            : Math.min(minimumHeight, 15);
+        const speciesMaximum = variant === 1
+          ? Math.max(maximumHeight, 44)
+          : variant >= 4
+            ? Math.max(maximumHeight, 39)
+            : variant === 2
+              ? Math.max(maximumHeight, 37)
+              : Math.max(maximumHeight, 35);
+        const understoryTree = variant !== 1 && variant < 4 && random() < 0.24;
+        const desiredHeight = understoryTree
+          ? 9 + random() * 9
+          : speciesMinimum + random() * (speciesMaximum - speciesMinimum);
+        const scale = desiredHeight / Math.max(tier.variantHeights[variant], 0.1);
+        const colorRoll = random();
+        const color = massCanopy
+          ? colorRoll > 0.72 ? 0xf2f4e8 : colorRoll > 0.34 ? 0xdfe9d7 : 0xd2e0ca
+          : colorRoll > 0.72 ? 0xdce9d2 : colorRoll > 0.34 ? 0xc8dbbb : 0xb2c9a4;
+        const yaw = random() * Math.PI * 2;
+        const sx = scale * (0.74 + random() * 0.48);
+        const sy = scale * (0.86 + random() * 0.3);
+        const sz = scale * (0.74 + random() * 0.48);
+        position.setY(position.y + 0.035);
+        const chunk = chunkFor(position.x, position.z);
+        tier.partVariants.forEach((partVariant, part) => {
+          if (partVariant === variant) pack(buckets[part][chunk], position, yaw, sx, sy, sz, color);
+        });
+        if (massCanopy && treeRepresentativePositions[variant].length < 4) {
+          treeRepresentativePositions[variant].push({ x: position.x, y: position.y, z: position.z });
+        }
+        placed[variant] += 1;
+      }
+    };
+    placeTreeTier(heroTreeTier, heroTreeCount, heroTreeBuckets, placedHeroTreeCounts, 18, 36, false);
+    placeTreeTier(massCanopyTier, massCanopyTreeCount, massCanopyTreeBuckets, placedMassCanopyTreeCounts, 18, 34, true);
     const buildChunks = (
       name: string,
       geometry: THREE.BufferGeometry,
-      material: THREE.Material,
+      material: THREE.Material | THREE.Material[],
       buckets: number[][],
       target: THREE.Group,
       castShadow = false,
       receiveShadow = false,
+      groundCoverProfile?: GroundCoverProfile,
     ): void => {
-      for (let chunk = 0; chunk < buckets.length; chunk += 1) {
-        const packed = buckets[chunk];
+      const renderBuckets = groundCoverProfile ? partitionGroundCover(buckets) : buckets;
+      for (let chunk = 0; chunk < renderBuckets.length; chunk += 1) {
+        const packed = renderBuckets[chunk];
         const count = packed.length / 8;
         if (count === 0) continue;
         const mesh = new THREE.InstancedMesh(geometry, material, count);
         mesh.name = `${name}Chunk${chunk}`;
+        mesh.matrixAutoUpdate = false;
         mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
         for (let index = 0; index < count; index += 1) {
           const offset = index * 8;
@@ -3931,36 +4485,128 @@ export class Arena implements ArenaRuntime {
         mesh.computeBoundingSphere();
         mesh.castShadow = castShadow;
         mesh.receiveShadow = receiveShadow;
-        target.add(mesh);
+        if (groundCoverProfile) this.groundCoverCulling.add(mesh, target, groundCoverProfile);
+        else target.add(mesh);
       }
     };
-    buildChunks('MonsoonWindGrass', grassGeometry, grassMaterial, grassBuckets, grassGroup);
-    buildChunks('MonsoonMixedWeedsAndSeedHeads', weedGeometry, weedMaterial, weedBuckets, weedGroup);
+    buildChunks('MonsoonWindGrass', grassGeometry, grassMaterial, grassBuckets, grassGroup, false, false, 'grass');
+    buildChunks('MonsoonMixedWeedsAndSeedHeads', weedGeometry, weedMaterial, weedBuckets, weedGroup, false, false, 'weed');
     fernGeometries.forEach((geometry, family) => {
-      buildChunks(`MonsoonFernFamily${family + 1}`, geometry, fernMaterial, fernBuckets[family], fernGroup, false, true);
+      buildChunks(`MonsoonFernFamily${family + 1}`, geometry, fernMaterial, fernBuckets[family], fernGroup, false, true, 'fern');
+    });
+    massFernGeometries.forEach((geometry, family) => {
+      buildChunks(
+        `MonsoonMassFernFamily${family + 1}`,
+        geometry,
+        fernMaterial,
+        massFernBuckets[family],
+        massFernGroup,
+        false,
+        true,
+        'fern',
+      );
     });
     shrubGeometries.forEach((geometry, family) => {
-      buildChunks(`MonsoonShrubFamily${family + 1}`, geometry, shrubMaterial, shrubBuckets[family], shrubGroup, false, true);
+      buildChunks(`MonsoonShrubFamily${family + 1}`, geometry, shrubMaterial, shrubBuckets[family], shrubGroup, false, true, 'shrub');
     });
     treeGeometries.forEach((geometry, family) => {
       buildChunks(`MonsoonTreeFamily${family + 1}`, geometry, treeMaterial, treeBuckets[family], treeGroup, !mobile, true);
     });
+    if (heroTreeTier.partMaterials.length > 0) {
+      heroTreeTier.geometries.forEach((geometry, family) => {
+        buildChunks(
+          `MonsoonHeroTropicalTreeFamily${family + 1}`,
+          geometry,
+          heroTreeTier.partMaterials[family],
+          heroTreeBuckets[family],
+          heroTreeGroup,
+          false,
+          true,
+        );
+      });
+    }
+    if (massCanopyTier.partMaterials.length > 0) {
+      massCanopyTier.geometries.forEach((geometry, family) => {
+        buildChunks(
+          `MonsoonProceduralTropicalTreePart${family + 1}`,
+          geometry,
+          massCanopyTier.partMaterials[family],
+          massCanopyTreeBuckets[family],
+          massCanopyTreeGroup,
+          false,
+          true,
+        );
+      });
+    }
+    const placedTreeCounts = Array.from(
+      { length: Math.max(placedHeroTreeCounts.length, placedMassCanopyTreeCounts.length) },
+      (_, index) => (placedHeroTreeCounts[index] ?? 0) + (placedMassCanopyTreeCounts[index] ?? 0),
+    );
     biomeGroup.userData.biomeVegetation = {
       deterministic: true,
-      familyCounts: { boulder: 3, fern: 3, shrub: 2, tree: 3 },
-      requestedCounts: { rock: rockCount, grass: grassCount, weed: weedCount, fern: fernCount, shrub: shrubCount, tree: treeCount },
-      placedCounts,
+      vegetationConstruction: 'fully-procedural',
+      familyCounts: {
+        boulder: this.rockField.diagnostics.archetypes.length,
+        fern: fernGeometries.length + massFernGeometries.length,
+        shrub: shrubGeometries.length,
+        tree: (treeCount > 0 ? treeGeometries.length : 0) + new Set([
+          ...heroTreeTier.variantNames,
+          ...massCanopyTier.variantNames,
+        ]).size,
+      },
+      requestedCounts: {
+        rock: rockCount,
+        grass: grassCount,
+        weed: weedCount,
+        fern: fernCount + massFernCount,
+        shrub: shrubCount,
+        tree: treeCount + heroTreeCount + massCanopyTreeCount,
+      },
+      visualPlantEstimate: {
+        fern: fernCount + massFernCount,
+        shrub: shrubCount,
+        tree: treeCount + heroTreeCount + massCanopyTreeCount,
+      },
+      placedCounts: {
+        ...placedCounts,
+        fern: [...placedCounts.fern, ...placedMassFernCounts],
+        shrub: placedCounts.shrub,
+        tree: [...(treeCount > 0 ? placedCounts.tree : []), ...placedTreeCounts],
+      },
+      treeConstruction: 'fully-procedural',
+      treeVariantNames: massCanopyTier.variantNames,
+      treeRepresentativePositions,
+      treeLodCounts: { hero: heroTreeCount, massCanopy: massCanopyTreeCount },
+      fernLodCounts: { hero: fernCount, mass: massFernCount, scanned: 0 },
       routeLimits,
       baseClearance,
       densityZoneCounts: Object.fromEntries(Object.entries(biomeZones).map(([profile, zones]) => [profile, zones.length])),
       scaleRanges: {
-        fern: [0.72, 3.33],
+        fern: [0.42, 3.34],
         shrub: [0.9, 3.52],
-        tree: [0.82, 2.15],
-        boulder: [0.55, 13],
+        tree: [9, 44],
+        boulder: this.rockField.diagnostics.diameterRange,
       },
+      rockField: this.rockField.diagnostics,
+      scannedFernSource: 'Project-original procedural pinnate fern geometry',
+      scannedFernLicense: 'Riftline project original',
+      scannedShrubSource: 'Project-original procedural tropical shrub geometry',
+      scannedShrubLicense: 'Riftline project original',
+      shrubLodCounts: { hero: shrubCount, thicket: 0 },
+      scannedTreeSource: 'Project-original procedural broadleaf, emergent, and palm geometry',
+      scannedTreeLicense: 'Riftline project original',
     };
-    biomeGroup.add(rockGroup, grassGroup, weedGroup, fernGroup, shrubGroup, treeGroup);
+    biomeGroup.add(
+      rockGroup,
+      grassGroup,
+      weedGroup,
+      fernGroup,
+      massFernGroup,
+      shrubGroup,
+      treeGroup,
+      heroTreeGroup,
+      massCanopyTreeGroup,
+    );
     this.group.add(biomeGroup);
   }
 

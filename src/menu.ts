@@ -1,4 +1,5 @@
 import { assetUrl } from './assets/assetUrl';
+import { matchModeDefinition, matchModeFromQuery, type MatchModeId } from './game/modes';
 import './asciiLogo';
 
 type RiftSettings = {
@@ -24,6 +25,7 @@ const motionOption = element<HTMLButtonElement>('#motion-option');
 const fullscreenOption = element<HTMLButtonElement>('#fullscreen-option');
 const startButton = element<HTMLButtonElement>('#start-button');
 const mapChoices = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-map-choice]'));
+const modeChoices = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mode-choice]'));
 
 const MENU_MUSIC_VOLUME = 0.32;
 const menuMusic = new Audio(assetUrl('assets/audio/music/rift-menu-lofi-depth-v2.mp3'));
@@ -58,24 +60,57 @@ const syncMusic = (): void => {
 };
 
 const syncMapChoice = (): void => {
-  const quickSense = new URLSearchParams(window.location.search).get('map') === 'quicksense';
+  const map = new URLSearchParams(window.location.search).get('map');
+  const selectedMap = map === 'quicksense' || map === 'bipbeta2' ? map : 'monsoon';
+  const mode = matchModeFromQuery();
+  const modeDefinition = matchModeDefinition(mode);
   for (const choice of mapChoices) {
-    const active = choice.dataset.mapChoice === (quickSense ? 'quicksense' : 'monsoon');
+    const active = choice.dataset.mapChoice === selectedMap;
     choice.classList.toggle('active', active);
     choice.setAttribute('aria-pressed', String(active));
   }
   const tagline = element<HTMLElement>('#overlay-tagline');
-  if (tagline) tagline.innerHTML = `${quickSense ? 'QUICKSENSE // FLOW TEST RANGE' : 'WCA1 // RIFT SECTOR'} <strong>· First to 20</strong>`;
+  if (tagline) {
+    const label = selectedMap === 'bipbeta2'
+      ? 'BIPBETA2 // VECTOR CHAMBER'
+      : selectedMap === 'quicksense'
+        ? 'QUICKSENSE // FLOW TEST RANGE'
+        : 'WCA1 // RIFT SECTOR';
+    tagline.innerHTML = `${label} <strong>· ${modeDefinition.objective}</strong>`;
+  }
   const arenaMeta = document.querySelector<HTMLElement>('.deploy-meta > span');
-  if (arenaMeta) arenaMeta.innerHTML = `<small>Arena</small>${quickSense ? 'QUICKSENSE' : 'WCA1 // RIFT SECTOR'}`;
+  if (arenaMeta) {
+    const label = selectedMap === 'bipbeta2'
+      ? 'BIPBETA2 // VECTOR CHAMBER'
+      : selectedMap === 'quicksense'
+        ? 'QUICKSENSE'
+        : 'WCA1 // RIFT SECTOR';
+    arenaMeta.innerHTML = `<small>Arena</small>${label}`;
+  }
+  for (const choice of modeChoices) {
+    const active = choice.dataset.modeChoice === mode;
+    choice.classList.toggle('active', active);
+    choice.setAttribute('aria-pressed', String(active));
+  }
+  const protocolMeta = document.querySelector<HTMLElement>('.deploy-meta > span:nth-child(2)');
+  if (protocolMeta) protocolMeta.innerHTML = `<small>Protocol</small>${modeDefinition.label}`;
 };
 
 const selectMap = (choice: HTMLButtonElement): void => {
   const map = choice.dataset.mapChoice;
   if (!map) return;
   const url = new URL(window.location.href);
-  if (map === 'quicksense') url.searchParams.set('map', 'quicksense');
+  if (map === 'quicksense' || map === 'bipbeta2') url.searchParams.set('map', map);
   else url.searchParams.delete('map');
+  window.location.assign(url.toString());
+};
+
+const selectMode = (choice: HTMLButtonElement): void => {
+  const mode = choice.dataset.modeChoice as MatchModeId | undefined;
+  if (!mode) return;
+  const url = new URL(window.location.href);
+  if (mode === 'arena') url.searchParams.delete('mode');
+  else url.searchParams.set('mode', mode);
   window.location.assign(url.toString());
 };
 
@@ -150,6 +185,7 @@ fullscreenOption?.addEventListener('click', () => {
   else void document.documentElement.requestFullscreen();
 });
 mapChoices.forEach((choice) => choice.addEventListener('click', () => selectMap(choice)));
+modeChoices.forEach((choice) => choice.addEventListener('click', () => selectMode(choice)));
 startButton?.addEventListener('click', () => {
   // This is the most common first gesture. Let the browser unlock the menu
   // track before Game hides the overlay, then give the ambience bed a moment

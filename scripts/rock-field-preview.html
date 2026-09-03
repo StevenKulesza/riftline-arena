@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Monsoon geological field review</title>
+    <style>
+      * { box-sizing: border-box; } body { margin: 0; background: #192324; color: #e5e8de; font: 12px/1.5 system-ui, sans-serif; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      header { position: absolute; inset: 24px 28px auto; pointer-events: none; }
+      h1 { font-size: 22px; font-weight: 500; margin: 2px 0 14px; letter-spacing: -.5px; }
+      small { color: #b3c5be; letter-spacing: 2px; font-size: 10px; }
+      nav { display: flex; gap: 6px; pointer-events: auto; flex-wrap: wrap; }
+      button { font: inherit; cursor: pointer; border: 1px solid #71847e; background: #172321de; color: inherit; padding: 8px 14px; border-radius: 3px; }
+      button[aria-pressed="true"] { background: #dde1d1; color: #1b2a23; }
+      footer { position: absolute; bottom: 22px; left: 28px; max-width: 700px; text-shadow: 0 1px 4px #000; }
+      #status { color: #b3c5be; }
+    </style>
+  </head>
+  <body>
+    <canvas aria-label="Procedural Monsoon rock-field model review"></canvas>
+    <header><small>MONSOON DIVIDE / PROCEDURAL FIELD STUDY</small><h1>Geology with hierarchy</h1>
+      <nav aria-label="Review views">
+        <button data-view="field" aria-pressed="true">Field composition</button>
+        <button data-view="ground" aria-pressed="false">Ground level</button>
+        <button data-view="families" aria-pressed="false">Six geological forms</button>
+        <button data-view="next" aria-pressed="false">Next field</button>
+      </nav>
+    </header>
+    <footer><div id="caption">Preparing deterministic geometry…</div><div id="status" role="status"></div></footer>
+    <script type="module" src="./rock-field-preview.ts"></script>
+  </body>
+</html>

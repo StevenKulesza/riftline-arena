@@ -12,12 +12,16 @@ function needsDefaultFramebufferAntialiasing(): boolean {
 }
 
 export function createRenderer(canvas: HTMLCanvasElement): THREE.WebGLRenderer {
+  const qaCapture = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('qa');
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: needsDefaultFramebufferAntialiasing(),
     alpha: false,
     stencil: false,
-    preserveDrawingBuffer: false,
+    // The production path can discard the presented framebuffer, but QA
+    // captures need the browser to read back the exact rendered frame.
+    preserveDrawingBuffer: qaCapture,
     powerPreference: 'high-performance',
   });
   renderer.outputColorSpace = THREE.SRGBColorSpace;

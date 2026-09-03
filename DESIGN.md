@@ -6,9 +6,9 @@
 - Target feeling: immediate, fast, precise, readable, aggressive, and replayable; Quake III Arena urgency with Warsow air control and Tribes-style slope skiing.
 - Primary verbs: move, aim, fire.
 - Secondary verbs: jump/bunny-hop, ski, air-strafe, weapon-swap, collect, route-plan, and rocket-jump.
-- Objective: lead the score when the six-minute match expires, or reach 20 points first.
-- Pressure: three combat bots, scarce armor/health, timed damage/speed power-ups, a central Flux Core objective, and a rare railgun spawn.
-- Reward/progression: kills score 1; suicides score -1; capturing the Flux Core scores 3; midair eliminations are a tiebreaker rather than match score; controlling timed items produces tactical advantage.
+- Objective: lead the score when the six-minute Arena/TDM match expires, reach the mode target first, capture three flags in CTF, or secure three uplinks in Raid.
+- Pressure: an 8v8 roster across all team modes, scarce armor/health, timed damage/speed power-ups, mode objectives, hostile drones in Raid, and a rare railgun spawn.
+- Reward/progression: kills score 1 for the owning team; suicides score -1 in Arena; the Flux Core scores 3 in Arena/TDM; CTF captures score 1; Raid uplinks score 1; midair eliminations are a tiebreaker rather than match score; controlling timed items produces tactical advantage.
 - Fail/retry: death names the cause and respawns the player at a safe spawn after 1.6 seconds without resetting the match.
 - Skill expression: momentum preservation, route timing, prediction shots, weapon matchups, rocket jumps, resource denial, and accurate fire while airborne.
 - Readability promise: strong silhouettes, weapon-specific colors, pickup beams/timers, directional damage, compact HUD, and visible arena landmarks.
@@ -16,7 +16,15 @@
 
 ## Core loop contract
 
-The player chains movement and weapon fire to eliminate bots and capture the Flux Core while rivals and timed resources create pressure; success gives score, item control, and momentum, while death costs position and causes a fast readable respawn.
+The player chains movement and weapon fire to eliminate enemies, move with a squad, and contest the active mode objective. Success gives team score, item control, and momentum, while death costs position and causes a fast readable respawn.
+
+## Match mode plan
+
+- Arena: legacy free-for-all with three combat bots, first to 20 individual points, and the rotating Flux Core.
+- Team Deathmatch: player + seven Azure allies versus eight Crimson opponents; friendly fire is disabled, team frags are shared, and the Flux Core awards three team points.
+- Capture the Flag: the same 8v8 roster, with readable Azure/Crimson flag bases, dropped-flag returns, carrier drops on elimination, and first to three captures.
+- Raid: player + seven Azure allies versus eight Crimson opponents while hostile drones pressure both squads; the controlling team holds three rotating uplinks for four seconds each to extract.
+- Team assignment: in competitive modes, player and bot IDs 0–6 are Azure and bot IDs 7–14 are Crimson, keeping the 16-combatant split deterministic.
 
 ## Movement contract
 

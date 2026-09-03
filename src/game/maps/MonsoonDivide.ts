@@ -638,6 +638,29 @@ function paletteColor(x: number, z: number, y: number, normalY: number, seed: nu
     new THREE.Color(0x71805f),
     smoothstep(24, 43, designY),
   );
+  // Large-scale biome color is authored independently from the repeating PBR
+  // grain. Deep, humid saddles carry blue-green jungle soil; broad combat
+  // shelves stay warmer and drier so they read immediately as open plains.
+  // The slope pass below still wins on steep/high ground, preserving exposed
+  // mountain stone instead of tinting the whole island uniformly green.
+  const jungleBasin = Math.max(
+    gaussian(design.x, design.z, -132, 62, 58, 34),
+    gaussian(design.x, design.z, -58, -108, 66, 34),
+    gaussian(design.x, design.z, 90, 70, 60, 36),
+    gaussian(design.x, design.z, 126, -60, 53, 37),
+    gaussian(design.x, design.z, -164, -20, 42, 46),
+  );
+  const openPlain = Math.max(
+    gaussian(design.x, design.z, -25, 91, 66, 31),
+    gaussian(design.x, design.z, 55, -82, 68, 34),
+    gaussian(design.x, design.z, 2, 8, 92, 55),
+  );
+  const flatGround = smoothstep(0.7, 0.94, normalY);
+  const lowlandSurvival = 1 - smoothstep(46, 72, designY);
+  const jungleStrength = jungleBasin * flatGround * lowlandSurvival * (1 - masks.route * 0.72);
+  const plainStrength = openPlain * flatGround * (1 - jungleStrength * 0.88);
+  color.lerp(new THREE.Color(0x27513b), jungleStrength * 0.72);
+  color.lerp(new THREE.Color(0x71815b), plainStrength * 0.55);
   // Route masks are intentionally broad for terrain shaping and ski flow;
   // expose soil gradually only near their centers so the surrounding shoulders
   // remain mossy like the green plateaus in the source panorama.

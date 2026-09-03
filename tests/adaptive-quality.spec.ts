@@ -97,3 +97,40 @@ test('adaptive quality clamps to its configured floor without oscillating', () =
   expect(sampleWindow(quality, 25, 40)).toBeNull();
   expect(quality.currentDprCap).toBe(1);
 });
+
+test('fast CPU submission does not hide GPU delivery stalls or permit premature recovery', () => {
+  const quality = new AdaptiveQualitySystem({ targetFrameMs: 1_000 / 65, maxFrameMs: 1_000 / 35 });
+  let change = null;
+  for (let frame = 0; frame < 50; frame += 1) change = quality.sampleFrame(6, 20) ?? change;
+  expect(change).toMatchObject({ dprCap: 1.125, reason: 'sustained-overload' });
+  // Cheap command submission is not headroom if presentation remains slow.
+  for (let frame = 0; frame < 500; frame += 1) {
+    expect(quality.sampleFrame(6, 20)?.reason).not.toBe('recovered-headroom');
+  }
+  expect(quality.snapshot().healthyWindows).toBe(0);
+});
+
+test('a 65 FPS quality target does not degrade healthy 60 Hz presentation', () => {
+  const quality = new AdaptiveQualitySystem({ targetFrameMs: 1_000 / 65 });
+  for (let frame = 0; frame < 600; frame += 1) expect(quality.sampleFrame(6, 1_000 / 60)).toBeNull();
+  expect(quality.currentDprCap).toBe(1.25);
+});
+
+test('the 35 FPS floor detects repeated tail stalls despite low average work', () => {
+  const quality = new AdaptiveQualitySystem({ targetFrameMs: 1_000 / 65, maxFrameMs: 1_000 / 35 });
+  quality.sampleFrame(6, 29);
+  quality.sampleFrame(6, 29);
+  let change = null;
+  for (let frame = 0; frame < 57; frame += 1) change = quality.sampleFrame(6, 1_000 / 60) ?? change;
+  expect(change).toMatchObject({ reason: 'burst-overload', window: { severeFrameCount: 2 } });
+});
+
+test('quality cooldowns use wall-clock cadence and recover after genuine stable delivery', () => {
+  const quality = new AdaptiveQualitySystem({ targetFrameMs: 1_000 / 65 });
+  sampleWindow(quality, 25, 40);
+  let recovery = null;
+  for (let frame = 0; frame < 245; frame += 1) recovery = quality.sampleFrame(6, 1_000 / 60) ?? recovery;
+  expect(recovery?.reason).toBe('recovered-headroom');
+  expect(quality.currentDprCap).toBe(1.25);
+  expect(quality.sampleFrame(6, Number.NaN)).toBeNull();
+});

@@ -1,0 +1,312 @@
+{
+  "round": "bar",
+  "files": {
+    "CTF_ArxNovena_1.png": {
+      "width": 1920,
+      "height": 1080,
+      "colorEntropyBits": 6.366451978073413,
+      "dominantColorShare": 0.062135416666666665,
+      "luminance": {
+        "mean": 0.5137024020833173,
+        "contrast": 0.1600893884549979
+      },
+      "meanSaturation": 0.30899225012570997,
+      "edgeDensity": 0.1356617906861706
+    },
+    "CTF_ArxNovena_5.png": {
+      "width": 1920,
+      "height": 1080,
+      "colorEntropyBits": 6.9093936872024475,
+      "dominantColorShare": 0.054635416666666665,
+      "luminance": {
+        "mean": 0.5632045299972692,
+        "contrast": 0.2142474038274443
+      },
+      "meanSaturation": 0.31502880467377103,
+      "edgeDensity": 0.2134301462794149
+    },
+    "CTF_ArxNovena_6.png": {
+      "width": 1920,
+      "height": 1080,
+      "colorEntropyBits": 6.543989102236807,
+      "dominantColorShare": 0.058159722222222224,
+      "luminance": {
+        "mean": 0.5492614120915059,
+        "contrast": 0.18136702356613
+      },
+      "meanSaturation": 0.3314194961893827,
+      "edgeDensity": 0.0900996396014416
+    },
+    "CTF_Katabatic_1.png": {
+      "width": 1920,
+      "height": 1080,
+      "colorEntropyBits": 5.547274902149542,
+      "dominantColorShare": 0.07399305555555556,
+      "luminance": {
+        "mean": 0.46386840615467395,
+        "contrast": 0.23959258408992115
+      },
+      "meanSaturation": 0.44573318607776,
+      "edgeDensity": 0.17394530421878313
+    },
+    "CTF_Katabatic_2.png": {
+      "width": 800,
+      "height": 450,
+      "colorEntropyBits": 5.541020038115024,
+      "dominantColorShare": 0.07210069444444445,
+      "luminance": {
+        "mean": 0.4632001248093565,
+        "contrast": 0.2388081848370785
+      },
+      "meanSaturation": 0.4453700691442437,
+      "edgeDensity": 0.16972298777471556
+    },
+    "CTF_Katabatic_8.png": {
+      "width": 1920,
+      "height": 1080,
+      "colorEntropyBits": 6.088694933197937,
+      "dominantColorShare": 0.11673611111111111,
+      "luminance": {
+        "mean": 0.2094040382352972,
+        "contrast": 0.22784661173452903
+      },
+      "meanSaturation": 0.6670740217564534,
+      "edgeDensity": 0.2513426612960215
+    },
+    "arx-novena-wide.jpg": {
+      "width": 1063,
+      "height": 600,
+      "colorEntropyBits": 6.466096208375496,
+      "dominantColorShare": 0.05326312154696133,
+      "luminance": {
+        "mean": 0.5114610354105736,
+        "contrast": 0.21050107341263025
+      },
+      "meanSaturation": 0.3364258061426883,
+      "edgeDensity": 0.1281051263132005
+    },
+    "katabatic-cn-h.jpg": {
+      "width": 350,
+      "height": 428,
+      "colorEntropyBits": 4.545640251357347,
+      "dominantColorShare": 0.16535326086956523,
+      "luminance": {
+        "mean": 0.5844680574131365,
+        "contrast": 0.12187581550004646
+      },
+      "meanSaturation": 0.3110227050406312,
+      "edgeDensity": 0.07720166205881877
+    },
+    "katabatic-wide.jpg": {
+      "width": 1063,
+      "height": 600,
+      "colorEntropyBits": 5.4858873206490015,
+      "dominantColorShare": 0.06906077348066299,
+      "luminance": {
+        "mean": 0.5046152028220119,
+        "contrast": 0.1324892560088947
+      },
+      "meanSaturation": 0.3997178043321008,
+      "edgeDensity": 0.19349284986472717
+    },
+    "katabatic2.png": {
+      "width": 1920,
+      "height": 1080,
+      "colorEntropyBits": 4.8157370399858905,
+      "dominantColorShare": 0.09991319444444445,
+      "luminance": {
+        "mean": 0.512180838031047,
+        "contrast": 0.12747456572249297
+      },
+      "meanSaturation": 0.38973907657029405,
+      "edgeDensity": 0.1685569924386969
+    },
+    "warsow-ingame-03.jpg": {
+      "width": 960,
+      "height": 768,
+      "colorEntropyBits": 5.081943486596477,
+      "dominantColorShare": 0.11341552734375,
+      "luminance": {
+        "mean": 0.24943887069168408,
+        "contrast": 0.10588207833979807
+      },
+      "meanSaturation": 0.20654168778371038,
+      "edgeDensity": 0.12698707472886644
+    },
+    "warsow-ingame-03b.jpg": {
+      "width": 960,
+      "height": 768,
+      "colorEntropyBits": 5.00044991180471,
+      "dominantColorShare": 0.116943359375,
+      "luminance": {
+        "mean": 0.28128405448643556,
+        "contrast": 0.14678242885786064
+      },
+      "meanSaturation": 0.28474942923776514,
+      "edgeDensity": 0.13678007230228298
+    },
+    "yt-0lrSVumR7l8.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 6.640326567896533,
+      "dominantColorShare": 0.07592013888888889,
+      "luminance": {
+        "mean": 0.556389191761964,
+        "contrast": 0.18575423387662135
+      },
+      "meanSaturation": 0.3948013944123508,
+      "edgeDensity": 0.27697689209243165
+    },
+    "yt-3zQbyCRnOHs.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.084432088680155,
+      "dominantColorShare": 0.14366319444444445,
+      "luminance": {
+        "mean": 0.3401033922930393,
+        "contrast": 0.25540186411439436
+      },
+      "meanSaturation": 0.30557923411203713,
+      "edgeDensity": 0.17474030103879584
+    },
+    "yt-5Y-y_HpFN7w.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 2.681053788926605,
+      "dominantColorShare": 0.4309201388888889,
+      "luminance": {
+        "mean": 0.10802722678375029,
+        "contrast": 0.10651799806827257
+      },
+      "meanSaturation": 0.05032615684330564,
+      "edgeDensity": 0.0652250724330436
+    },
+    "yt-7MHVJVXZSh0.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 2.698436715575555,
+      "dominantColorShare": 0.5969444444444445,
+      "luminance": {
+        "mean": 0.06639856409316228,
+        "contrast": 0.07718961741513791
+      },
+      "meanSaturation": 0.3762591347235266,
+      "edgeDensity": 0.04474948766871599
+    },
+    "yt-AZZ8YbLp_p8.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 4.592586494758059,
+      "dominantColorShare": 0.2298263888888889,
+      "luminance": {
+        "mean": 0.1540026403731078,
+        "contrast": 0.1330835404201314
+      },
+      "meanSaturation": 0.37003112182150505,
+      "edgeDensity": 0.12205851176595293
+    },
+    "yt-EJEcGFJZmv8.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 3.578770590391404,
+      "dominantColorShare": 0.2777951388888889,
+      "luminance": {
+        "mean": 0.12032111766068178,
+        "contrast": 0.1183767170403536
+      },
+      "meanSaturation": 0.23407640694507137,
+      "edgeDensity": 0.06079075683697265
+    },
+    "yt-GX_8oz7qKMM.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 3.5243874786838725,
+      "dominantColorShare": 0.28572916666666665,
+      "luminance": {
+        "mean": 0.10427963970586612,
+        "contrast": 0.10464920253432339
+      },
+      "meanSaturation": 0.2813714209869196,
+      "edgeDensity": 0.16262101618260194
+    },
+    "yt-NkK80yRjrgM.jpg": {
+      "width": 480,
+      "height": 360,
+      "colorEntropyBits": 5.284374418993682,
+      "dominantColorShare": 0.2517578125,
+      "luminance": {
+        "mean": 0.24779272480597891,
+        "contrast": 0.21212006776641662
+      },
+      "meanSaturation": 0.2005895736636976,
+      "edgeDensity": 0.11581047513344961
+    },
+    "yt-RXj2xiWGY5s.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 5.127686853020333,
+      "dominantColorShare": 0.20894097222222222,
+      "luminance": {
+        "mean": 0.20118914742649285,
+        "contrast": 0.21330401853413036
+      },
+      "meanSaturation": 0.49990684854921397,
+      "edgeDensity": 0.1527807222104445
+    },
+    "yt-cJjcMQwtnSA.jpg": {
+      "width": 1280,
+      "height": 720,
+      "colorEntropyBits": 2.926730607241135,
+      "dominantColorShare": 0.5826736111111112,
+      "luminance": {
+        "mean": 0.08249742385618554,
+        "contrast": 0.07508357716130695
+      },
+      "meanSaturation": 0.7688463994743953,
+      "edgeDensity": 0.028867217864461874
+    },
+    "yt-cwVf_656T-0.jpg": {
+      "width": 480,
+      "height": 360,
+      "colorEntropyBits": 2.151491099217487,
+      "dominantColorShare": 0.7192057291666667,
+      "luminance": {
+        "mean": 0.052994214389283666,
+        "contrast": 0.07790896764051067
+      },
+      "meanSaturation": 0.2977553966978014,
+      "edgeDensity": 0.049389567147613764
+    },
+    "yt-m47UljNSZEI.jpg": {
+      "width": 480,
+      "height": 360,
+      "colorEntropyBits": 3.733796663672824,
+      "dominantColorShare": 0.4474739583333333,
+      "luminance": {
+        "mean": 0.11361892584762688,
+        "contrast": 0.17364254659250172
+      },
+      "meanSaturation": 0.21180317497807338,
+      "edgeDensity": 0.11875693673695893
+    },
+    "yt-qv6FlCvsqbg.jpg": {
+      "width": 1152,
+      "height": 720,
+      "colorEntropyBits": 5.523780045989138,
+      "dominantColorShare": 0.112765625,
+      "luminance": {
+        "mean": 0.29032573628675884,
+        "contrast": 0.11674931584421232
+      },
+      "meanSaturation": 0.22973213767522427,
+      "edgeDensity": 0.11457340702623721
+    }
+  },
+  "average": {
+    "colorEntropyBits": 4.877617290911635,
+    "dominantColorShare": 0.21677303892685976,
+    "meanSaturation": 0.34651570951830535,
+    "edgeDensity": 0.13410666686803283,
+    "luminanceContrast": 0.15826952325440546
+  }
+}

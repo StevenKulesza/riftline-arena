@@ -20,7 +20,8 @@
     "inspect:canvas": "node scripts/inspect-threejs-canvas.mjs",
     "capture:structures": "node scripts/capture-ground-structures.mjs",
     "capture:outpost": "node scripts/capture-outpost-tower.mjs",
-    "profile:perf": "npm run build && node scripts/profile-performance.mjs"
+    "profile:perf": "npm run build && node scripts/profile-performance.mjs",
+    "test:performance-unit": "playwright test --config=playwright.performance-unit.config.ts"
   },
   "dependencies": {
     "lil-gui": "^0.21.0",

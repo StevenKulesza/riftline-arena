@@ -26,11 +26,12 @@ import {
   applyGroundedCelDepth,
   createQuickSenseSurfaceTextures,
 } from './QuickSenseSurfaceTextures';
+import { createSeededRandom } from '../../utils/random';
 
 export const QUICKSENSE = {
   id: 'quicksense',
   name: 'QuickSense',
-  generationVersion: 7,
+  generationVersion: 8,
   width: 720,
   depth: 640,
   killY: -48,
@@ -207,8 +208,12 @@ function pathDeckBottomDepth(name: string): number {
 // The arena root is deliberately non-uniformly scaled. Counter-scale the
 // imported source so one source unit resolves to one world metre; the previous
 // 1.28x/1.44x world scale put ordinary guard rails above the player's view.
-const OUTPOST_TOWER_MODEL_SCALE_XZ = 1 / QUICK_HORIZONTAL_SCALE;
-const OUTPOST_TOWER_MODEL_SCALE_Y = 1 / QUICK_VERTICAL_SCALE;
+// The concept treats the imported tower as a true megastructure, not a prop
+// parked in the basin. Preserve its authored proportions while increasing the
+// platform footprint more than the antenna height so the four flight decks
+// dominate the playable bowl without pushing the mast out of the skyline.
+const OUTPOST_TOWER_MODEL_SCALE_XZ = 1.36 / QUICK_HORIZONTAL_SCALE;
+const OUTPOST_TOWER_MODEL_SCALE_Y = 1.36 / QUICK_VERTICAL_SCALE;
 
 // Player-scale support laid directly over the imported tower's visible stair
 // chain. Coordinates remain in the GLB's source space and are transformed with
@@ -499,6 +504,9 @@ export class QuickSenseArena implements ArenaRuntime {
   private staticWorldFloorTriangleCount = 0;
   private staticWorldShotBoundsTree: MeshBVH | null = null;
   private staticWorldShotTriangleCount = 0;
+  private desertBoundsTree: MeshBVH | null = null;
+  private readonly desertCollisionBounds = new THREE.Box3();
+  private desertCollisionTriangleCount = 0;
   private readonly outpostTowerFloorRay = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
   private readonly outpostTowerCapsuleSegment = new THREE.Line3();
   private readonly outpostTowerCapsuleBounds = new THREE.Box3();
@@ -575,9 +583,9 @@ export class QuickSenseArena implements ArenaRuntime {
 
   static async load(seed: number): Promise<QuickSenseArena> {
     const skyPromise = new THREE.TextureLoader()
-      .loadAsync(assetUrl('assets/maps/quicksense-panorama-v1/quicksense-equirect-v3.png'))
+      .loadAsync(assetUrl('assets/maps/quicksense-panorama-v1/quicksense-equirect-v1.png'))
       .then((texture) => {
-        texture.name = 'QuickSenseEquirectangularSkyV3';
+        texture.name = 'QuickSenseEquirectangularSkyV1';
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.mapping = THREE.EquirectangularReflectionMapping;
         texture.minFilter = THREE.LinearFilter;
@@ -626,23 +634,33 @@ export class QuickSenseArena implements ArenaRuntime {
     this.textures.push(...surfaceTextures.all);
     const groundMaterial = this.material('QuickSense sandstone basin floor', 0xffffff, 0.01, 0.94);
     const groundFoundationMaterial = this.material('QuickSense umber terrain foundation', 0x46382e, 0.01, 0.99);
-    const deckMaterial = this.material('QuickSense graphite panels', 0x858e92, 0.14, 0.72, panelTexture);
-    const sideMaterial = this.material('QuickSense chamfered deck structure', 0x354147, 0.18, 0.78);
-    const structureMaterial = this.material('QuickSense panelled architectural shells', 0x69757a, 0.2, 0.7, panelTexture);
+    const deckMaterial = this.material('QuickSense graphite panels', 0x56636a, 0.18, 0.76, panelTexture);
+    // Keep the distant transit architecture a half-step darker than the road
+    // surface. The separation survives the warm haze without crushing the
+    // readable panel texture into a black silhouette.
+    const sideMaterial = this.material('QuickSense chamfered deck structure', 0x303b40, 0.18, 0.78);
+    const structureMaterial = this.material('QuickSense panelled architectural shells', 0x3f4a4e, 0.24, 0.74, panelTexture);
     const rockMaterial = this.material('QuickSense volcanic cliffs', 0xffffff, 0.0, 0.96);
     const rockHighlightMaterial = this.material('QuickSense iron-sandstone cliff faces', 0x856548, 0.0, 0.94);
     const mossCapMaterial = this.material('QuickSense dry scrub cliff caps', 0x756a4c, 0.01, 1);
-    const cyanMaterial = this.emissiveMaterial('QuickSense cyan route', 0x28b9d5, 0x16b9e4);
+    const cyanMaterial = this.emissiveMaterial('QuickSense cyan route', 0x39cbe1, 0x20c9ee);
     const magentaMaterial = this.emissiveMaterial('QuickSense terracotta route', 0xa85e3d, 0x7a3928);
     const amberMaterial = this.emissiveMaterial('QuickSense amber safety', 0xd18b28, 0xb96b0d);
-    const whiteMaterial = this.material('QuickSense gunmetal structure trim', 0xa0aaad, 0.3, 0.6);
+    const whiteMaterial = this.material('QuickSense gunmetal structure trim', 0x727d80, 0.34, 0.64);
     groundMaterial.vertexColors = true;
+    groundMaterial.flatShading = true;
     rockMaterial.vertexColors = true;
     rockMaterial.side = THREE.DoubleSide;
+    // The concept's canyon is defined by broad, graphic facets. Smooth cliff
+    // normals made the same silhouettes read as soft dunes from every combat
+    // camera, even with a detailed normal map.
+    rockMaterial.flatShading = true;
+    rockHighlightMaterial.flatShading = true;
+    mossCapMaterial.flatShading = true;
 
     groundMaterial.map = surfaceTextures.terrainAlbedo;
     groundMaterial.normalMap = surfaceTextures.terrainNormal;
-    groundMaterial.normalScale.set(0.34, 0.34);
+    groundMaterial.normalScale.set(0.16, 0.16);
     groundMaterial.roughnessMap = surfaceTextures.terrainRoughness;
     groundFoundationMaterial.normalMap = surfaceTextures.rockNormal;
     groundFoundationMaterial.normalScale.set(0.2, 0.2);
@@ -832,6 +850,21 @@ export class QuickSenseArena implements ArenaRuntime {
       amberMaterial,
       false,
     );
+    this.createPath(
+      'North skyline transit viaduct',
+      splinePoints([
+        { x: -74, y: 25, z: 55 }, { x: -58, y: 31, z: 53 }, { x: -39, y: 35, z: 52 },
+        { x: -18, y: 29, z: 55 }, { x: 0, y: 38, z: 50 }, { x: 18, y: 29, z: 55 },
+        { x: 39, y: 35, z: 52 }, { x: 58, y: 31, z: 53 }, { x: 74, y: 25, z: 55 },
+      ], 28),
+      6.8,
+      0.08,
+      deckMaterial,
+      sideMaterial,
+      amberMaterial,
+      amberMaterial,
+      false,
+    );
     if (!hasOutpostTower) {
       this.createPath(
         'Central clear-span spine',
@@ -885,6 +918,64 @@ export class QuickSenseArena implements ArenaRuntime {
     this.addPlatform('South launch west roof', -10.6, -61, 7.1, 8.4, 2.4, 13, deckMaterial, true);
     this.addPlatform('South launch east roof', 10.6, -61, 7.1, 8.4, 2.4, 13, deckMaterial, true);
 
+    // Substantial stations lock the skyline viaduct into the canyon instead
+    // of letting it read as a decorative ribbon. Their front aprons overlap
+    // the route edge while the occupied shells sit behind its clear width.
+    for (const side of [-1, 1]) {
+      const x = side * 58;
+      const platformY = 32;
+      const accent = side < 0 ? cyanMaterial : magentaMaterial;
+      const faction = side < 0 ? 'cyan' : 'magenta';
+      this.addPlatform(
+        `North ${faction} transit station apron`,
+        x,
+        58,
+        platformY,
+        19,
+        2.4,
+        15,
+        deckMaterial,
+        true,
+      );
+      this.box(
+        `North ${faction} transit station shell`,
+        new THREE.Vector3(x, platformY + 3.8, 61),
+        new THREE.Vector3(13, 7.6, 8.5),
+        structureMaterial,
+        true,
+        side * -0.04,
+      );
+      this.box(
+        `North ${faction} transit station crown`,
+        new THREE.Vector3(x, platformY + 8, 61),
+        new THREE.Vector3(16.5, 1.1, 10.5),
+        whiteMaterial,
+        true,
+        side * -0.04,
+      );
+      this.box(
+        `North ${faction} transit station signal`,
+        new THREE.Vector3(x, platformY + 4.4, 56.68),
+        new THREE.Vector3(7.4, 1.15, 0.22),
+        accent,
+        false,
+      ).castShadow = false;
+      this.box(
+        `North ${faction} transit station antenna`,
+        new THREE.Vector3(x + side * 3.8, platformY + 12, 61),
+        new THREE.Vector3(0.42, 7, 0.42),
+        whiteMaterial,
+        true,
+      );
+      this.registerBuilding(
+        side < 0 ? 'Northwest Transit Station' : 'Northeast Transit Station',
+        'gateway',
+        'viaduct-anchor',
+        faction,
+        new THREE.Vector3(x, platformY + 4, 61),
+      );
+    }
+
     this.createEntryGatehouses(structureMaterial, cyanMaterial, magentaMaterial, amberMaterial);
     if (!hasOutpostTower) {
       this.createCentralStructures(structureMaterial, whiteMaterial, cyanMaterial, magentaMaterial, amberMaterial);
@@ -909,6 +1000,9 @@ export class QuickSenseArena implements ArenaRuntime {
     };
     if (outpostTower) this.createOutpostTower(outpostTower, panelTexture, panelNormal, panelRoughness);
     this.createTacticalCover(structureMaterial, whiteMaterial, cyanMaterial);
+    this.createBasinBeaconScatter(structureMaterial, whiteMaterial, cyanMaterial, magentaMaterial, amberMaterial);
+    this.createDesertDressing(rockHighlightMaterial);
+    this.createDesertCollision();
     this.createStaticWorldShotCollision();
     this.createStaticWorldFloorCollision();
 
@@ -976,6 +1070,7 @@ export class QuickSenseArena implements ArenaRuntime {
       + this.rampSurfaces.length * 72
       + this.pathSurfaces.length * 48
       + this.outpostTowerCollisionTriangleCount
+      + this.desertCollisionTriangleCount
       + this.staticWorldShotTriangleCount
       + this.staticWorldFloorTriangleCount,
     );
@@ -984,7 +1079,7 @@ export class QuickSenseArena implements ArenaRuntime {
       seed,
       generationVersion: QUICKSENSE.generationVersion,
       ready: true,
-      topologyHash: `quicksense-${seed.toString(16)}-habitat-flow-v12`,
+      topologyHash: `quicksense-${seed.toString(16)}-habitat-flow-v13-desert-dressing`,
       bounds: { width: QUICKSENSE.width, depth: QUICKSENSE.depth },
       // Keep the authored sky volume 20% above the fighter's hard 600 m
       // ceiling, matching the former 150/180 then 300/360 safety headroom.
@@ -1160,11 +1255,17 @@ export class QuickSenseArena implements ArenaRuntime {
         passCorrected = true;
         contacts += 1;
       }
-      const towerContact = this.resolveOutpostTowerCapsule(position, velocity, radius, height);
+      const towerContact = this.resolveTriangleCapsule(position, velocity, radius, height, this.outpostTowerBoundsTree, this.outpostTowerCollisionBounds);
       if (towerContact.corrected) {
         passCorrected = true;
         contacts += towerContact.contacts;
         if (towerContact.wallContact) wallContact = true;
+      }
+      const desertContact = this.resolveTriangleCapsule(position, velocity, radius, height, this.desertBoundsTree, this.desertCollisionBounds);
+      if (desertContact.corrected) {
+        passCorrected = true;
+        contacts += desertContact.contacts;
+        if (desertContact.wallContact) wallContact = true;
       }
       if (!passCorrected) break;
       solidCorrected = true;
@@ -1192,19 +1293,19 @@ export class QuickSenseArena implements ArenaRuntime {
     return result;
   }
 
-  private resolveOutpostTowerCapsule(
+  private resolveTriangleCapsule(
     position: THREE.Vector3,
     velocity: THREE.Vector3,
     radius: number,
     height: number,
+    boundsTree: MeshBVH | null,
+    bounds: THREE.Box3,
   ): { contacts: number; corrected: boolean; wallContact: boolean } {
     const result = this.outpostTowerCollisionResult;
     result.contacts = 0;
     result.corrected = false;
     result.wallContact = false;
-    const boundsTree = this.outpostTowerBoundsTree;
     if (!boundsTree) return result;
-    const bounds = this.outpostTowerCollisionBounds;
     if (
       position.x + radius < bounds.min.x
       || position.x - radius > bounds.max.x
@@ -1457,6 +1558,9 @@ export class QuickSenseArena implements ArenaRuntime {
   dispose(): void {
     this.group.traverse((object) => {
       if ((object as THREE.SkinnedMesh).isSkinnedMesh) (object as THREE.SkinnedMesh).skeleton.dispose();
+      if ((object as THREE.InstancedMesh).isInstancedMesh && object.userData.desertDressing) {
+        (object as THREE.InstancedMesh).dispose();
+      }
     });
     for (const geometry of new Set(this.geometries)) geometry.dispose();
     for (const material of new Set(this.materials)) material.dispose();
@@ -1556,6 +1660,7 @@ export class QuickSenseArena implements ArenaRuntime {
         || mesh.name === 'QuickSense jump pad core'
         || mesh.material.transparent
         || mesh.material.opacity < 1
+        || mesh.userData.desertDressing === true
       ) return;
       const position = mesh.geometry.getAttribute('position');
       if (!position) return;
@@ -1688,6 +1793,49 @@ export class QuickSenseArena implements ArenaRuntime {
     this.group.userData.staticRenderBatches = batchIndex;
   }
 
+  /** Exact solid dressing; no oversized invisible box around irregular rock. */
+  private createDesertCollision(): void {
+    this.group.updateMatrixWorld(true);
+    const groupInverse = this.group.matrixWorld.clone().invert();
+    const positions: number[] = [];
+    const baseMatrix = new THREE.Matrix4();
+    const instanceMatrix = new THREE.Matrix4();
+    const transform = new THREE.Matrix4();
+    const point = new THREE.Vector3();
+    let instances = 0;
+    this.group.traverse((object) => {
+      const mesh = object as THREE.InstancedMesh;
+      if (!mesh.isInstancedMesh || !mesh.visible || mesh.userData.desertSolid !== true) return;
+      const attribute = mesh.geometry.getAttribute('position');
+      const index = mesh.geometry.getIndex();
+      const count = index?.count ?? attribute.count;
+      baseMatrix.multiplyMatrices(groupInverse, mesh.matrixWorld);
+      for (let instance = 0; instance < mesh.count; instance += 1) {
+        mesh.getMatrixAt(instance, instanceMatrix);
+        transform.multiplyMatrices(baseMatrix, instanceMatrix);
+        for (let vertex = 0; vertex < count; vertex += 1) {
+          point.fromBufferAttribute(attribute, index ? index.getX(vertex) : vertex).applyMatrix4(transform);
+          positions.push(point.x, point.y, point.z);
+        }
+        instances += 1;
+      }
+    });
+    if (positions.length === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.computeBoundingBox();
+    this.desertCollisionBounds.copy(geometry.boundingBox!);
+    this.trackGeometry(geometry);
+    this.desertBoundsTree = new MeshBVH(geometry, { maxLeafSize: 12 });
+    this.desertCollisionTriangleCount = positions.length / 9;
+    this.group.userData.desertCollisionAudit = {
+      engine: 'visible-desert-capsule-bvh',
+      triangles: this.desertCollisionTriangleCount,
+      instances,
+      broadProxyFallbacks: 0,
+    };
+  }
+
   /**
    * Build projectile, hitscan, grapple, and LOS collision from the same opaque
    * triangles the player can see. The previous per-segment AABBs filled the
@@ -1750,7 +1898,7 @@ export class QuickSenseArena implements ArenaRuntime {
       const hasOpaqueSurface = materials.some((material) => (
         material.visible && !material.transparent && material.opacity >= 0.92
       ));
-      if (importedTower || animatedMesh || !hasOpaqueSurface || /particle|weather/.test(label)) {
+      if (importedTower || animatedMesh || mesh.userData.decorationOnly === true || !hasOpaqueSurface || /particle|weather/.test(label)) {
         ignoredMeshes += 1;
         return;
       }
@@ -1831,6 +1979,7 @@ export class QuickSenseArena implements ArenaRuntime {
         ancestor = ancestor.parent;
       }
       const label = hierarchyNames.join(' ');
+      if (mesh.userData.decorationOnly === true) return;
       if (label.includes('quicksense imported outpost tower')) return;
       if (/signal|centerline|edge trim|window light|cable|halo|banner|moss|particle|weather|jump pad|command console/.test(label)) return;
       meshToLocal.multiplyMatrices(groupInverse, mesh.matrixWorld);
@@ -1895,7 +2044,7 @@ export class QuickSenseArena implements ArenaRuntime {
     interiorMaterial.emissive.setHex(0x07191d);
     interiorMaterial.emissiveIntensity = 0.18;
     const trimMaterial = texturedMaterial('QuickSense outpost tower brushed trim', 0xb8c4c5, 0.78, 0.34, 0.2);
-    const padMaterial = texturedMaterial('QuickSense outpost tower flight deck', 0x394f57, 0.62, 0.58, 0.24);
+    const padMaterial = texturedMaterial('QuickSense outpost tower flight deck', 0x52676e, 0.5, 0.62, 0.24);
     const doorMaterial = this.material('QuickSense outpost tower passable energy doors', 0x56b9c4, 0.08, 0.3);
     doorMaterial.emissive.setHex(0x0b7181);
     doorMaterial.emissiveIntensity = 1.4;
@@ -1904,7 +2053,13 @@ export class QuickSenseArena implements ArenaRuntime {
     doorMaterial.opacity = 0.34;
     doorMaterial.depthWrite = false;
     const cyanMaterial = this.emissiveMaterial('QuickSense outpost tower cyan systems', 0x18bad0, 0x087e9b);
-    const magentaMaterial = this.emissiveMaterial('QuickSense outpost tower magenta banner', 0xb84d83, 0x8b175d);
+    // The tower banner is a large silhouette-defining mesh. It should read as
+    // painted faction fabric/laminate, not as a full-screen emissive beacon.
+    // The old hot-magenta material made the imported tower look like a debug
+    // placeholder and washed out the map's warm/cool material hierarchy.
+    const magentaMaterial = this.material('QuickSense outpost tower terracotta identity', 0x633c38, 0.34, 0.64);
+    magentaMaterial.emissive.setHex(0x1b1111);
+    magentaMaterial.emissiveIntensity = 0.1;
     cyanMaterial.side = THREE.DoubleSide;
     cyanMaterial.roughness = 0.34;
     magentaMaterial.side = THREE.DoubleSide;
@@ -2001,12 +2156,10 @@ export class QuickSenseArena implements ArenaRuntime {
     const renderBatchAudit = this.batchOutpostTowerRenderMeshes(model);
     this.outpostTowerCoreLocal = traversal.corePosition.clone();
     const seatedBounds = new THREE.Box3().setFromObject(model);
-    const signalCrown = this.createOutpostTowerSignalCrown(
-      seatedBounds,
-      trimMaterial,
-      cyanMaterial,
-    );
-    const crownedBounds = seatedBounds.clone().union(new THREE.Box3().setFromObject(signalCrown));
+    // The imported asset already carries a complete multi-aerial crown. A
+    // second procedural mast above its measured bounds appeared detached from
+    // oblique cameras and clipped into the top of the concept overview.
+    const crownedBounds = seatedBounds.clone();
     const grounding = this.createOutpostTowerGrounding(
       model,
       seatedBounds,
@@ -2209,16 +2362,6 @@ export class QuickSenseArena implements ArenaRuntime {
       scale: new THREE.Vector3(entry.width * 1.06, 0.22, length),
       rotation: slopeRotation,
     });
-    for (let index = 0; index < 3; index += 1) {
-      const position = entry.start.clone().addScaledVector(inward, -(1.25 + index * 2.15));
-      const terrainY = this.terrainHeightAt(position.x, position.z);
-      structural.push({
-        position: new THREE.Vector3(position.x, terrainY + 0.025, position.z),
-        scale: new THREE.Vector3(entry.width * (1.3 + index * 0.08), 0.09, 2.3),
-        yaw,
-      });
-    }
-
     for (const side of [-1, 1]) {
       const lateral = right.clone().multiplyScalar(side * (entry.width * 0.58 + 0.12));
       structural.push({
@@ -2393,41 +2536,6 @@ export class QuickSenseArena implements ArenaRuntime {
       light.castShadow = false;
       this.group.add(light);
     });
-  }
-
-  private createOutpostTowerSignalCrown(
-    towerBounds: THREE.Box3,
-    trimMaterial: THREE.MeshStandardMaterial,
-    signalMaterial: THREE.MeshStandardMaterial,
-  ): THREE.Group {
-    const crown = new THREE.Group();
-    crown.name = 'QuickSense outpost tower signal crown';
-    crown.position.set(0, towerBounds.max.y, 0);
-    const addPart = (
-      geometry: THREE.BufferGeometry,
-      material: THREE.Material,
-      name: string,
-      y: number,
-      rotationX = 0,
-    ): THREE.Mesh => {
-      this.trackGeometry(geometry);
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.name = `QuickSense outpost tower signal crown ${name}`;
-      mesh.position.y = y;
-      mesh.rotation.x = rotationX;
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
-      crown.add(mesh);
-      return mesh;
-    };
-    addPart(new THREE.CylinderGeometry(0.34, 0.58, 8, 10), trimMaterial, 'lower mast', 4);
-    addPart(new THREE.CylinderGeometry(0.12, 0.3, 13, 8), trimMaterial, 'upper mast', 14.5);
-    addPart(new THREE.TorusGeometry(1.15, 0.08, 6, 24), signalMaterial, 'locator ring', 9.2, Math.PI * 0.5);
-    addPart(new THREE.ConeGeometry(0.44, 3, 8), trimMaterial, 'spire tip', 22.5);
-    addPart(new THREE.SphereGeometry(0.3, 10, 8), signalMaterial, 'beacon', 24);
-    this.group.add(crown);
-    crown.updateMatrixWorld(true);
-    return crown;
   }
 
   private createOutpostTowerCollision(model: THREE.Group): {
@@ -2703,8 +2811,11 @@ export class QuickSenseArena implements ArenaRuntime {
     transforms: InstanceTransform[],
     shadows = true,
   ): THREE.InstancedMesh | null {
-    if (transforms.length === 0) return null;
+    // Track the source even when a seeded placement pass produces no
+    // instances. This keeps optional detail geometry from leaking on a sparse
+    // seed or a mobile quality tier.
     this.trackGeometry(geometry);
+    if (transforms.length === 0) return null;
     const mesh = new THREE.InstancedMesh(geometry, material, transforms.length);
     mesh.name = name;
     mesh.castShadow = shadows;
@@ -2723,6 +2834,21 @@ export class QuickSenseArena implements ArenaRuntime {
     mesh.computeBoundingSphere();
     this.group.add(mesh);
     return mesh;
+  }
+
+  private addDesertInstances(
+    name: string,
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    transforms: InstanceTransform[],
+    solid: boolean,
+    shadows = true,
+  ): void {
+    const mesh = this.addInstancedMeshes(name, geometry, material, transforms, shadows);
+    if (!mesh) return;
+    mesh.userData.desertDressing = true;
+    mesh.userData.desertSolid = solid;
+    mesh.userData.decorationOnly = !solid;
   }
 
   private registerBuilding(
@@ -2783,31 +2909,35 @@ export class QuickSenseArena implements ArenaRuntime {
     // evenly serrated crown. These authored macro features make long ridges,
     // deep saddles, and a few memorable peaks before any low-poly faceting.
     const ridgeFeatures = [
-      { angle: -2.82, width: 0.3, radius: 11, height: 25 },
-      { angle: -2.18, width: 0.23, radius: 16, height: 42 },
-      { angle: -1.34, width: 0.34, radius: 9, height: 23 },
-      { angle: -0.62, width: 0.22, radius: 15, height: 38 },
-      { angle: 0.18, width: 0.29, radius: 10, height: 26 },
-      { angle: 0.94, width: 0.23, radius: 17, height: 44 },
-      { angle: 1.72, width: 0.32, radius: 10, height: 24 },
-      { angle: 2.46, width: 0.25, radius: 14, height: 36 },
+      { angle: -2.82, width: 0.3, radius: 11, height: 18 },
+      { angle: -2.18, width: 0.23, radius: 16, height: 29 },
+      { angle: -1.34, width: 0.34, radius: 9, height: 16 },
+      { angle: -0.62, width: 0.22, radius: 15, height: 27 },
+      { angle: 0.18, width: 0.29, radius: 10, height: 18 },
+      { angle: 0.94, width: 0.23, radius: 17, height: 31 },
+      { angle: 1.72, width: 0.32, radius: 10, height: 17 },
+      { angle: 2.46, width: 0.25, radius: 14, height: 25 },
     ] as const;
     const passes = [
-      { angle: -Math.PI * 0.5, width: 0.18, radius: -10, height: -30 },
-      { angle: 0.02, width: 0.16, radius: -8, height: -24 },
-      { angle: Math.PI * 0.5, width: 0.2, radius: -11, height: -32 },
-      { angle: Math.PI - 0.03, width: 0.17, radius: -8, height: -25 },
+      { angle: -Math.PI * 0.5, width: 0.18, radius: -10, height: -21 },
+      { angle: 0.02, width: 0.34, radius: -14, height: -55 },
+      { angle: Math.PI * 0.5, width: 0.2, radius: -11, height: -22 },
+      // The deterministic concept camera looks through this broad saddle.
+      // Keep the flanking peaks tall while opening a readable sky horizon
+      // above the central tower and its bridge network.
+      { angle: 2.68, width: 0.55, radius: -12, height: -52 },
+      { angle: Math.PI - 0.03, width: 0.34, radius: -14, height: -56 },
     ] as const;
     const angularInfluence = (angle: number, center: number, width: number): number => {
       const delta = Math.abs(Math.atan2(Math.sin(angle - center), Math.cos(angle - center)));
       return delta >= width ? 0 : smootherPulse(1 - delta / width);
     };
-    const segments = 64;
+    const segments = 96;
     const crestSamples: RidgePoint[] = [];
     for (let index = 0; index < segments; index += 1) {
       const angle = index / segments * Math.PI * 2 - Math.PI;
       let radialOffset = Math.sin(angle * 3 + 0.38) * 3.8 + Math.sin(angle * 5 - 0.74) * 2.1;
-      let heightOffset = Math.sin(angle * 3 - 0.22) * 8.5 + Math.sin(angle * 5 + 0.91) * 4.8;
+      let heightOffset = Math.sin(angle * 3 - 0.22) * 6.2 + Math.sin(angle * 5 + 0.91) * 3.4;
       for (const feature of ridgeFeatures) {
         const influence = angularInfluence(angle, feature.angle, feature.width);
         radialOffset += feature.radius * influence;
@@ -2821,7 +2951,7 @@ export class QuickSenseArena implements ArenaRuntime {
       crestSamples.push({
         x: Math.cos(angle) * (106 + radialOffset),
         z: Math.sin(angle) * (95 + radialOffset * 0.78),
-        y: THREE.MathUtils.clamp(92 + heightOffset, 68, 145),
+        y: THREE.MathUtils.clamp(68 + heightOffset, 32, 108),
       });
     }
 
@@ -2866,27 +2996,47 @@ export class QuickSenseArena implements ArenaRuntime {
       });
       rings[3].push({
         ...pointAt(0.935 + recess * 0.11, 0, 0.35),
-        y: THREE.MathUtils.lerp(56 + lowVariation * 2.2 - passCut * 15, recessRoofY + 14, recess),
+        y: THREE.MathUtils.lerp(46 + lowVariation * 2.2 - passCut * 32, recessRoofY + 12, recess),
       });
       rings[4].push({
         x: crest.x * (1 + recess * 0.055),
         z: crest.z * (1 + recess * 0.055),
         y: Math.max(crest.y, recessRoofY + 38 * recess),
       });
-      rings[5].push(pointAt(1.075, crest.y - 17 - Math.cos(angle * 4) * 4.5, -0.45));
+      rings[5].push(pointAt(1.075, crest.y - 13 - Math.cos(angle * 4) * 3.5, -0.45));
       rings[6].push(pointAt(1.18 + Math.sin(angle * 3) * 0.015, crest.y * 0.63 + 4, 0.9));
       rings[7].push(pointAt(1.3, -4 + Math.sin(angle * 3.4) * 0.7));
     }
+    // Add interpolated strata between the authored macro rings. The original
+    // eight-ring wall was collision-safe but too sparse for a close flight
+    // view; these render-only bands soften the apron without blurring the
+    // deliberately stepped geological profile.
+    const renderRings: RidgePoint[][] = [];
+    for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
+      const ring = rings[ringIndex];
+      const nextRing = rings[ringIndex + 1];
+      renderRings.push(ring);
+      renderRings.push(ring.map((point, index) => {
+        const nextPoint = nextRing[index];
+        return {
+          x: THREE.MathUtils.lerp(point.x, nextPoint.x, 0.5),
+          z: THREE.MathUtils.lerp(point.z, nextPoint.z, 0.5),
+          y: THREE.MathUtils.lerp(point.y, nextPoint.y, 0.5),
+        };
+      }));
+    }
+    renderRings.push(rings[rings.length - 1]);
+
     const positions: number[] = [];
     const indices: number[] = [];
-    for (let ringIndex = 0; ringIndex < rings.length; ringIndex += 1) {
-      const ring = rings[ringIndex];
+    for (let ringIndex = 0; ringIndex < renderRings.length; ringIndex += 1) {
+      const ring = renderRings[ringIndex];
       for (let index = 0; index < segments; index += 1) {
         const point = ring[index];
         positions.push(point.x, point.y, point.z);
       }
     }
-    for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
+    for (let ringIndex = 0; ringIndex < renderRings.length - 1; ringIndex += 1) {
       for (let index = 0; index < segments; index += 1) {
         const next = (index + 1) % segments;
         const inner = ringIndex * segments + index;
@@ -2903,63 +3053,37 @@ export class QuickSenseArena implements ArenaRuntime {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geometry.setIndex(indices);
-    const faceted = geometry.toNonIndexed();
-    geometry.dispose();
-    faceted.computeVertexNormals();
+    // The wall is a continuous authored landform. Keep the perimeter indexed
+    // so neighboring strata share normals and do not produce the giant
+    // triangular lighting breaks visible in the first review captures.
+    geometry.computeVertexNormals();
     const colors: number[] = [];
     const uvs: number[] = [];
-    const vertices = faceted.getAttribute('position');
-    const normals = faceted.getAttribute('normal');
+    const vertices = geometry.getAttribute('position');
+    const normals = geometry.getAttribute('normal');
     const cliffDark = new THREE.Color(0x3a302c);
     const cliffMid = new THREE.Color(0x5b493d);
     const cliffLight = new THREE.Color(0x876b4d);
-    const faceCount = vertices.count / 3;
-    for (let face = 0; face < faceCount; face += 1) {
-      const height = (
-        vertices.getY(face * 3)
-        + vertices.getY(face * 3 + 1)
-        + vertices.getY(face * 3 + 2)
-      ) / 3;
-      const centroidX = (
-        vertices.getX(face * 3)
-        + vertices.getX(face * 3 + 1)
-        + vertices.getX(face * 3 + 2)
-      ) / 3;
-      const centroidZ = (
-        vertices.getZ(face * 3)
-        + vertices.getZ(face * 3 + 1)
-        + vertices.getZ(face * 3 + 2)
-      ) / 3;
-      const angle = Math.atan2(centroidZ, centroidX);
-      const upward = Math.max(0, (
-        normals.getY(face * 3) + normals.getY(face * 3 + 1) + normals.getY(face * 3 + 2)
-      ) / 3);
+    for (let vertex = 0; vertex < vertices.count; vertex += 1) {
+      const height = vertices.getY(vertex);
+      const angle = Math.atan2(vertices.getZ(vertex), vertices.getX(vertex));
+      const upward = Math.max(0, normals.getY(vertex));
       const strata = Math.sin(height * 0.17 + angle * 3.2) * 0.075;
       const broadLight = Math.sin(angle - 0.65) * 0.08;
       const baseMix = THREE.MathUtils.clamp(0.18 + height / 150 + upward * 0.18 + strata + broadLight, 0, 0.86);
       const color = baseMix < 0.5
         ? cliffDark.clone().lerp(cliffMid, baseMix * 2)
         : cliffMid.clone().lerp(cliffLight, (baseMix - 0.5) * 2);
-      const faceAngles = [0, 1, 2].map((vertex) => {
-        const vertexIndex = face * 3 + vertex;
-        return (Math.atan2(vertices.getZ(vertexIndex), vertices.getX(vertexIndex)) + Math.PI) / (Math.PI * 2);
-      });
-      if (Math.max(...faceAngles) - Math.min(...faceAngles) > 0.5) {
-        for (let vertex = 0; vertex < faceAngles.length; vertex += 1) {
-          if (faceAngles[vertex] < 0.5) faceAngles[vertex] += 1;
-        }
-      }
-      for (let vertex = 0; vertex < 3; vertex += 1) {
-        const vertexIndex = face * 3 + vertex;
-        colors.push(color.r, color.g, color.b);
-        uvs.push(faceAngles[vertex] * 6, vertices.getY(vertexIndex) / 34);
-      }
+      const localVariation = 0.96 + (Math.sin(height * 0.31 + angle * 7.2) * 0.5 + 0.5) * 0.07;
+      color.multiplyScalar(localVariation);
+      colors.push(color.r, color.g, color.b);
+      uvs.push(((angle + Math.PI) / (Math.PI * 2)) * 6, height / 34);
     }
-    faceted.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    faceted.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    faceted.computeBoundingBox();
-    faceted.computeBoundingSphere();
-    return faceted;
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return geometry;
   }
 
   private createRockShelfGeometry(): THREE.BufferGeometry {
@@ -3242,7 +3366,7 @@ export class QuickSenseArena implements ArenaRuntime {
     this.addMesh(
       this.createTerrainGeometry(),
       groundMaterial,
-      'QuickSense faceted playable terrain',
+      'QuickSense sculpted playable terrain',
     );
     this.addMesh(
       new THREE.BoxGeometry(QUICK_LOCAL_WIDTH, 2.4, QUICK_LOCAL_DEPTH),
@@ -3344,9 +3468,632 @@ export class QuickSenseArena implements ArenaRuntime {
     );
   }
 
+  /**
+   * Break up the basin with a controlled desert hierarchy. These props are
+   * grouped by scale, with exact contact for stones and beacons. Fine foliage
+   * and dust stay non-colliding. The fixed seed and route masks preserve ski
+   * lanes while leaving enough occupied pockets to read from the overlook.
+   */
+  private createDesertDressing(rockMaterial: THREE.MeshStandardMaterial): void {
+    const random = createSeededRandom(this.seed ^ 0x4d657361);
+    const anchorBoulders: InstanceTransform[] = [];
+    const companionRocks: InstanceTransform[] = [];
+    const scrubTufts: InstanceTransform[] = [];
+    const dustPatches: InstanceTransform[] = [];
+    const outcropClusters: InstanceTransform[] = [];
+    const cactusClusters: InstanceTransform[] = [];
+    const occupied: Array<{ x: number; z: number; radius: number }> = [];
+    const beaconBases = this.group.getObjectByName('QuickSense basin beacon plinths') as THREE.InstancedMesh | undefined;
+    if (beaconBases) {
+      const matrix = new THREE.Matrix4();
+      const center = new THREE.Vector3();
+      for (let index = 0; index < beaconBases.count; index += 1) {
+        beaconBases.getMatrixAt(index, matrix);
+        center.setFromMatrixPosition(matrix);
+        occupied.push({ x: center.x, z: center.z, radius: 1.8 });
+      }
+    }
+    const protectedPoints = [
+      [-42, -54, 8], [42, 54, 8], [30, -4, 9], [-62, 0, 8], [62, 0, 8],
+      [0, -61, 8], [0, 61, 8], [0, 0, 20],
+      [-72, 2.5, 4], [72, -2.5, 4], [-44.5, 50.5, 4], [44.5, 49.5, 4],
+      [-44.5, -49.5, 4], [44.5, -50.5, 4], [-24, 31, 3], [24, -31, 3],
+      [-42, 0, 3], [42, 0, 3], [-24, -31, 3], [24, 31, 3],
+      [-2.5, -69, 4], [2.5, 69, 4], [-61, -21, 3], [61, 21, 3],
+    ] as const;
+    const protectedRadius = (x: number, z: number): number => {
+      // Signed distance must remain negative outside every protected disc.
+      // Starting at zero rejected every positive-radius prop on the map.
+      let radius = Number.NEGATIVE_INFINITY;
+      for (const [pointX, pointZ, pointRadius] of protectedPoints) {
+        radius = Math.max(radius, pointRadius - Math.hypot(x - pointX, z - pointZ));
+      }
+      return radius;
+    };
+    const routeBlocksPlacement = (x: number, z: number, radius: number, height: number, routeMargin: number): boolean => {
+      for (const path of this.pathSurfaces) {
+        const nearest = closestSegment(path.points, path.closed, x, z);
+        if (!nearest) continue;
+        if (Math.sqrt(nearest.distanceSquared) >= path.width * 0.5 + radius + routeMargin) continue;
+        const start = path.points[nearest.index];
+        const end = path.points[(nearest.index + 1) % path.points.length];
+        const deckBottom = THREE.MathUtils.lerp(start.y, end.y, nearest.t) - pathDeckBottomDepth(path.name);
+        // Elevated routes can bridge over scenic stone as long as a full
+        // player-clear gap remains above the prop. Ground-level lanes stay
+        // completely clear across their full footprint.
+        // Keep extra allowance for banked/graded deck height changing across
+        // a wide prop footprint, not just at its center sample.
+        if (deckBottom - (height + radius) < 1.4) return true;
+      }
+      return false;
+    };
+    const isPlacementClear = (
+      x: number,
+      z: number,
+      radius: number,
+      routeMargin = 1.6,
+      maxHeight = 58,
+      minimumNormalY = 0.48,
+      verticalExtent = radius,
+    ): boolean => {
+      if (Math.abs(x) > QUICK_LOCAL_WIDTH * 0.5 - radius - 2 || Math.abs(z) > QUICK_LOCAL_DEPTH * 0.5 - radius - 2) return false;
+      if (protectedRadius(x, z) > -radius) return false;
+      const height = this.terrainHeightAt(x, z);
+      if (!Number.isFinite(height) || height > maxHeight) return false;
+      if (routeBlocksPlacement(x, z, radius, height + verticalExtent - radius, routeMargin)) return false;
+      if (this.rampSurfaces.some((ramp) => (
+        [[0, 0], [radius, 0], [-radius, 0], [0, radius], [0, -radius]].some(([dx, dz]) => ramp.flow.heightAt(x + dx, z + dz) !== null)
+      ))) return false;
+      if (this.colliders.some(({ box, blocksMovement }) => blocksMovement
+        && box.max.y > height - 0.15 && box.min.y < height + radius * 2 + 2
+        && x + radius > box.min.x && x - radius < box.max.x
+        && z + radius > box.min.z && z - radius < box.max.z)) return false;
+      const normal = this.terrainNormalAt(x, z, new THREE.Vector3());
+      return normal.y >= minimumNormalY;
+    };
+    const isSeparated = (x: number, z: number, radius: number) => occupied.every((site) => (
+      Math.hypot(x - site.x, z - site.z) > radius + site.radius + 0.4
+    ));
+    const seatedPosition = (x: number, z: number, radius: number, height: number) => {
+      let lowest = this.terrainHeightAt(x, z);
+      for (let sample = 0; sample < 8; sample += 1) {
+        const angle = sample * Math.PI / 4;
+        lowest = Math.min(lowest, this.terrainHeightAt(x + Math.cos(angle) * radius * 0.7, z + Math.sin(angle) * radius * 0.7));
+      }
+      return new THREE.Vector3(x, lowest - height * 0.08, z);
+    };
+    const addDustForCluster = (x: number, z: number, width: number, depth: number): void => {
+      if (random() > 0.78 || !isPlacementClear(x, z, Math.max(width, depth) * 0.55)) return;
+      const normal = this.terrainNormalAt(x, z, new THREE.Vector3());
+      const planeNormal = new THREE.Vector3(0, 0, 1);
+      const rotation = new THREE.Quaternion().setFromUnitVectors(planeNormal, normal);
+      rotation.multiply(new THREE.Quaternion().setFromAxisAngle(planeNormal, random() * Math.PI * 2));
+      dustPatches.push({
+        position: new THREE.Vector3(x, this.terrainHeightAt(x, z) + 0.045, z),
+        scale: new THREE.Vector3(width, depth, 1),
+        rotation: new THREE.Euler().setFromQuaternion(rotation),
+      });
+    };
+
+    // Reserve composition anchors before scattering small props. Search only
+    // within the authored pocket, retaining the same route/entrance masks.
+    const findFeatureSite = (x: number, z: number, radius: number, verticalExtent = radius): THREE.Vector2 | null => {
+      for (let ring = 0; ring <= 3; ring += 1) {
+        const samples = ring === 0 ? 1 : ring * 8;
+        for (let sample = 0; sample < samples; sample += 1) {
+          const angle = sample / samples * Math.PI * 2;
+          const siteX = x + Math.cos(angle) * ring * 3;
+          const siteZ = z + Math.sin(angle) * ring * 3;
+          if (isPlacementClear(siteX, siteZ, radius, 1.2, 62, 0.42, verticalExtent)
+            && isSeparated(siteX, siteZ, radius)) return new THREE.Vector2(siteX, siteZ);
+        }
+      }
+      return null;
+    };
+    const outcropSites = [
+      [-79, -62, 4.6, 1.22], [-60, -69, 3.9, 0.92], [58, -68, 4.4, 1.1], [79, -49, 4.2, 1.28],
+      [-82, -2, 4.8, 1.34], [82, 10, 4.5, 1.12], [-78, 39, 4.3, 1.05], [-57, 66, 4.2, 1.22],
+      [52, 66, 4.6, 1.26], [78, 50, 4.2, 0.96], [-42, 62, 3.5, 0.84], [37, -62, 3.4, 0.82],
+      [53, -31, 5.2, 1.14], [55, 29, 5.8, 1.22],
+      [70, -30, 7.6, 0.88], [70, 28, 7.4, 0.86], [-68, -28, 7.2, 0.9], [-69, 30, 7.2, 0.9],
+      [-52, -42, 7.4, 1.18], [51, -43, 6.8, 1.08], [-55, 35, 6.5, 1.12], [57, 39, 7.2, 1.2],
+      [-34, -55, 6.2, 1.04], [35, 54, 6.4, 1.08],
+    ] as const;
+    for (const [x, z, authoredRadius, heightScale] of outcropSites) {
+      for (const fitScale of [1, 0.84, 0.7, 0.58, 0.48]) {
+        const radius = authoredRadius * fitScale;
+        const footprint = radius * 1.4;
+        // The merged polyhedral kit reaches roughly 3.4 local units above its
+        // seated base after the final art scale. Reserve that true vertical
+        // envelope so a visually clear center cannot tuck a shoulder through
+        // the underside of an elevated route.
+        const site = findFeatureSite(x, z, footprint, radius * heightScale * 3.6);
+        if (!site) continue;
+        const outcropTransform = {
+          position: seatedPosition(site.x, site.y, footprint, radius * heightScale),
+          scale: new THREE.Vector3(radius * (0.92 + random() * 0.2), radius * heightScale, radius * (0.76 + random() * 0.24)),
+          yaw: random() * Math.PI * 2,
+        };
+        outcropClusters.push(outcropTransform);
+
+        // Talus belongs to the formation, not to a global scatter pass. Four
+        // to six partially overlapping satellites give every hero rock a
+        // wide, grounded base and the nested scale seen in the concept.
+        const satelliteCount = 4 + Math.floor(random() * 3);
+        for (let satellite = 0; satellite < satelliteCount; satellite += 1) {
+          const angle = (satellite / satelliteCount) * Math.PI * 2 + random() * 0.48;
+          const distance = footprint * (0.48 + random() * 0.35);
+          const satelliteX = site.x + Math.cos(angle) * distance;
+          const satelliteZ = site.y + Math.sin(angle) * distance;
+          const stoneRadius = radius * (0.14 + random() * 0.13);
+          if (!isPlacementClear(satelliteX, satelliteZ, stoneRadius * 1.25, 1.2, 62, 0.38, stoneRadius * 1.75)) continue;
+          companionRocks.push({
+            position: seatedPosition(satelliteX, satelliteZ, stoneRadius, stoneRadius),
+            scale: new THREE.Vector3(
+              stoneRadius * (0.92 + random() * 0.42),
+              stoneRadius * (0.58 + random() * 0.45),
+              stoneRadius * (0.72 + random() * 0.48),
+            ),
+            yaw: random() * Math.PI * 2,
+          });
+        }
+        addDustForCluster(site.x, site.y, footprint * 1.7, footprint * 1.35);
+        occupied.push({ x: site.x, z: site.y, radius: footprint });
+        break;
+      }
+    }
+    const cactusSites = [
+      [-73, -48, 0.82], [-62, -19, 0.7], [-76, 17, 1.1], [-67, 45, 0.88], [-45, 61, 0.74],
+      [-23, -67, 0.92], [22, -66, 0.8], [54, -52, 1.02], [73, -26, 0.86], [68, 13, 1.12],
+      [73, 38, 0.78], [48, 60, 0.94], [22, 55, 0.72], [-18, 49, 0.82], [6, -52, 0.7],
+    ] as const;
+    for (const [x, z, scale] of cactusSites) {
+      const site = findFeatureSite(x, z, 1.15, scale * 3.8);
+      if (!site) continue;
+      cactusClusters.push({
+        position: new THREE.Vector3(site.x, this.terrainHeightAt(site.x, site.y) - 0.05, site.y),
+        scale: new THREE.Vector3(scale * 1.55, scale * (1.65 + random() * 0.3), scale * 1.55),
+        yaw: random() * Math.PI * 2,
+      });
+      occupied.push({ x: site.x, z: site.y, radius: 1.15 });
+    }
+
+    // A staggered grid produces broad, intentional clusters instead of the
+    // evenly-spaced “procedural lawn” look. The route mask creates negative
+    // space along every authored lane, while the outer rows frame the view.
+    let cellIndex = 0;
+    for (let z = -72; z <= 72; z += 7) {
+      for (let x = -82; x <= 82; x += 7) {
+        const jitterX = (random() - 0.5) * 6.4;
+        const jitterZ = (random() - 0.5) * 6.4;
+        const candidateX = x + jitterX;
+        const candidateZ = z + jitterZ;
+        const distanceFromCore = Math.hypot(candidateX, candidateZ);
+        const anchorChance = distanceFromCore > 57 ? 0.5 : 0.27;
+        const anchorRadius = 1.65 + random() * 1.75;
+        const footprint = anchorRadius * 1.4;
+        if (random() < anchorChance && isPlacementClear(candidateX, candidateZ, footprint, 1.6, 58, 0.48, anchorRadius * 2.5)
+          && isSeparated(candidateX, candidateZ, footprint)) {
+          const height = anchorRadius * (0.8 + random() * 0.5);
+          anchorBoulders.push({
+            position: seatedPosition(candidateX, candidateZ, footprint, height),
+            scale: new THREE.Vector3(
+              anchorRadius * (0.9 + random() * 0.3),
+              height,
+              anchorRadius * (0.76 + random() * 0.3),
+            ),
+            yaw: random() * Math.PI * 2,
+          });
+          occupied.push({ x: candidateX, z: candidateZ, radius: footprint });
+          addDustForCluster(candidateX, candidateZ, anchorRadius * (1.8 + random() * 0.8), anchorRadius * (0.9 + random() * 0.45));
+        }
+
+        const rockChance = distanceFromCore > 33 ? 0.58 : 0.36;
+        if (random() < rockChance && isPlacementClear(candidateX, candidateZ, 1.1, 1.1, 58, 0.48, 1.6)
+          && isSeparated(candidateX, candidateZ, 1.1)) {
+          const rockRadius = 0.3 + random() * 0.58;
+          companionRocks.push({
+            position: seatedPosition(candidateX, candidateZ, rockRadius, rockRadius),
+            scale: new THREE.Vector3(
+              rockRadius * (0.9 + random() * 0.26),
+              rockRadius * (0.66 + random() * 0.3),
+              rockRadius * (0.72 + random() * 0.28),
+            ),
+            yaw: random() * Math.PI * 2,
+          });
+          occupied.push({ x: candidateX, z: candidateZ, radius: rockRadius });
+        }
+
+        const scrubChance = distanceFromCore > 28 ? 0.5 : 0.31;
+        if (random() < scrubChance && isPlacementClear(candidateX + 1.4, candidateZ - 0.8, 0.7, 0.8)
+          && isSeparated(candidateX + 1.4, candidateZ - 0.8, 0.4)) {
+          const scrubScale = 0.76 + random() * 0.58;
+          scrubTufts.push({
+            position: new THREE.Vector3(candidateX + 1.4, this.terrainHeightAt(candidateX + 1.4, candidateZ - 0.8) - 0.04, candidateZ - 0.8),
+            scale: new THREE.Vector3(
+              scrubScale * (0.8 + random() * 0.34),
+              scrubScale * (0.85 + random() * 0.42),
+              scrubScale * (0.8 + random() * 0.34),
+            ),
+            yaw: random() * Math.PI * 2,
+          });
+          if (cellIndex % 3 === 0) addDustForCluster(candidateX, candidateZ, 2.3 + random() * 2.2, 1.0 + random() * 1.4);
+        }
+        cellIndex += 1;
+      }
+    }
+
+    const texturedMaterial = (name: string, color: number, roughness: number): THREE.MeshStandardMaterial => {
+      const material = this.material(name, color, 0.01, roughness, rockMaterial.map ?? undefined);
+      material.flatShading = true;
+      material.normalMap = rockMaterial.normalMap;
+      material.normalScale.copy(rockMaterial.normalScale);
+      material.roughnessMap = rockMaterial.roughnessMap;
+      material.vertexColors = true;
+      return material;
+    };
+    // Albedo and vertex color already own the sandstone tint. Multiplying a
+    // third brown tint here crushed every exposed stone face toward black.
+    const boulderMaterial = texturedMaterial('QuickSense sun-baked boulders', 0xaa704f, 0.94);
+    const companionMaterial = texturedMaterial('QuickSense scattered desert stone', 0x895943, 0.97);
+    const scrubMaterial = this.material('QuickSense low desert scrub', 0x68714a, 0.01, 0.96);
+    scrubMaterial.flatShading = true;
+    const dustTexture = this.createDesertDustTexture();
+    const dustMaterial = new THREE.MeshBasicMaterial({
+      name: 'QuickSense wind-scoured dust patches',
+      color: 0xc48558,
+      map: dustTexture,
+      transparent: true,
+      opacity: 0.11,
+      depthWrite: false,
+      depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+      fog: true,
+    });
+    this.materials.push(dustMaterial);
+
+    const boulderGeometries = [this.createDesertBoulderGeometry(0), this.createDesertBoulderGeometry(1)];
+    const outcropGeometries = [this.createDesertOutcropGeometry(0), this.createDesertOutcropGeometry(1)];
+    const cactusGeometries = [this.createDesertCactusGeometry(0), this.createDesertCactusGeometry(1)];
+    this.addDesertInstances('QuickSense foreground boulder anchors', boulderGeometries[0], boulderMaterial, anchorBoulders.filter((_, index) => index % 2 === 0), true);
+    this.addDesertInstances('QuickSense foreground boulder variant anchors', boulderGeometries[1], boulderMaterial, anchorBoulders.filter((_, index) => index % 2 === 1), true);
+    this.addDesertInstances('QuickSense authored angular outcrop clusters', outcropGeometries[0], boulderMaterial, outcropClusters.filter((_, index) => index % 2 === 0), true);
+    this.addDesertInstances('QuickSense authored angular outcrop variants', outcropGeometries[1], boulderMaterial, outcropClusters.filter((_, index) => index % 2 === 1), true);
+    this.addDesertInstances('QuickSense midground scattered stones', boulderGeometries[1], companionMaterial, companionRocks, true, false);
+    this.addDesertInstances('QuickSense layered desert scrub tufts', this.createDesertScrubGeometry(), scrubMaterial, scrubTufts, false, false);
+    const cactusMaterial = this.material('QuickSense saguaro desert vegetation', 0x4e6240, 0.02, 0.92);
+    cactusMaterial.flatShading = false;
+    this.addDesertInstances('QuickSense sparse saguaro vegetation', cactusGeometries[0], cactusMaterial, cactusClusters.filter((_, index) => index % 2 === 0), true, false);
+    this.addDesertInstances('QuickSense sparse saguaro vegetation variants', cactusGeometries[1], cactusMaterial, cactusClusters.filter((_, index) => index % 2 === 1), true, false);
+    this.addDesertInstances('QuickSense wind-scoured dust patches', new THREE.PlaneGeometry(1, 1), dustMaterial, dustPatches, false, false);
+
+    this.group.userData.desertDressing = {
+      anchors: anchorBoulders.length,
+      companionRocks: companionRocks.length,
+      scrubTufts: scrubTufts.length,
+      outcropClusters: outcropClusters.length,
+      cactusClusters: cactusClusters.length,
+      dustPatches: dustPatches.length,
+      routeClearance: 1.6,
+      collision: 'exact visible triangles for stone/cacti/beacons; dust/scrub excluded',
+      outcropLayout: outcropClusters.map((transform) => ({
+        x: Number(transform.position.x.toFixed(2)),
+        y: Number(transform.position.y.toFixed(2)),
+        z: Number(transform.position.z.toFixed(2)),
+        scaleX: Number(transform.scale.x.toFixed(2)),
+        scaleY: Number(transform.scale.y.toFixed(2)),
+        scaleZ: Number(transform.scale.z.toFixed(2)),
+      })),
+    };
+  }
+
+  private createDesertDustTexture(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('QuickSense could not create desert dust texture.');
+    const gradient = context.createRadialGradient(64, 64, 4, 64, 64, 64);
+    gradient.addColorStop(0, 'rgba(241, 211, 166, 0.55)');
+    gradient.addColorStop(0.42, 'rgba(220, 181, 133, 0.28)');
+    gradient.addColorStop(1, 'rgba(196, 151, 105, 0)');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 128, 128);
+    for (let index = 0; index < 80; index += 1) {
+      const x = (Math.sin(index * 12.9898) * 43758.5453) % 1 * 64 + 64;
+      const y = (Math.sin(index * 78.233 + 4.2) * 43758.5453) % 1 * 64 + 64;
+      const radius = 0.35 + (Math.sin(index * 19.17) * 0.5 + 0.5) * 1.2;
+      context.fillStyle = `rgba(122, 91, 61, ${0.018 + (index % 5) * 0.006})`;
+      context.beginPath();
+      context.arc(x, y, radius, 0, Math.PI * 2);
+      context.fill();
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.name = 'QuickSenseDesertDustAlpha';
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    texture.anisotropy = 4;
+    this.textures.push(texture);
+    return texture;
+  }
+
+  private createDesertBoulderGeometry(variant: number): THREE.BufferGeometry {
+    // A strongly deformed low-poly stone keeps diagonal facets without the
+    // horizontal ring bands that made close anchors resemble stacked cones.
+    const source = new THREE.DodecahedronGeometry(1, 0);
+    source.rotateX(variant === 0 ? 0.27 : -0.19);
+    source.rotateZ(variant === 0 ? -0.16 : 0.23);
+    const geometry = source.index ? source.toNonIndexed() : source.clone();
+    source.dispose();
+    const points = geometry.getAttribute('position');
+    const sourceBounds = new THREE.Box3().setFromBufferAttribute(points as THREE.BufferAttribute);
+    const authoredHeight = variant === 0 ? 1.16 : 1.32;
+    for (let index = 0; index < points.count; index += 1) {
+      const x = points.getX(index);
+      const y = points.getY(index);
+      const z = points.getZ(index);
+      const vertical = THREE.MathUtils.clamp(
+        (y - sourceBounds.min.y) / Math.max(EPSILON, sourceBounds.max.y - sourceBounds.min.y),
+        0,
+        1,
+      );
+      const brokenTop = vertical < 0.76 ? vertical : 0.76 + (vertical - 0.76) * 0.28;
+      const noise = Math.sin(x * 9.73 + y * 13.17 - z * 7.31 + variant * 3.8);
+      const crossNoise = Math.sin(x * 5.1 - y * 4.7 + z * 11.9 + variant * 6.2);
+      const taper = 1.1 - vertical * 0.28;
+      points.setXYZ(
+        index,
+        x * taper * (0.92 + noise * 0.13) + vertical * (variant === 0 ? 0.1 : -0.12),
+        brokenTop * authoredHeight * (0.96 + crossNoise * 0.05),
+        z * taper * (0.9 + crossNoise * 0.14),
+      );
+    }
+    points.needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const minY = geometry.boundingBox?.min.y ?? -1;
+    geometry.translate(0, -minY, 0);
+    const colors: number[] = [];
+    // Vertex colors supply crevice value, not a second dark brown albedo.
+    const boulderDark = new THREE.Color(0x9a5a38);
+    const boulderLight = new THREE.Color(0xf4b477);
+    const normal = geometry.getAttribute('normal');
+    const colorPoints = geometry.getAttribute('position');
+    const maxY = geometry.boundingBox?.max.y ?? 2;
+    for (let index = 0; index < colorPoints.count; index += 1) {
+      const heightMix = THREE.MathUtils.clamp(colorPoints.getY(index) / Math.max(EPSILON, maxY), 0, 1);
+      const lightMix = THREE.MathUtils.clamp(0.28 + heightMix * 0.46 + Math.max(0, normal.getY(index)) * 0.2, 0, 1);
+      const color = boulderDark.clone().lerp(boulderLight, lightMix);
+      colors.push(color.r, color.g, color.b);
+    }
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    geometry.name = `QuickSenseDesertBoulderVariant${variant + 1}`;
+    return geometry;
+  }
+
+  private createDesertOutcropGeometry(variant: number): THREE.BufferGeometry {
+    // Deformed polyhedral masses provide diagonal, non-repeating facets.
+    // Ring-lofted rocks produced visible horizontal bands and read as stacked
+    // cones at overview distance, regardless of texture quality.
+    const mass = (height: number, seed: number): THREE.BufferGeometry => {
+      const source = new THREE.DodecahedronGeometry(1, 0);
+      source.rotateX(0.19 + seed * 0.07);
+      source.rotateZ(-0.13 + seed * 0.05);
+      const geometry = source.index ? source.toNonIndexed() : source.clone();
+      source.dispose();
+      const positions = geometry.getAttribute('position');
+      const box = new THREE.Box3().setFromBufferAttribute(positions as THREE.BufferAttribute);
+      for (let index = 0; index < positions.count; index += 1) {
+        const originalX = positions.getX(index);
+        const originalY = positions.getY(index);
+        const originalZ = positions.getZ(index);
+        const vertical = THREE.MathUtils.clamp(
+          (originalY - box.min.y) / Math.max(EPSILON, box.max.y - box.min.y),
+          0,
+          1,
+        );
+        const brokenCrown = vertical < 0.72 ? vertical : 0.72 + (vertical - 0.72) * 0.34;
+        const noise = Math.sin(originalX * 12.73 + originalY * 7.19 + originalZ * 17.41 + seed * 4.37);
+        const crossNoise = Math.sin(originalX * 5.31 - originalZ * 11.17 + originalY * 3.71 + seed * 8.13);
+        const taper = 1.08 - vertical * 0.36;
+        positions.setXYZ(
+          index,
+          originalX * taper * (0.94 + noise * 0.1) + vertical * (seed % 2 === 0 ? 0.12 : -0.1),
+          brokenCrown * height * (0.96 + crossNoise * 0.045),
+          originalZ * taper * (0.92 + crossNoise * 0.12) + vertical * (seed % 3 === 0 ? -0.08 : 0.07),
+        );
+      }
+      positions.needsUpdate = true;
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      return geometry;
+    };
+    const parts = variant === 0 ? [
+      mass(3.04, 1).scale(0.98, 1, 0.92).translate(0.16, 0, 0.05),
+      mass(2.14, 2).scale(0.82, 1, 0.74).rotateY(0.65).translate(-0.68, -0.04, 0.22),
+      mass(1.48, 3).scale(0.64, 1, 0.68).rotateY(-0.43).translate(0.74, -0.06, -0.46),
+      mass(0.98, 4).scale(0.54, 1, 0.46).rotateY(0.28).translate(0.12, -0.08, 0.74),
+    ] : [
+      mass(2.76, 5).scale(0.98, 1, 0.86).translate(-0.2, 0, 0.1),
+      mass(2.18, 6).scale(0.76, 1, 0.84).rotateY(-0.6).translate(0.64, -0.05, -0.14),
+      mass(1.42, 7).scale(0.7, 1, 0.6).rotateY(0.4).translate(-0.76, -0.03, -0.5),
+      mass(0.96, 8).scale(0.48, 1, 0.54).rotateY(-0.36).translate(0.08, -0.08, 0.68),
+    ];
+    // One layout also gives the merged mesh hard, readable facet normals.
+    const compatibleParts = parts.map((part) => part.index ? part.toNonIndexed() : part);
+    const geometry = mergeGeometries(compatibleParts, false);
+    for (const part of new Set([...parts, ...compatibleParts])) part.dispose();
+    if (!geometry) throw new Error('QuickSense could not create an angular outcrop cluster.');
+    // Fill the route-safe footprint reserved during placement; the earlier
+    // mesh occupied only its center and left every cluster reading miniature.
+    geometry.scale(1.25, 1.12, 1.25);
+    geometry.computeBoundingBox();
+    const minY = geometry.boundingBox?.min.y ?? 0;
+    geometry.translate(0, -minY, 0);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const maxY = geometry.boundingBox?.max.y ?? 1;
+    const normals = geometry.getAttribute('normal');
+    const positions = geometry.getAttribute('position');
+    const colors: number[] = [];
+    const shadow = new THREE.Color(0x573a31);
+    const sun = new THREE.Color(0xc58a62);
+    for (let index = 0; index < positions.count; index += 1) {
+      const heightMix = THREE.MathUtils.clamp(positions.getY(index) / Math.max(EPSILON, maxY), 0, 1);
+      const lightMix = THREE.MathUtils.clamp(0.24 + heightMix * 0.62 + Math.max(0, normals.getY(index)) * 0.16, 0, 1);
+      const color = shadow.clone().lerp(sun, lightMix);
+      colors.push(color.r, color.g, color.b);
+    }
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingSphere();
+    geometry.name = `QuickSenseDesertOutcropVariant${variant + 1}`;
+    return geometry;
+  }
+
+  private createDesertCactusGeometry(variant: number): THREE.BufferGeometry {
+    const mainHeight = variant === 0 ? 2.32 : 2.08;
+    const parts = [
+      new THREE.CylinderGeometry(0.18, 0.28, mainHeight, 7).translate(0, mainHeight * 0.5, 0),
+      new THREE.ConeGeometry(0.2, 0.2, 7).translate(0, mainHeight + 0.1, 0),
+      new THREE.CylinderGeometry(0.105, 0.15, 0.68, 6).rotateZ(Math.PI * 0.5).translate(-0.36, mainHeight * 0.52, 0),
+      new THREE.CylinderGeometry(0.09, 0.125, 0.58, 6).translate(-0.7, mainHeight * 0.68, 0),
+      new THREE.ConeGeometry(0.1, 0.14, 6).translate(-0.7, mainHeight * 0.68 + 0.36, 0),
+      new THREE.CylinderGeometry(0.095, 0.14, 0.6, 6).rotateZ(Math.PI * 0.5).translate(0.38, mainHeight * (variant === 0 ? 0.68 : 0.57), 0.02),
+      new THREE.CylinderGeometry(0.08, 0.115, 0.52, 6).translate(0.68, mainHeight * (variant === 0 ? 0.84 : 0.77), 0.02),
+      new THREE.ConeGeometry(0.09, 0.13, 6).translate(0.68, mainHeight * (variant === 0 ? 0.84 : 0.77) + 0.32, 0.02),
+    ];
+    const geometry = mergeGeometries(parts, false);
+    for (const part of parts) part.dispose();
+    if (!geometry) throw new Error('QuickSense could not create a saguaro silhouette.');
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    geometry.name = `QuickSenseDesertCactusVariant${variant + 1}`;
+    return geometry;
+  }
+
+  private createDesertScrubGeometry(): THREE.BufferGeometry {
+    const parts = [
+      new THREE.ConeGeometry(0.27, 0.28, 6).translate(0, 0.14, 0),
+      new THREE.ConeGeometry(0.15, 0.98, 5).translate(-0.22, 0.49, 0).rotateZ(-0.22),
+      new THREE.ConeGeometry(0.13, 0.84, 5).translate(0.2, 0.42, 0.02).rotateZ(0.26),
+      new THREE.ConeGeometry(0.12, 0.86, 5).translate(0, 0.43, -0.18).rotateX(0.24),
+      new THREE.ConeGeometry(0.11, 0.74, 5).translate(0.02, 0.37, 0.19).rotateX(-0.24),
+    ];
+    const geometry = mergeGeometries(parts, false);
+    for (const part of parts) part.dispose();
+    if (!geometry) throw new Error('QuickSense could not create desert scrub geometry.');
+    geometry.computeBoundingBox();
+    const minY = geometry.boundingBox?.min.y ?? 0;
+    geometry.translate(0, -minY, 0);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    geometry.name = 'QuickSenseDesertScrubTuft';
+    return geometry;
+  }
+
+  private createBasinBeaconScatter(
+    bodyMaterial: THREE.MeshStandardMaterial,
+    trimMaterial: THREE.MeshStandardMaterial,
+    cyanMaterial: THREE.MeshStandardMaterial,
+    magentaMaterial: THREE.MeshStandardMaterial,
+    amberMaterial: THREE.MeshStandardMaterial,
+  ): void {
+    const sites = [
+      { x: -57, z: -27, accent: 'cyan' as const, yaw: 0.14 },
+      { x: 57, z: 27, accent: 'magenta' as const, yaw: -0.14 },
+      { x: -61, z: 29, accent: 'amber' as const, yaw: -0.32 },
+      { x: 61, z: -29, accent: 'amber' as const, yaw: 0.32 },
+      { x: -26, z: 54, accent: 'cyan' as const, yaw: 0.42 },
+      { x: 26, z: -54, accent: 'magenta' as const, yaw: -0.42 },
+      { x: -76, z: -7, accent: 'cyan' as const, yaw: 0.08 },
+      { x: 76, z: 7, accent: 'magenta' as const, yaw: -0.08 },
+      { x: -36, z: -17, accent: 'amber' as const, yaw: 0.2 },
+      { x: 36, z: 17, accent: 'amber' as const, yaw: -0.2 },
+    ];
+    const bases: InstanceTransform[] = [];
+    const shafts: InstanceTransform[] = [];
+    const caps: InstanceTransform[] = [];
+    const rings: InstanceTransform[] = [];
+    const signals: Record<'cyan' | 'magenta' | 'amber', InstanceTransform[]> = {
+      cyan: [], magenta: [], amber: [],
+    };
+    for (const authoredSite of sites) {
+      let site: typeof authoredSite | null = null;
+      for (let ring = 0; ring <= 2 && !site; ring += 1) {
+        const samples = ring === 0 ? 1 : 8 * ring;
+        for (let sample = 0; sample < samples; sample += 1) {
+          const angle = sample / samples * Math.PI * 2;
+          const x = authoredSite.x + Math.cos(angle) * ring * 2;
+          const z = authoredSite.z + Math.sin(angle) * ring * 2;
+          const height = this.terrainHeightAt(x, z);
+          if (!Number.isFinite(height) || height > 50) continue;
+          if (this.pathSurfaces.some((path) => {
+            const nearest = closestSegment(path.points, path.closed, x, z);
+            return nearest && Math.sqrt(nearest.distanceSquared) < path.width * 0.5 + 3;
+          })) continue;
+          if (this.rampSurfaces.some((ramp) => ramp.flow.heightAt(x, z) !== null)) continue;
+          if (this.colliders.some(({ box, blocksMovement }) => blocksMovement
+            && box.max.y > height && box.min.y < height + 3.2
+            && x + 1.8 > box.min.x && x - 1.8 < box.max.x
+            && z + 1.8 > box.min.z && z - 1.8 < box.max.z)) continue;
+          site = { ...authoredSite, x, z };
+          break;
+        }
+      }
+      if (!site) continue;
+      const terrainY = this.terrainHeightAt(site.x, site.z);
+      const base = new THREE.Vector3(site.x, terrainY + 0.22, site.z);
+      bases.push({ position: base, scale: new THREE.Vector3(1.55, 0.44, 1.55), yaw: site.yaw });
+      shafts.push({
+        position: new THREE.Vector3(site.x, terrainY + 1.5, site.z),
+        scale: new THREE.Vector3(0.34, 2.6, 0.34),
+        yaw: site.yaw,
+      });
+      caps.push({
+        position: new THREE.Vector3(site.x, terrainY + 2.92, site.z),
+        scale: new THREE.Vector3(0.46, 0.42, 0.46),
+        yaw: site.yaw,
+      });
+      rings.push({
+        position: new THREE.Vector3(site.x, terrainY + 2.26, site.z),
+        scale: new THREE.Vector3(0.78, 0.78, 0.78),
+        rotation: new THREE.Euler(Math.PI * 0.5, site.yaw, 0),
+      });
+      signals[site.accent].push({
+        position: this.localOffset(site.x, terrainY + 1.72, site.z, 0, -0.37, site.yaw),
+        scale: new THREE.Vector3(0.13, 1.22, 0.08),
+        yaw: site.yaw,
+      });
+    }
+    const baseGeometry = new THREE.CylinderGeometry(1, 1.1, 1, 6);
+    const shaftGeometry = new THREE.CylinderGeometry(1, 1, 1, 6);
+    const capGeometry = new THREE.ConeGeometry(1, 1, 6);
+    const ringGeometry = new THREE.TorusGeometry(1, 0.07, 5, 18);
+    const signalGeometry = new THREE.BoxGeometry(1, 1, 1);
+    this.addDesertInstances('QuickSense basin beacon plinths', baseGeometry, bodyMaterial, bases, true);
+    this.addDesertInstances('QuickSense basin beacon shafts', shaftGeometry, trimMaterial, shafts, true);
+    this.addDesertInstances('QuickSense basin beacon caps', capGeometry, trimMaterial, caps, true);
+    this.addDesertInstances('QuickSense basin beacon halos', ringGeometry, amberMaterial, rings, false, false);
+    this.addDesertInstances('QuickSense cyan basin beacon signals', signalGeometry, cyanMaterial, signals.cyan, false, false);
+    this.addDesertInstances('QuickSense magenta basin beacon signals', signalGeometry, magentaMaterial, signals.magenta, false, false);
+    this.addDesertInstances('QuickSense amber basin beacon signals', signalGeometry, amberMaterial, signals.amber, false, false);
+    this.group.userData.basinBeacons = { count: bases.length, collision: 'exact visible solid triangles; signals excluded' };
+  }
+
   private createTerrainGeometry(): THREE.BufferGeometry {
-    const segmentsX = 81;
-    const segmentsZ = 73;
+    // Deliberately coarse enough for the broad planes to read from the hero
+    // camera, while keeping sub-four-metre triangles for movement accuracy.
+    const segmentsX = 49;
+    const segmentsZ = 43;
     const positions: number[] = [];
     const uvs: number[] = [];
     const indices: number[] = [];
@@ -3385,55 +4132,45 @@ export class QuickSenseArena implements ArenaRuntime {
         }
       }
     }
-    const geometry = new THREE.BufferGeometry();
+    let geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     geometry.setIndex(indices);
-    const faceted = geometry.toNonIndexed();
-    geometry.dispose();
-    faceted.computeVertexNormals();
-    const lowShadow = new THREE.Color(0x4e3c2c);
-    const lowSun = new THREE.Color(0x896e49);
-    const highRock = new THREE.Color(0x75563e);
-    const scree = new THREE.Color(0x5f4938);
+    // Hard per-triangle normals make mesa shoulders, ravines, and basin rolls
+    // share the same faceted language as the concept's canyon geology.
+    const indexedGeometry = geometry;
+    geometry = indexedGeometry.toNonIndexed();
+    indexedGeometry.dispose();
+    geometry.computeVertexNormals();
+    const lowShadow = new THREE.Color(0x4d372f);
+    const lowSun = new THREE.Color(0xad754e);
+    const highRock = new THREE.Color(0x8c573c);
+    const scree = new THREE.Color(0x553b31);
     const colors: number[] = [];
-    const facetedPositions = faceted.getAttribute('position');
-    const facetedNormals = faceted.getAttribute('normal');
-    const faceCount = faceted.getAttribute('position').count / 3;
-    for (let face = 0; face < faceCount; face += 1) {
-      const vertex = face * 3;
-      const height = (
-        facetedPositions.getY(vertex)
-        + facetedPositions.getY(vertex + 1)
-        + facetedPositions.getY(vertex + 2)
-      ) / 3;
-      const slope = 1 - Math.abs(facetedNormals.getY(vertex));
-      const centerX = (
-        facetedPositions.getX(vertex)
-        + facetedPositions.getX(vertex + 1)
-        + facetedPositions.getX(vertex + 2)
-      ) / 3;
-      const centerZ = (
-        facetedPositions.getZ(vertex)
-        + facetedPositions.getZ(vertex + 1)
-        + facetedPositions.getZ(vertex + 2)
-      ) / 3;
+    const terrainPositions = geometry.getAttribute('position');
+    const terrainNormals = geometry.getAttribute('normal');
+    for (let vertex = 0; vertex < terrainPositions.count; vertex += 1) {
+      const height = terrainPositions.getY(vertex);
+      const slope = 1 - Math.abs(terrainNormals.getY(vertex));
+      const x = terrainPositions.getX(vertex);
+      const z = terrainPositions.getZ(vertex);
       const macroVariation = clamp01(
         0.5
-          + Math.sin(centerX * 0.071 + centerZ * 0.037) * 0.24
-          + Math.cos(centerZ * 0.083 - centerX * 0.024) * 0.18,
+          + Math.sin(x * 0.071 + z * 0.037) * 0.24
+          + Math.cos(z * 0.083 - x * 0.024) * 0.18,
       );
       const color = lowShadow.clone().lerp(lowSun, macroVariation);
       const rockBlend = clamp01((height - 10) / 19) * 0.58 + clamp01(slope * 1.95) * 0.34;
       color.lerp(highRock, clamp01(rockBlend));
-      color.lerp(scree, clamp01((slope - 0.18) * 2.4) * (0.45 + (face % 5) * 0.05));
-      color.multiplyScalar(0.94 + ((face * 11) % 5) * 0.018);
-      for (let vertex = 0; vertex < 3; vertex += 1) colors.push(color.r, color.g, color.b);
+      color.lerp(scree, clamp01((slope - 0.18) * 2.4) * 0.48);
+      const localVariation = 0.97 + (Math.sin(x * 0.33 + z * 0.21) * 0.5 + 0.5) * 0.06;
+      color.multiplyScalar(localVariation);
+      colors.push(color.r, color.g, color.b);
     }
-    faceted.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    faceted.computeBoundingBox();
-    faceted.computeBoundingSphere();
-    return faceted;
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    return geometry;
   }
 
   private terrainHeightAt(x: number, z: number): number {
@@ -3454,6 +4191,34 @@ export class QuickSenseArena implements ArenaRuntime {
     for (const hill of hills) {
       const blend = ellipseInfluence(x, z, hill.x, hill.z, hill.radiusX, hill.radiusZ);
       height += hill.height * blend * blend;
+    }
+
+    // Nested mesas break the broad movement hills into authored canyon
+    // landmarks. The flat crowns, steep shoulders, and secondary ledge bands
+    // remain part of the analytic terrain contract; roads are carved through
+    // them later in this function, so every ski line keeps its clearance.
+    const canyonMesas = [
+      { x: -58, z: -34, height: 18, radiusX: 17, radiusZ: 14, phase: 0.2 },
+      { x: -64, z: 14, height: 15, radiusX: 14, radiusZ: 17, phase: 1.1 },
+      { x: -52, z: 52, height: 19, radiusX: 18, radiusZ: 14, phase: 2.4 },
+      { x: 58, z: -40, height: 20, radiusX: 18, radiusZ: 14, phase: 0.8 },
+      { x: 66, z: 12, height: 16, radiusX: 15, radiusZ: 17, phase: 1.8 },
+      { x: 54, z: 52, height: 18, radiusX: 18, radiusZ: 14, phase: 2.9 },
+      { x: -42, z: -60, height: 14, radiusX: 13, radiusZ: 11, phase: 0.55 },
+      { x: 72, z: -20, height: 17, radiusX: 12, radiusZ: 15, phase: 1.35 },
+      { x: 69, z: 34, height: 16, radiusX: 13, radiusZ: 12, phase: 2.15 },
+      { x: -70, z: -14, height: 16, radiusX: 12, radiusZ: 15, phase: 2.75 },
+    ];
+    for (const mesa of canyonMesas) {
+      const nx = (x - mesa.x) / mesa.radiusX;
+      const nz = (z - mesa.z) / mesa.radiusZ;
+      const distance = Math.hypot(nx, nz);
+      if (distance >= 1.08) continue;
+      const angle = Math.atan2(nz, nx);
+      const crown = 1 - THREE.MathUtils.smoothstep(distance, 0.34, 1.02);
+      const facetedEdge = 0.92 + Math.sin(angle * 5 + mesa.phase) * 0.08;
+      const ledge = Math.exp(-(((distance - 0.67) / 0.11) ** 2)) * 2.4;
+      height += mesa.height * crown * facetedEdge + ledge;
     }
 
     // Two broad, terrain-native pump lines. Their wide smooth rollers create
@@ -5870,9 +6635,11 @@ export class QuickSenseArena implements ArenaRuntime {
     amberMaterial: THREE.MeshStandardMaterial,
   ): void {
     const specs: FloatingBuildingSpec[] = [
-      { name: 'Cyan Skydock', profile: 'skydock', x: -58, z: 23, y: 52, width: 26, height: 12, depth: 17, yaw: -0.24, accent: 'cyan' },
-      { name: 'Magenta Needle Dock', profile: 'needle', x: 58, z: 23, y: 56, width: 22, height: 15, depth: 15, yaw: 0.24, accent: 'magenta' },
-      { name: 'Amber Command Ark', profile: 'command', x: 0, z: 58, y: 66, width: 36, height: 15, depth: 23, yaw: 0, accent: 'amber' },
+      { name: 'Cyan Skydock', profile: 'skydock', x: -105, z: -72, y: 54, width: 22, height: 11, depth: 15, yaw: -0.24, accent: 'cyan' },
+      { name: 'Magenta Needle Dock', profile: 'needle', x: 58, z: 23, y: 37, width: 20, height: 14, depth: 14, yaw: 0.24, accent: 'magenta' },
+      // Keep the command silhouette in the high-right skyline from the hero
+      // overlook. It must frame the tower, never merge with its antenna crown.
+      { name: 'Amber Command Ark', profile: 'command', x: 104, z: 144, y: 82, width: 28, height: 14, depth: 19, yaw: -0.12, accent: 'amber' },
     ];
     const hulls: Record<FloatingBuildingProfile, InstanceTransform[]> = {
       skydock: [], needle: [], command: [],
@@ -6077,7 +6844,9 @@ export class QuickSenseArena implements ArenaRuntime {
               sideZ * spec.depth * 0.28,
               spec.yaw,
             ),
-            scale: new THREE.Vector3(0.72, 2.1, 0.72),
+              // Compact nozzles keep an off-camera station from leaving a
+              // disconnected glowing fixture dangling into the hero frame.
+              scale: new THREE.Vector3(0.72, 1.55, 0.72),
             rotation: new THREE.Euler(0, spec.yaw, Math.PI),
           });
         }
@@ -6306,7 +7075,7 @@ export class QuickSenseArena implements ArenaRuntime {
     sideMaterial: THREE.MeshStandardMaterial,
     cyanMaterial: THREE.MeshStandardMaterial,
     magentaMaterial: THREE.MeshStandardMaterial,
-    amberMaterial: THREE.MeshStandardMaterial,
+    _amberMaterial: THREE.MeshStandardMaterial,
   ): void {
     const eastFactionMaterial = magentaMaterial.clone();
     eastFactionMaterial.name = 'QuickSense terracotta skyline signal';
@@ -6314,8 +7083,16 @@ export class QuickSenseArena implements ArenaRuntime {
     eastFactionMaterial.emissive.setHex(0x7f4028);
     eastFactionMaterial.emissiveIntensity = 0.34;
     this.materials.push(eastFactionMaterial);
+    const cyanCableMaterial = this.material('QuickSense cyan suspension cable', 0x2d5960, 0.58, 0.52);
+    cyanCableMaterial.emissive.setHex(0x0b3e49);
+    cyanCableMaterial.emissiveIntensity = 0.28;
+    cyanCableMaterial.flatShading = false;
+    const amberCableMaterial = this.material('QuickSense amber suspension cable', 0x635044, 0.55, 0.56);
+    amberCableMaterial.emissive.setHex(0x392313);
+    amberCableMaterial.emissiveIntensity = 0.2;
+    amberCableMaterial.flatShading = false;
     const pylons = [
-      { x: -84.5, z: -16, height: 34, yaw: -0.08, accent: cyanMaterial, role: 'cyan' },
+      { x: -82, z: -70, height: 34, yaw: -0.08, accent: cyanMaterial, role: 'cyan' },
       { x: 84.5, z: 16, height: 36, yaw: 0.08, accent: eastFactionMaterial, role: 'magenta' },
     ] as const;
     const signals: Record<'cyan' | 'magenta', InstanceTransform[]> = { cyan: [], magenta: [] };
@@ -6391,13 +7168,10 @@ export class QuickSenseArena implements ArenaRuntime {
     // Cable endpoints use exterior roof sockets, not station centers.  This
     // keeps the invasion network visibly attached to the buildings and stops
     // the cables from disappearing through their hulls.
-    const cyanStation = this.localOffset(-58, 52 + 12 * 0.59 + 0.1, 23, 0, -17 * 0.22, -0.24);
-    const magentaStation = this.localOffset(58, 56 + 15 * 0.59 + 0.1, 23, 0, -15 * 0.22, 0.24);
-    const flagship = this.localOffset(0, 66 + 15 * 0.59 + 0.1, 58, 0, -23 * 0.22, 0);
-    this.createSuspendedCable('QuickSense cyan skyline cable', cyanPylonTop, cyanStation, 8, cyanMaterial, 0.22);
-    this.createSuspendedCable('QuickSense terracotta skyline cable', magentaPylonTop, magentaStation, 8, eastFactionMaterial, 0.22);
-    this.createSuspendedCable('QuickSense west flagship cable', cyanStation, flagship, 10, amberMaterial, 0.19);
-    this.createSuspendedCable('QuickSense east flagship cable', magentaStation, flagship, 12, amberMaterial, 0.19);
+    const cyanStation = this.localOffset(-105, 54 + 11 * 0.59 + 0.1, -72, 0, -15 * 0.22, -0.24);
+    const magentaStation = this.localOffset(58, 37 + 14 * 0.59 + 0.1, 23, 0, -14 * 0.22, 0.24);
+    this.createSuspendedCable('QuickSense cyan skyline cable', cyanPylonTop, cyanStation, 8, cyanCableMaterial, 0.14);
+    this.createSuspendedCable('QuickSense terracotta skyline cable', magentaPylonTop, magentaStation, 8, amberCableMaterial, 0.14);
   }
 
   private createSkylinePylonGeometry(role: 'cyan' | 'magenta', height: number): THREE.BufferGeometry {
