@@ -64,6 +64,7 @@ const syncMapChoice = (): void => {
   const selectedMap = map === 'quicksense' || map === 'bipbeta2' ? map : 'monsoon';
   const mode = matchModeFromQuery();
   const modeDefinition = matchModeDefinition(mode);
+  if (startOverlay) startOverlay.dataset.map = selectedMap;
   for (const choice of mapChoices) {
     const active = choice.dataset.mapChoice === selectedMap;
     choice.classList.toggle('active', active);

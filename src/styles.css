@@ -2905,6 +2905,1195 @@ body[data-piloting-fighter="true"] #crosshair { opacity: 0; }
   }
 }
 
+/* Orbit home screen pass. The deployment overlay borrows the calm, legible
+   hierarchy of a destination director: one hero identity, one featured
+   destination row, and a single clear action. Keep this layer last so it
+   wins over the accumulated combat HUD responsive rules above. */
+#start-overlay {
+  overflow: auto;
+  align-items: center;
+  padding: clamp(22px, 4vw, 64px);
+  background:
+    linear-gradient(90deg, rgba(1, 6, 12, 0.82), rgba(1, 9, 17, 0.38) 48%, rgba(1, 6, 12, 0.72)),
+    linear-gradient(180deg, rgba(1, 6, 12, 0.44), rgba(1, 8, 15, 0.12) 43%, rgba(1, 5, 10, 0.78)),
+    radial-gradient(circle at 68% 34%, rgba(39, 137, 168, 0.18), transparent 34%),
+    repeating-linear-gradient(90deg, transparent 0 159px, rgba(94, 220, 255, 0.028) 160px),
+    repeating-linear-gradient(0deg, transparent 0 119px, rgba(94, 220, 255, 0.02) 120px);
+}
+
+#start-overlay::before {
+  top: 50%;
+  left: 67%;
+  width: min(84vw, 1120px);
+  opacity: 0.78;
+  border-color: rgba(105, 227, 255, 0.11);
+  box-shadow:
+    0 0 0 54px rgba(105, 227, 255, 0.018),
+    0 0 0 108px rgba(105, 227, 255, 0.012),
+    0 0 0 162px rgba(105, 227, 255, 0.008);
+  transform: translate(-50%, -50%);
+}
+
+#start-overlay::after {
+  right: 5%;
+  bottom: 14%;
+  left: 5%;
+  background: linear-gradient(90deg, transparent, rgba(72, 232, 255, 0.34) 28%, transparent 47%, transparent 55%, rgba(255, 63, 134, 0.28) 76%, transparent);
+}
+
+#start-overlay .start-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(420px, 0.92fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 0 clamp(30px, 4vw, 70px);
+  width: min(1280px, 100%);
+  min-height: min(820px, calc(100svh - 72px));
+  max-height: calc(100svh - 44px);
+  padding: 0 clamp(28px, 4vw, 56px) clamp(26px, 3.2vw, 46px);
+  overflow: hidden auto;
+  border: 1px solid rgba(97, 222, 250, 0.28);
+  border-top-color: rgba(143, 239, 255, 0.84);
+  border-right-color: rgba(97, 222, 250, 0.16);
+  background:
+    linear-gradient(108deg, rgba(3, 15, 25, 0.88) 0 47%, rgba(3, 9, 16, 0.91) 47%),
+    radial-gradient(circle at 82% 23%, rgba(47, 160, 193, 0.12), transparent 32%),
+    rgba(2, 8, 14, 0.82);
+  box-shadow:
+    0 34px 110px rgba(0, 0, 0, 0.58),
+    inset 0 1px 0 rgba(220, 250, 255, 0.06),
+    inset 0 0 100px rgba(43, 187, 222, 0.025);
+  clip-path: polygon(32px 0, 100% 0, 100% calc(100% - 34px), calc(100% - 34px) 100%, 0 100%, 0 32px);
+}
+
+#start-overlay .start-panel::before {
+  top: 78px;
+  bottom: 42px;
+  left: 50.6%;
+  width: 1px;
+  background: linear-gradient(transparent 2%, rgba(93, 224, 250, 0.24) 17%, rgba(93, 224, 250, 0.12) 84%, transparent 98%);
+}
+
+#start-overlay .start-panel::after {
+  display: block;
+  top: 98px;
+  right: -18px;
+  color: rgba(117, 229, 255, 0.035);
+  content: "A–07";
+  font: 800 clamp(11rem, 20vw, 19rem)/0.78 var(--font-display);
+  letter-spacing: -0.12em;
+  pointer-events: none;
+}
+
+#start-overlay .deploy-rail {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  height: 44px;
+  margin: 0 clamp(-56px, -4vw, -28px) 0;
+  padding: 0 clamp(28px, 4vw, 56px);
+  border-bottom: 1px solid rgba(106, 225, 247, 0.16);
+  background: linear-gradient(90deg, rgba(2, 12, 20, 0.74), rgba(2, 17, 27, 0.28), rgba(2, 12, 20, 0.68));
+  color: #789eae;
+  font-size: 0.58rem;
+  letter-spacing: 0.2em;
+}
+
+#start-overlay .deploy-rail i {
+  background: linear-gradient(90deg, rgba(83, 229, 255, 0.62), transparent 75%);
+}
+
+#start-overlay .deploy-rail span:last-child {
+  color: var(--lime);
+  text-shadow: 0 0 12px rgba(156, 255, 105, 0.22);
+}
+
+#start-overlay .home-intro {
+  position: relative;
+  z-index: 1;
+  grid-column: 1;
+  grid-row: 2 / 4;
+  align-self: center;
+  min-width: 0;
+  padding: clamp(34px, 5vh, 68px) 0 clamp(22px, 3vh, 42px);
+}
+
+#start-overlay .modal-kicker {
+  display: block;
+  margin: 0 0 16px;
+  color: var(--cyan);
+  font: 700 0.66rem var(--font-display);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+#start-overlay #game-title.ascii-logo-lockup {
+  width: min(600px, 100%);
+  max-width: 100%;
+  aspect-ratio: 1200 / 524;
+  margin: 0;
+}
+
+#start-overlay #rift-ascii-logo {
+  filter:
+    drop-shadow(12px 18px 0 rgba(0, 7, 20, 0.66))
+    drop-shadow(0 0 10px rgba(19, 187, 255, 0.3))
+    drop-shadow(0 0 34px rgba(28, 117, 255, 0.18));
+}
+
+#start-overlay .arena-callout {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 18px 0 0;
+  color: #aac3cd;
+  font: 600 0.76rem var(--font-ui);
+  letter-spacing: 0.18em;
+}
+
+#start-overlay .arena-callout::before {
+  width: 30px;
+  height: 1px;
+  content: "";
+  background: var(--cyan);
+  box-shadow: 0 0 12px rgba(72, 232, 255, 0.75);
+}
+
+#start-overlay .arena-callout strong {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+#start-overlay .home-intro-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 34rem;
+  margin-top: clamp(26px, 5vh, 54px);
+  color: #5e8492;
+  font: 700 0.55rem var(--font-display);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+#start-overlay .home-intro-meta span:first-child {
+  color: var(--cyan);
+  font-size: 0.68rem;
+}
+
+#start-overlay .home-intro-meta i {
+  flex: 1;
+  max-width: 94px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(82, 224, 255, 0.48), transparent);
+}
+
+#start-overlay .menu-tabs {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: end;
+  position: relative;
+  width: 100%;
+  gap: 0;
+  margin: 0 0 18px;
+  border-bottom: 1px solid rgba(91, 215, 240, 0.2);
+  isolation: isolate;
+}
+
+#start-overlay .menu-tabs::before {
+  position: absolute;
+  top: 71px;
+  left: 0;
+  z-index: 2;
+  color: rgba(204, 243, 249, 0.74);
+  content: "ORBIT FEED  //  SELECTED DESTINATION";
+  font: 700 0.54rem var(--font-display);
+  letter-spacing: 0.17em;
+  pointer-events: none;
+}
+
+#start-overlay .menu-tabs::after {
+  position: absolute;
+  top: 94px;
+  right: 0;
+  left: 0;
+  z-index: 1;
+  height: 315px;
+  border: 1px solid rgba(100, 218, 239, 0.18);
+  background:
+    linear-gradient(180deg, rgba(1, 7, 13, 0.08), rgba(1, 7, 13, 0.3) 42%, rgba(2, 8, 14, 0.92)),
+    linear-gradient(90deg, rgba(2, 9, 15, 0.42), transparent 62%, rgba(2, 9, 15, 0.62)),
+    url("/assets/maps/monsoon-panorama-v3/east.jpg") center 48% / cover;
+  box-shadow: inset 0 1px 0 rgba(222, 252, 255, 0.08), 0 18px 34px rgba(0, 0, 0, 0.14);
+  clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
+  content: "";
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+#start-overlay[data-map="bipbeta2"] .menu-tabs::after {
+  background:
+    linear-gradient(180deg, rgba(1, 7, 13, 0.08), rgba(1, 7, 13, 0.3) 42%, rgba(2, 8, 14, 0.92)),
+    linear-gradient(90deg, rgba(2, 9, 15, 0.42), transparent 62%, rgba(2, 9, 15, 0.62)),
+    url("/assets/maps/bipbeta2-preview.svg") center / cover;
+}
+
+#start-overlay[data-map="quicksense"] .menu-tabs::after {
+  background:
+    linear-gradient(180deg, rgba(1, 7, 13, 0.08), rgba(1, 7, 13, 0.3) 42%, rgba(2, 8, 14, 0.92)),
+    linear-gradient(90deg, rgba(2, 9, 15, 0.42), transparent 62%, rgba(2, 9, 15, 0.62)),
+    url("/assets/maps/quicksense-panorama-v1/quicksense-hero-v1.png") center / cover;
+}
+
+#start-overlay .menu-tab {
+  position: relative;
+  z-index: 3;
+  min-width: 0;
+  min-height: 44px;
+  flex: 0 0 auto;
+  padding: 0 18px;
+  color: #6e919e;
+  font-size: 0.62rem;
+  letter-spacing: 0.18em;
+  text-align: left;
+}
+
+#start-overlay .menu-tab:first-child {
+  padding-left: 0;
+}
+
+#start-overlay .menu-tab:hover,
+#start-overlay .menu-tab:focus-visible {
+  color: #e7fbff;
+  background: transparent;
+}
+
+#start-overlay .menu-tab.active {
+  border-bottom-color: var(--cyan);
+  color: var(--cyan);
+  text-shadow: 0 0 14px rgba(72, 232, 255, 0.44);
+}
+
+#start-overlay #play-menu.active {
+  position: relative;
+  z-index: 1;
+  grid-column: 1 / -1;
+  grid-row: 4;
+  display: grid;
+  grid-template-columns: minmax(0, 1.13fr) minmax(360px, 0.87fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 18px clamp(24px, 3vw, 46px);
+  min-width: 0;
+  min-height: 0;
+  padding-top: 24px;
+}
+
+#start-overlay .match-report[hidden] {
+  display: none;
+}
+
+#start-overlay .deploy-meta {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  min-width: 0;
+  margin: 0;
+  background: rgba(91, 218, 241, 0.2);
+}
+
+#start-overlay .deploy-meta > span {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding: 12px 13px;
+  background: rgba(3, 13, 22, 0.72);
+  color: #d8f3fa;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+}
+
+#start-overlay .deploy-meta small {
+  margin-bottom: 5px;
+  color: #648b99;
+  font-size: 0.53rem;
+  letter-spacing: 0.18em;
+}
+
+#start-overlay .map-picker,
+#start-overlay .mode-picker {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+#start-overlay .map-picker {
+  grid-column: 1;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+#start-overlay .map-picker-label {
+  align-items: flex-start;
+  min-width: 0;
+  padding: 10px 0 0;
+  color: #7c9fab;
+  font-size: 0.56rem;
+  line-height: 1.5;
+  letter-spacing: 0.16em;
+}
+
+#start-overlay .map-picker-label::before {
+  display: block;
+  margin-bottom: 11px;
+  color: var(--cyan);
+  content: "01 /";
+  font: 700 0.62rem var(--font-display);
+  letter-spacing: 0.12em;
+}
+
+#start-overlay .map-picker-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+#start-overlay .map-choice {
+  min-width: 0;
+  min-height: 224px;
+  border-color: rgba(116, 209, 230, 0.25);
+  background: rgba(5, 18, 28, 0.9);
+  box-shadow: inset 0 1px 0 rgba(215, 249, 255, 0.06);
+}
+
+#start-overlay .map-choice::after {
+  position: absolute;
+  right: 9px;
+  bottom: 9px;
+  width: 6px;
+  height: 6px;
+  border-right: 1px solid rgba(204, 248, 255, 0.7);
+  border-bottom: 1px solid rgba(204, 248, 255, 0.7);
+  content: "";
+  opacity: 0.7;
+  transform: rotate(-45deg);
+}
+
+#start-overlay .map-choice-image {
+  filter: saturate(0.78) brightness(0.58) contrast(1.08);
+  transition: filter 240ms ease, scale 500ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#start-overlay .map-choice-shade {
+  background:
+    linear-gradient(180deg, rgba(1, 7, 13, 0.02), rgba(1, 7, 13, 0.2) 36%, rgba(1, 7, 13, 0.94)),
+    linear-gradient(90deg, rgba(2, 11, 18, 0.58), transparent 72%);
+}
+
+#start-overlay .map-choice-index {
+  top: 11px;
+  left: 11px;
+  color: rgba(218, 247, 252, 0.78);
+  font-size: 0.5rem;
+}
+
+#start-overlay .map-choice-copy {
+  right: 12px;
+  bottom: 20px;
+  left: 12px;
+  gap: 5px;
+}
+
+#start-overlay .map-choice-copy strong {
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+}
+
+#start-overlay .map-choice-copy small {
+  color: #a0bec7;
+  font-size: 0.54rem;
+  line-height: 1.25;
+}
+
+#start-overlay .map-choice:hover,
+#start-overlay .map-choice:focus-visible {
+  border-color: rgba(128, 235, 255, 0.88);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(72, 232, 255, 0.22);
+  transform: translateY(-3px);
+}
+
+#start-overlay .map-choice.active {
+  border-color: rgba(119, 239, 255, 0.94);
+  box-shadow: inset 0 -3px 0 var(--cyan), 0 0 26px rgba(72, 232, 255, 0.12);
+}
+
+#start-overlay .map-choice.active .map-choice-image,
+#start-overlay .map-choice:hover .map-choice-image,
+#start-overlay .map-choice:focus-visible .map-choice-image {
+  filter: saturate(1.02) brightness(0.78) contrast(1.08);
+  scale: 1.045;
+}
+
+#start-overlay .map-choice-state {
+  top: 10px;
+  right: 10px;
+  padding: 4px 6px;
+  background: rgba(2, 14, 21, 0.8);
+  font-size: 0.46rem;
+}
+
+#start-overlay .mode-picker {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: stretch;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(97, 219, 241, 0.14);
+}
+
+#start-overlay .mode-picker .map-picker-label {
+  display: block;
+  min-height: 0;
+  padding: 0;
+  color: #7c9fab;
+}
+
+#start-overlay .mode-picker .map-picker-label::before {
+  display: inline;
+  margin: 0 9px 0 0;
+  content: "02 /";
+}
+
+#start-overlay .mode-picker-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 11px;
+}
+
+#start-overlay .mode-choice {
+  min-width: 0;
+  min-height: 78px;
+  gap: 7px;
+  padding: 11px 12px;
+  border-color: rgba(103, 214, 255, 0.16);
+  background: rgba(4, 15, 25, 0.66);
+}
+
+#start-overlay .mode-choice:hover,
+#start-overlay .mode-choice:focus-visible {
+  border-color: rgba(72, 232, 255, 0.64);
+  background: rgba(16, 39, 53, 0.74);
+  transform: translateY(-2px);
+}
+
+#start-overlay .mode-choice.active {
+  border-color: rgba(72, 232, 255, 0.84);
+  background: linear-gradient(135deg, rgba(72, 232, 255, 0.14), rgba(255, 61, 141, 0.05));
+  box-shadow: inset 3px 0 0 var(--cyan), 0 0 18px rgba(72, 232, 255, 0.06);
+}
+
+#start-overlay .mode-choice-index {
+  color: var(--cyan);
+  font-size: 0.52rem;
+}
+
+#start-overlay .mode-choice-copy {
+  gap: 3px;
+}
+
+#start-overlay .mode-choice-copy strong {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+#start-overlay .mode-choice-copy small {
+  color: #8eafb9;
+  font-size: 0.61rem;
+  line-height: 1.26;
+}
+
+#start-overlay .briefing-grid {
+  grid-column: 2;
+  grid-row: 2;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+#start-overlay .briefing-grid::before {
+  position: static;
+  grid-column: 1 / -1;
+  display: block;
+  margin-bottom: 3px;
+  color: #7c9fab;
+  content: "03 / FRAME INPUT";
+  font-size: 0.56rem;
+  letter-spacing: 0.16em;
+}
+
+#start-overlay .briefing-grid div {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid rgba(103, 214, 255, 0.11);
+  background: rgba(2, 10, 17, 0.42);
+  color: #9bb9c3;
+  font-size: 0.63rem;
+  letter-spacing: 0.05em;
+}
+
+#start-overlay .briefing-grid kbd {
+  flex: 0 0 auto;
+  min-width: 2.7rem;
+  padding: 4px 5px;
+  border-left: 2px solid var(--cyan);
+  background: rgba(72, 232, 255, 0.08);
+  color: #d8f9ff;
+  font-size: 0.54rem;
+}
+
+#start-overlay .briefing-grid div:hover {
+  border-color: rgba(103, 224, 247, 0.32);
+  background: rgba(8, 27, 39, 0.56);
+}
+
+#start-overlay .loadout-strip {
+  grid-column: 1;
+  grid-row: 3;
+  align-self: end;
+  min-width: 0;
+  gap: 11px;
+  margin: 0;
+  padding-top: 13px;
+  border-top: 1px solid rgba(95, 215, 238, 0.12);
+  color: #638895;
+  font-size: 0.52rem;
+}
+
+#start-overlay .loadout-strip i {
+  width: 4px;
+  height: 4px;
+  background: var(--cyan);
+  box-shadow: 0 0 9px rgba(72, 232, 255, 0.56);
+}
+
+#start-overlay #start-button {
+  grid-column: 2;
+  grid-row: 3;
+  align-self: end;
+  width: 100%;
+  min-height: 68px;
+  margin: 0;
+  padding: 0 22px 0 26px;
+  border: 1px solid rgba(157, 247, 255, 0.94);
+  background: linear-gradient(105deg, #39cfe8, #a9f5ff 72%, #effeff);
+  color: #05131b;
+  font-size: 0.82rem;
+  letter-spacing: 0.18em;
+  box-shadow: 0 0 34px rgba(72, 232, 255, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.64);
+  transition: filter 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+
+#start-overlay #start-button::before {
+  width: 5px;
+  background: #f5ffff;
+}
+
+#start-overlay #start-button i {
+  font-size: 1.6rem;
+  transform: translateY(-1px);
+}
+
+#start-overlay #start-button:hover,
+#start-overlay #start-button:focus-visible {
+  filter: brightness(1.07) saturate(1.05);
+  box-shadow: 0 0 46px rgba(72, 232, 255, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.84);
+  outline: 2px solid rgba(194, 251, 255, 0.35);
+  outline-offset: 3px;
+  transform: translateY(-3px);
+}
+
+#start-overlay #start-button:active {
+  transform: translateY(1px) scale(0.99);
+}
+
+#start-overlay .modal-footnote {
+  grid-column: 2;
+  grid-row: 4;
+  align-self: end;
+  margin: 0;
+  padding-top: 9px;
+  color: #5a7e8a;
+  font-size: 0.55rem;
+  letter-spacing: 0.08em;
+  text-align: right;
+}
+
+#start-overlay #start-button[data-loading="true"] {
+  background: linear-gradient(105deg, rgba(12, 54, 68, 0.98), rgba(28, 92, 106, 0.98));
+  color: #c9f8ff;
+}
+
+#start-overlay #options-menu.active,
+#start-overlay .dossier-view.active {
+  grid-column: 1 / -1;
+  grid-row: 2 / 5;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+#start-overlay #options-menu.active {
+  display: grid;
+  align-content: start;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0 18px;
+  padding-top: 28px;
+}
+
+#start-overlay #options-menu .options-heading,
+#start-overlay #options-menu .option-row,
+#start-overlay #options-menu .secondary-menu-button,
+#start-overlay #options-menu .modal-footnote {
+  grid-column: 1 / -1;
+}
+
+#start-overlay #options-menu .options-heading {
+  margin-top: 0;
+}
+
+#start-overlay #options-menu .option-row {
+  border-color: rgba(103, 214, 255, 0.14);
+}
+
+#start-overlay .dossier-shell {
+  margin-top: 24px;
+}
+
+@media (max-width: 980px) {
+  #start-overlay .start-panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto;
+    min-height: 0;
+    max-height: calc(100svh - 32px);
+  }
+
+  #start-overlay .home-intro {
+    grid-column: 1;
+    grid-row: 2;
+    padding: 34px 0 10px;
+  }
+
+  #start-overlay .menu-tabs {
+    grid-column: 1;
+    grid-row: 3;
+    margin: 0;
+  }
+
+  #start-overlay #play-menu.active {
+    grid-column: 1;
+    grid-row: 4;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.78fr);
+    padding-top: 20px;
+  }
+
+  #start-overlay .start-panel::before {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  #start-overlay {
+    align-items: start;
+    padding: 14px;
+  }
+
+  #start-overlay .start-panel {
+    width: 100%;
+    padding: 0 18px 22px;
+    clip-path: polygon(18px 0, 100% 0, 100% calc(100% - 22px), calc(100% - 22px) 100%, 0 100%, 0 18px);
+  }
+
+  #start-overlay .deploy-rail {
+    margin: 0 -18px;
+    padding: 0 18px;
+  }
+
+  #start-overlay .home-intro {
+    padding: 30px 0 8px;
+  }
+
+  #start-overlay .modal-kicker {
+    font-size: 0.55rem;
+    letter-spacing: 0.14em;
+  }
+
+  #start-overlay #game-title.ascii-logo-lockup {
+    width: 100%;
+  }
+
+  #start-overlay .arena-callout {
+    flex-wrap: wrap;
+    gap: 7px 9px;
+    font-size: 0.66rem;
+    letter-spacing: 0.12em;
+  }
+
+  #start-overlay .home-intro-meta {
+    margin-top: 24px;
+    font-size: 0.48rem;
+  }
+
+  #start-overlay .menu-tab {
+    flex: 1 1 0;
+    padding: 0 10px;
+    text-align: center;
+  }
+
+  #start-overlay .menu-tab:first-child {
+    padding-left: 10px;
+    text-align: center;
+  }
+
+  #start-overlay #play-menu.active {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto auto auto;
+    gap: 16px;
+  }
+
+  #start-overlay .deploy-meta,
+  #start-overlay .map-picker,
+  #start-overlay .mode-picker,
+  #start-overlay .briefing-grid,
+  #start-overlay .loadout-strip,
+  #start-overlay #start-button,
+  #start-overlay .modal-footnote {
+    grid-column: 1;
+  }
+
+  #start-overlay .deploy-meta { grid-row: 1; }
+  #start-overlay .map-picker { grid-row: 2; grid-template-columns: 1fr; gap: 9px; }
+  #start-overlay .mode-picker { grid-row: 3; }
+  #start-overlay .briefing-grid { grid-row: 4; }
+  #start-overlay .loadout-strip { grid-row: 5; }
+  #start-overlay #start-button { grid-row: 6; }
+  #start-overlay .modal-footnote { grid-row: 7; text-align: center; }
+
+  #start-overlay .map-picker-label {
+    padding-top: 0;
+  }
+
+  #start-overlay .map-picker-label::before {
+    display: inline;
+    margin: 0 8px 0 0;
+  }
+
+  #start-overlay .map-picker-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #start-overlay .map-choice {
+    min-height: 154px;
+  }
+
+  #start-overlay .briefing-grid div {
+    min-height: 40px;
+  }
+
+  #start-overlay .dossier-view.active,
+  #start-overlay #options-menu.active {
+    grid-column: 1;
+    grid-row: 4;
+  }
+}
+
+@media (max-width: 500px) {
+  #start-overlay .map-picker-options,
+  #start-overlay .mode-picker-options {
+    grid-template-columns: 1fr;
+  }
+
+  #start-overlay .map-choice {
+    min-height: 92px;
+  }
+
+  #start-overlay .map-choice-copy {
+    bottom: 12px;
+  }
+
+  #start-overlay .deploy-meta > span {
+    padding: 10px 8px;
+    font-size: 0.54rem;
+  }
+
+  #start-overlay .deploy-meta small {
+    font-size: 0.46rem;
+  }
+}
+
+/* Mobile director layout: scene art gives way to readable choices, with the
+   deploy action arriving before the optional control legend. */
+@media (max-width: 720px) {
+  #start-overlay .menu-tabs::before,
+  #start-overlay .menu-tabs::after {
+    display: none;
+  }
+
+  #start-overlay .home-intro {
+    padding-top: 20px;
+    padding-bottom: 6px;
+  }
+
+  #start-overlay #game-title.ascii-logo-lockup {
+    width: min(330px, 100%);
+  }
+
+  #start-overlay .home-intro-meta {
+    display: none;
+  }
+
+  #start-overlay #play-menu.active {
+    grid-template-rows: auto auto auto auto auto auto auto;
+  }
+
+  #start-overlay .briefing-grid {
+    grid-row: 5;
+  }
+
+  #start-overlay .loadout-strip {
+    grid-row: 6;
+  }
+
+  #start-overlay #start-button {
+    grid-row: 4;
+  }
+
+  #start-overlay .modal-footnote {
+    grid-row: 7;
+  }
+}
+
+@media (max-width: 500px) {
+  #start-overlay .map-picker-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #start-overlay .map-choice {
+    min-height: 88px;
+  }
+
+  #start-overlay .map-choice-copy {
+    right: 8px;
+    bottom: 10px;
+    left: 8px;
+    gap: 2px;
+  }
+
+  #start-overlay .map-choice-copy strong {
+    font-size: 0.56rem;
+    letter-spacing: 0.06em;
+  }
+
+  #start-overlay .map-choice-copy small {
+    font-size: 0.42rem;
+  }
+
+  #start-overlay .map-choice-index {
+    top: 7px;
+    left: 8px;
+    font-size: 0.42rem;
+  }
+
+  #start-overlay .mode-picker-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #start-overlay .mode-choice {
+    min-height: 58px;
+    padding: 7px 8px;
+  }
+
+  #start-overlay .mode-choice-copy strong {
+    font-size: 0.6rem;
+  }
+
+  #start-overlay .mode-choice-copy small {
+    font-size: 0.5rem;
+  }
+
+  #start-overlay .briefing-grid div:nth-child(n + 7) {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  #start-overlay #play-menu.active {
+    gap: 10px;
+  }
+
+  #start-overlay .deploy-meta {
+    height: 56px;
+    min-height: 56px;
+  }
+
+  #start-overlay .map-choice {
+    min-height: 78px;
+  }
+
+  #start-overlay .mode-picker {
+    padding-bottom: 8px;
+  }
+
+  #start-overlay .mode-picker-options {
+    gap: 4px;
+    margin-top: 6px;
+  }
+
+  #start-overlay .mode-choice {
+    min-height: 48px;
+    padding: 5px 7px;
+  }
+
+  #start-overlay .mode-choice-copy small {
+    line-height: 1.15;
+  }
+
+  #start-overlay #start-button {
+    min-height: 58px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #start-overlay .map-choice-image,
+  #start-overlay #start-button {
+    transition: none;
+  }
+}
+
+/* Critic correction 01: keep the telemetry compact and make every control
+   hint visible in the first frame at the desktop reference viewport. */
+#start-overlay .home-intro {
+  padding-top: clamp(24px, 3vh, 42px);
+  padding-bottom: 22px;
+}
+
+#start-overlay .home-intro-meta {
+  margin-top: clamp(22px, 3.2vh, 36px);
+}
+
+#start-overlay .deploy-meta {
+  align-self: start;
+  height: 68px;
+  min-height: 68px;
+}
+
+#start-overlay .mode-picker {
+  padding-bottom: 13px;
+}
+
+#start-overlay .mode-picker-options {
+  gap: 6px;
+  margin-top: 9px;
+}
+
+#start-overlay .mode-choice {
+  min-height: 70px;
+  padding: 9px 11px;
+}
+
+#start-overlay .briefing-grid {
+  gap: 4px;
+}
+
+#start-overlay .briefing-grid div {
+  min-height: 36px;
+  padding: 6px 8px;
+  font-size: 0.59rem;
+}
+
+#start-overlay .briefing-grid kbd {
+  min-width: 2.55rem;
+  padding: 3px 4px;
+  font-size: 0.51rem;
+}
+
+/* Short desktop viewports are common for a game shell. Preserve the full
+   director rhythm while keeping the deploy action inside the first frame. */
+@media (min-width: 721px) and (max-height: 800px) {
+  #start-overlay {
+    padding: 16px 22px;
+  }
+
+  #start-overlay .start-panel {
+    height: calc(100svh - 32px);
+    min-height: 0;
+    max-height: calc(100svh - 32px);
+    padding-bottom: 18px;
+  }
+
+  #start-overlay .home-intro {
+    padding-top: 10px;
+    padding-bottom: 6px;
+  }
+
+  #start-overlay .modal-kicker {
+    margin-bottom: 9px;
+    font-size: 0.56rem;
+  }
+
+  #start-overlay #game-title.ascii-logo-lockup {
+    width: min(380px, 100%);
+  }
+
+  #start-overlay .arena-callout {
+    margin-top: 7px;
+    font-size: 0.64rem;
+  }
+
+  #start-overlay .home-intro-meta {
+    margin-top: 10px;
+    font-size: 0.48rem;
+  }
+
+  #start-overlay .menu-tabs {
+    margin-bottom: 8px;
+  }
+
+  #start-overlay .menu-tabs::after {
+    height: 166px;
+    opacity: 0.7;
+  }
+
+  #start-overlay #play-menu.active {
+    grid-template-rows: auto 140px auto auto;
+    gap: 8px 22px;
+    padding-top: 10px;
+  }
+
+  #start-overlay .deploy-meta {
+    height: 52px;
+    min-height: 52px;
+  }
+
+  #start-overlay .deploy-meta > span {
+    padding: 8px 10px;
+    font-size: 0.54rem;
+  }
+
+  #start-overlay .deploy-meta small {
+    margin-bottom: 3px;
+    font-size: 0.47rem;
+  }
+
+  #start-overlay .map-picker {
+    grid-template-columns: 76px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  #start-overlay .map-picker-label {
+    padding-top: 7px;
+    font-size: 0.5rem;
+  }
+
+  #start-overlay .map-picker-label::before {
+    margin-bottom: 6px;
+    font-size: 0.55rem;
+  }
+
+  #start-overlay .map-choice {
+    min-height: 140px;
+  }
+
+  #start-overlay .map-choice-copy {
+    bottom: 15px;
+  }
+
+  #start-overlay .map-choice-copy strong {
+    font-size: 0.62rem;
+  }
+
+  #start-overlay .map-choice-copy small {
+    font-size: 0.48rem;
+  }
+
+  #start-overlay .mode-picker {
+    padding: 7px 10px 8px;
+    border: 1px solid rgba(97, 219, 241, 0.14);
+    background: linear-gradient(90deg, rgba(2, 10, 17, 0.9), rgba(2, 12, 20, 0.72));
+  }
+
+  #start-overlay .mode-picker-options {
+    gap: 4px;
+    margin-top: 6px;
+  }
+
+  #start-overlay .mode-choice {
+    min-height: 50px;
+    gap: 4px;
+    padding: 6px 8px;
+  }
+
+  #start-overlay .mode-choice-copy strong {
+    font-size: 0.62rem;
+  }
+
+  #start-overlay .mode-choice-copy small {
+    font-size: 0.52rem;
+  }
+
+  #start-overlay .briefing-grid {
+    gap: 3px;
+  }
+
+  #start-overlay .briefing-grid::before {
+    margin-bottom: 1px;
+    font-size: 0.5rem;
+  }
+
+  #start-overlay .briefing-grid div {
+    min-height: 28px;
+    padding: 4px 7px;
+    font-size: 0.53rem;
+  }
+
+  #start-overlay .briefing-grid div:nth-child(n + 7) {
+    display: none;
+  }
+
+  #start-overlay .briefing-grid kbd {
+    min-width: 2.3rem;
+    padding: 2px 4px;
+    font-size: 0.47rem;
+  }
+
+  #start-overlay .loadout-strip {
+    padding-top: 8px;
+    font-size: 0.46rem;
+  }
+
+  #start-overlay #start-button {
+    min-height: 54px;
+  }
+
+  #start-overlay .modal-footnote {
+    padding-top: 4px;
+    font-size: 0.48rem;
+  }
+}
+
 /* Continuation CTA: final cascade over the legacy menu layers. */
 #start-button:not([data-loading="true"]) {
   min-height: 58px;

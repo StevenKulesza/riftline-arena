@@ -255,15 +255,22 @@
 
       <section id="start-overlay" class="modal-overlay" aria-labelledby="game-title">
         <div class="start-panel">
-          <div class="deploy-rail" aria-hidden="true">
+          <div class="deploy-rail" aria-label="Riftline deployment status">
             <span>RIFT // A-07</span>
             <i></i>
+            <span id="overlay-network" aria-live="polite">ARENA READY</span>
           </div>
-          <h1 id="game-title" class="ascii-logo-lockup">
-            <canvas id="rift-ascii-logo" aria-hidden="true"></canvas>
-            <span class="visually-hidden">Rift</span>
-          </h1>
-          <p id="overlay-tagline" class="arena-callout">WCA1 // Rift Sector <strong>· First to 20</strong></p>
+          <div class="home-intro">
+            <span class="modal-kicker">Kinetic combat arena // live simulation</span>
+            <h1 id="game-title" class="ascii-logo-lockup">
+              <canvas id="rift-ascii-logo" aria-hidden="true"></canvas>
+              <span class="visually-hidden">Rift</span>
+            </h1>
+            <p id="overlay-tagline" class="arena-callout">WCA1 // Rift Sector <strong>· First to 20</strong></p>
+            <div class="home-intro-meta" aria-hidden="true">
+              <span>01</span><i></i><span>Frontier combat frame</span><i></i><span>Local session</span>
+            </div>
+          </div>
           <nav class="menu-tabs" aria-label="Start menu sections">
             <button id="play-tab" class="menu-tab active" type="button" aria-selected="true">Play</button>
             <button id="intel-tab" class="menu-tab" type="button" aria-selected="false">Intel</button>
@@ -280,7 +287,7 @@
             <span><small>Frame</small>Light Assault</span>
           </div>
           <div class="map-picker" aria-label="Choose arena map">
-            <span class="map-picker-label">Select arena</span>
+            <span class="map-picker-label">Arena destinations</span>
             <div class="map-picker-options">
               <button class="map-choice" type="button" data-map-choice="monsoon">
                 <img
@@ -333,7 +340,7 @@
             </div>
           </div>
           <div class="mode-picker" aria-label="Choose match mode">
-            <span class="map-picker-label">Select protocol</span>
+            <span class="map-picker-label">Select combat mode</span>
             <div class="mode-picker-options">
               <button class="mode-choice active" type="button" data-mode-choice="arena" aria-pressed="true">
                 <span class="mode-choice-index">01 // FFA</span>
