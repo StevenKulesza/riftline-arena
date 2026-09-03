@@ -63,6 +63,7 @@ import {
   FIGHTER_RESPAWN_SECONDS,
   FIGHTER_SHIELD_MAX,
   createQuickSenseFighters,
+  seatQuickSenseFighterPads,
   nearestBoardableFighter,
   resetFighterAtPad,
   updateFighterPresentation,
@@ -70,6 +71,7 @@ import {
 } from '../systems/FighterSquadronSystem';
 import { createSeededRandom } from '../utils/random';
 import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact, type SurfaceHit } from './Arena';
+import { MONSOON_WORLD_SCALE } from './maps/MonsoonDivide';
 import { COMBAT, GRAPPLE, GRENADE, MATCH_DURATION, MOVEMENT, POWERUP, SCORE_LIMIT, WEAPONS, type WeaponDefinition, type WeaponId } from './config';
 import { JetpackEnergy } from './JetpackEnergy';
 import {
@@ -236,13 +238,13 @@ const MAP_FOG_PROFILES = Object.freeze({
     // Warm, pale mineral dust ties the road network into QuickSense's
     // sandstone mountains without tinting nearby combat silhouettes.
     color: 0xc9b99d,
-    near: 105,
-    far: 560,
+    near: 210,
+    far: 1120,
   }),
   monsoon: Object.freeze({
     color: 0x86a2aa,
-    near: 130,
-    far: 650,
+    near: 260,
+    far: 1300,
   }),
 });
 const WEAPON_VIEW_RETRACT_DISTANCE = 2.45;
@@ -318,7 +320,7 @@ export class Game {
   private inkPass!: ShaderPass;
   private readonly scene = new THREE.Scene();
   private readonly speedTrails = new SpeedTrailSystem(this.scene, 4);
-  private readonly camera = new THREE.PerspectiveCamera(BASE_GAME_FOV, 1, 0.08, 1400);
+  private readonly camera = new THREE.PerspectiveCamera(BASE_GAME_FOV, 1, 0.08, 2800);
   private readonly input: InputController;
   private readonly arena: ArenaRuntime;
   private readonly audio = new AudioSystem();
@@ -791,9 +793,11 @@ export class Game {
     this.droneSwarm = new DroneSwarmSystem(this.scene, this.arena);
     this.flamethrowerDrones = new FlamethrowerDroneSystem(this.scene, this.arena);
     this.fighterCollision = new FighterArenaCollisionAdapter(this.arena);
-    this.fighters = this.arena.mapInfo.name === 'QuickSense'
-      ? createQuickSenseFighters(this.scene)
-      : [];
+    this.fighters = [];
+    if (this.arena.mapInfo.name === 'QuickSense') {
+      seatQuickSenseFighterPads((x, z, fromY) => this.arena.floorHeightAt(x, z, fromY));
+      this.fighters = createQuickSenseFighters(this.scene);
+    }
     this.scene.add(this.playerAvatar.root);
     this.thirdPersonWeaponModel.name = 'third-person-equipped-weapon';
     this.scene.add(this.thirdPersonWeaponModel);
@@ -2787,6 +2791,10 @@ export class Game {
         this.playerVelocity.addScaledVector(pad.direction, Math.max(pad.launchSpeed, preserved * 0.68));
         this.playerVelocity.y = Math.max(this.playerVelocity.y, pad.direction.y * pad.launchSpeed);
         this.jumpPadCooldown = 0.7;
+        // Walk-move drops leftover rise while grounded. Leave the pad airborne
+        // so the next fixed step does not eat the launch.
+        this.grounded = false;
+        this.coyote = 0;
         this.fovPunch = 7;
         this.trauma = Math.min(1, this.trauma + 0.24);
         this.audio.jump();
@@ -7071,12 +7079,12 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(false);
           this.hud.hideStart();
-          const floor = this.arena.floorHeightAt(-148, 76, Number.POSITIVE_INFINITY) ?? 0;
-          this.playerPosition.set(-148, floor - 0.08, 76);
+          const floor = this.arena.floorHeightAt(-148 * MONSOON_WORLD_SCALE, 76 * MONSOON_WORLD_SCALE, Number.POSITIVE_INFINITY) ?? 0;
+          this.playerPosition.set(-148 * MONSOON_WORLD_SCALE, floor - 0.08, 76 * MONSOON_WORLD_SCALE);
           // Aim the deterministic descent at the low edge of the west launch.
           // The old route target cut across its skirt instead of following the
           // visible ramp line, which made a clean downhill run look snagged.
-          const downhill = new THREE.Vector3(-119, floor, 58).sub(this.playerPosition).setY(0).normalize();
+          const downhill = new THREE.Vector3(-119 * MONSOON_WORLD_SCALE, floor, 58 * MONSOON_WORLD_SCALE).sub(this.playerPosition).setY(0).normalize();
           this.playerVelocity.set(0, 0, 0);
           this.jumpBuffer = 0;
           this.coyote = 0;
@@ -7285,7 +7293,7 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(true);
           this.hud.hideStart();
-          this.playerPosition.set(-168, 84, 166);
+          this.playerPosition.set(-168 * MONSOON_WORLD_SCALE, 84 * MONSOON_WORLD_SCALE, 166 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
           const toCore = this.arena.corePosition.clone().sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-toCore.x, -toCore.z);
@@ -7295,9 +7303,13 @@ export class Game {
         } else if (name === 'monsoon-grassland') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          const target = new THREE.Vector3(-158, this.arena.floorHeightAt(-158, 10) ?? 0, 10);
-          const floor = this.arena.floorHeightAt(-149, 18) ?? target.y;
-          this.playerPosition.set(-149, floor + 0.04, 18);
+          const target = new THREE.Vector3(
+            -158 * MONSOON_WORLD_SCALE,
+            this.arena.floorHeightAt(-158 * MONSOON_WORLD_SCALE, 10 * MONSOON_WORLD_SCALE) ?? 0,
+            10 * MONSOON_WORLD_SCALE,
+          );
+          const floor = this.arena.floorHeightAt(-149 * MONSOON_WORLD_SCALE, 18 * MONSOON_WORLD_SCALE) ?? target.y;
+          this.playerPosition.set(-149 * MONSOON_WORLD_SCALE, floor + 0.04, 18 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
           const view = target.clone().add(new THREE.Vector3(0, 1.05, 0)).sub(
             this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)),
@@ -7309,10 +7321,14 @@ export class Game {
         } else if (name === 'monsoon-structure') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          const floor = this.arena.floorHeightAt(-101, 108) ?? 0;
-          this.playerPosition.set(-101, floor + 0.04, 108);
+          const floor = this.arena.floorHeightAt(-101 * MONSOON_WORLD_SCALE, 108 * MONSOON_WORLD_SCALE) ?? 0;
+          this.playerPosition.set(-101 * MONSOON_WORLD_SCALE, floor + 0.04, 108 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
-          const target = new THREE.Vector3(-132, (this.arena.floorHeightAt(-132, 111) ?? floor) + 3.2, 111);
+          const target = new THREE.Vector3(
+            -132 * MONSOON_WORLD_SCALE,
+            (this.arena.floorHeightAt(-132 * MONSOON_WORLD_SCALE, 111 * MONSOON_WORLD_SCALE) ?? floor) + 3.2,
+            111 * MONSOON_WORLD_SCALE,
+          );
           const view = target.sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
@@ -7321,10 +7337,14 @@ export class Game {
         } else if (name === 'monsoon-ramp') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          const floor = this.arena.floorHeightAt(-132, 66) ?? 0;
-          this.playerPosition.set(-132, floor + 0.04, 66);
+          const floor = this.arena.floorHeightAt(-132 * MONSOON_WORLD_SCALE, 66 * MONSOON_WORLD_SCALE) ?? 0;
+          this.playerPosition.set(-132 * MONSOON_WORLD_SCALE, floor + 0.04, 66 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
-          const target = new THREE.Vector3(-98, (this.arena.floorHeightAt(-98, 45) ?? floor) + 2.1, 45);
+          const target = new THREE.Vector3(
+            -98 * MONSOON_WORLD_SCALE,
+            (this.arena.floorHeightAt(-98 * MONSOON_WORLD_SCALE, 45 * MONSOON_WORLD_SCALE) ?? floor) + 2.1,
+            45 * MONSOON_WORLD_SCALE,
+          );
           const view = target.sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
@@ -7333,8 +7353,8 @@ export class Game {
         } else if (name === 'monsoon-damage') {
           this.mode = 'running';
           this.audio.setPaused(true);
-          const wallTop = this.arena.floorHeightAt(-132, 102, Number.POSITIVE_INFINITY) ?? 30;
-          const wallPoint = new THREE.Vector3(-132, wallTop - 3.5, 101.43);
+          const wallTop = this.arena.floorHeightAt(-132 * MONSOON_WORLD_SCALE, 102 * MONSOON_WORLD_SCALE, Number.POSITIVE_INFINITY) ?? 30 * MONSOON_WORLD_SCALE;
+          const wallPoint = new THREE.Vector3(-132 * MONSOON_WORLD_SCALE, wallTop - 3.5, 101.43 * MONSOON_WORLD_SCALE);
           const normal = new THREE.Vector3(0, 0, -1);
           const offsets = [
             new THREE.Vector3(0, 0, 0),
@@ -7345,8 +7365,8 @@ export class Game {
           offsets.forEach((offset, index) => {
             this.arena.registerSurfaceImpact(wallPoint.clone().add(offset), normal, 40 + index * 24, 0);
           });
-          const floor = this.arena.floorHeightAt(-132, 91) ?? wallTop - 8;
-          this.playerPosition.set(-132, floor + 0.04, 91);
+          const floor = this.arena.floorHeightAt(-132 * MONSOON_WORLD_SCALE, 91 * MONSOON_WORLD_SCALE) ?? wallTop - 8;
+          this.playerPosition.set(-132 * MONSOON_WORLD_SCALE, floor + 0.04, 91 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
           const view = wallPoint.clone().sub(this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0))).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
@@ -7357,9 +7377,9 @@ export class Game {
           this.mode = 'running';
           this.audio.setPaused(true);
           this.screenshotArenaTime = 65;
-          this.playerPosition.set(-176, 68, -142);
+          this.playerPosition.set(-176 * MONSOON_WORLD_SCALE, 68 * MONSOON_WORLD_SCALE, -142 * MONSOON_WORLD_SCALE);
           this.playerVelocity.set(0, 0, 0);
-          const target = new THREE.Vector3(-55, 18, -42);
+          const target = new THREE.Vector3(-55 * MONSOON_WORLD_SCALE, 18 * MONSOON_WORLD_SCALE, -42 * MONSOON_WORLD_SCALE);
           const view = target.sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
@@ -7719,11 +7739,11 @@ export class Game {
           this.audio.setPaused(true);
           this.hud.hideStart();
           this.pausedForScreenshot = true;
-          this.playerPosition.set(-58, 30, -28);
+          this.playerPosition.set(-116, 60, -56);
           this.playerVelocity.set(0, 0, 0);
           // Aim at the west habitat wall. The former bridge-space target became
           // open sky after the center-tower/road clearance pass.
-          const target = new THREE.Vector3(-80, 30, -5);
+          const target = new THREE.Vector3(-160, 60, -10);
           const view = target.sub(this.playerPosition).normalize();
           this.yaw = Math.atan2(-view.x, -view.z);
           this.pitch = Math.asin(view.y);
@@ -7857,6 +7877,14 @@ export class Game {
         } : null;
       },
       getSpawnPoints: () => this.arena.spawnPoints.map((point) => ({ x: point.x, y: point.y, z: point.z })),
+      getJumpPads: () => this.arena.jumpPads.map((pad) => ({
+        x: pad.position.x,
+        y: pad.position.y,
+        z: pad.position.z,
+        radius: pad.radius,
+        launchSpeed: pad.launchSpeed,
+        direction: { x: pad.direction.x, y: pad.direction.y, z: pad.direction.z },
+      })),
       sampleLineOfSight: (start, end) => this.arena.hasLineOfSight(
         new THREE.Vector3(start.x, start.y, start.z),
         new THREE.Vector3(end.x, end.y, end.z),
@@ -8185,6 +8213,7 @@ export class Game {
         this.jetpackActive = false;
         this.jetpackEnergy.reset();
         this.wallJumpCooldown = 0;
+        this.jumpPadCooldown = 0;
         this.wallJumpedThisAirtime = false;
         this.wallJumpAirLockout = false;
         this.knockbackLockout = 0;
@@ -8803,6 +8832,7 @@ export class Game {
         jetpackRestartIn: jetpackEnergy.restartInSeconds,
         jetpackArmed: this.jetpackArmed,
         dashCooldown: this.dashCooldown,
+        jumpPadCooldown: this.jumpPadCooldown,
         wallJumpCount: this.wallJumpCount,
         wallJumpCooldown: this.wallJumpCooldown,
         wallJumpAirLockout: this.wallJumpAirLockout,

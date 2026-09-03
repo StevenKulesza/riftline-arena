@@ -1,5 +1,6 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { MOVEMENT } from '../src/game/config';
+import { MONSOON_DIVIDE, MONSOON_WORLD_SCALE } from '../src/game/maps/MonsoonDivide';
 
 const MAP_SEED = 450_600;
 
@@ -108,20 +109,20 @@ test('swept capsule contains dash-speed motion at structure walls, ceilings, ram
   const errors = await openPhysicsMap(page);
   const report: Record<string, PhysicsSample | number | boolean> = {};
 
-  // West relay bunker: its back wall is centered at x=-144.5 and is 1.1m
+  // West relay bunker: its back wall is centered at x=-289 and is 2.2m
   // thick. The capsule approaches from the playable interior/east side.
-  // z=116 stays clear of the new roof service cabin so the top ray resolves
+  // z=232 stays clear of the new roof service cabin so the top ray resolves
   // the bunker roof and the lower ray resolves its enterable interior floor.
-  const westRoof = await floorHeight(page, -138, 116);
-  const westFloor = await floorHeight(page, -138, 116, westRoof - 0.9);
+  const westRoof = await floorHeight(page, -138 * MONSOON_WORLD_SCALE, 116 * MONSOON_WORLD_SCALE);
+  const westFloor = await floorHeight(page, -138 * MONSOON_WORLD_SCALE, 116 * MONSOON_WORLD_SCALE, westRoof - 0.9);
   const westWall = await driveKinematics(
     page,
-    { x: -140.5, y: westFloor + 0.006, z: 116 },
+    { x: -285.8, y: westFloor + 0.006, z: 116 * MONSOON_WORLD_SCALE },
     { x: -60, y: 0, z: 0 },
-    0.12,
+    0.5,
   );
   report.westWall = westWall;
-  expect(westWall.position.x, 'west bunker capsule must remain on the interior side of its back wall').toBeGreaterThan(-143.74);
+  expect(westWall.position.x, 'west bunker capsule must remain on the interior side of its back wall').toBeGreaterThan(-287.72);
   expect(westWall.velocity.x, 'wall impact must remove inward velocity instead of teleporting through').toBeGreaterThan(-0.05);
 
   // The same bunker roof must be solid from below. Historically box recovery
@@ -129,9 +130,9 @@ test('swept capsule contains dash-speed motion at structure walls, ceilings, ram
   const roofSlabThickness = 0.62;
   const westCeiling = await driveKinematics(
     page,
-    { x: -132, y: westFloor + 0.006, z: 116 },
+    { x: -132 * MONSOON_WORLD_SCALE, y: westFloor + 0.006, z: 116 * MONSOON_WORLD_SCALE },
     { x: 0, y: 60, z: 0 },
-    0.14,
+    0.32,
   );
   report.westCeiling = westCeiling;
   expect(
@@ -143,8 +144,8 @@ test('swept capsule contains dash-speed motion at structure walls, ceilings, ram
 
   // Probe the southwest launch at mid-rise from the exposed positive-lateral
   // side. A player may ride the top, but cannot pass through its visible skirt.
-  const rampStart = { x: -118, z: -82 };
-  const rampEnd = { x: -84, z: -58 };
+  const rampStart = { x: -118 * MONSOON_WORLD_SCALE, z: -82 * MONSOON_WORLD_SCALE };
+  const rampEnd = { x: -84 * MONSOON_WORLD_SCALE, z: -58 * MONSOON_WORLD_SCALE };
   const dx = rampEnd.x - rampStart.x;
   const dz = rampEnd.z - rampStart.z;
   const length = Math.hypot(dx, dz);
@@ -152,8 +153,8 @@ test('swept capsule contains dash-speed motion at structure walls, ceilings, ram
   const lateral = { x: along.z, z: -along.x };
   const midpoint = { x: (rampStart.x + rampEnd.x) * 0.5, z: (rampStart.z + rampEnd.z) * 0.5 };
   const outside = {
-    x: midpoint.x + lateral.x * 8.6,
-    z: midpoint.z + lateral.z * 8.6,
+    x: midpoint.x + lateral.x * 17.2,
+    z: midpoint.z + lateral.z * 17.2,
   };
   const outsideFloor = await floorHeight(page, outside.x, outside.z);
   const rampSide = await driveKinematics(
@@ -166,7 +167,7 @@ test('swept capsule contains dash-speed motion at structure walls, ceilings, ram
     + (rampSide.position.z - rampStart.z) * lateral.z;
   report.rampSide = rampSide;
   report.rampLateral = rampLateral;
-  expect(rampLateral, 'capsule must remain outside the raised ramp skirt').toBeGreaterThan(7 + MOVEMENT.playerRadius - 0.08);
+  expect(rampLateral, 'capsule must remain outside the raised ramp skirt').toBeGreaterThan(14 + MOVEMENT.playerRadius - 0.08);
   expect(
     rampSide.wallContact || rampSide.ccd.wallHits > westWall.ccd.wallHits,
     'ramp skirt must register either analytic or swept wall contact',
@@ -174,7 +175,7 @@ test('swept capsule contains dash-speed motion at structure walls, ceilings, ram
 
   // The generated terrain has a finite mesh. Keep the capsule on its playable
   // side so no speed/jetpack combination can leave the collision world.
-  const halfWidth = 480 * 0.5 - MOVEMENT.playerRadius - MOVEMENT.arenaBoundaryInset;
+  const halfWidth = MONSOON_DIVIDE.width * 0.5 - MOVEMENT.playerRadius - MOVEMENT.arenaBoundaryInset;
   const edgeFloor = await floorHeight(page, halfWidth - 1.2, 0);
   const boundary = await driveKinematics(
     page,

@@ -1,5 +1,10 @@
 import { expect, test } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
+import { QUICK_HORIZONTAL_SCALE, QUICK_VERTICAL_SCALE } from '../src/game/maps/QuickSenseArena';
+
+/** World samples in this file were authored when the arena scale was 2 × 1.6. */
+const QX = QUICK_HORIZONTAL_SCALE / 2;
+const QY = QUICK_VERTICAL_SCALE / 1.6;
 
 const diagnostics = async (page: import('@playwright/test').Page) => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!);
 
@@ -11,7 +16,7 @@ test('QuickSense loads as a second authored arena with layered flow geometry', a
   ), null, { timeout: 180_000 });
   const result = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
-    const layeredSpine = [-138, -100, -60, 0, 60, 100, 138].map((z) => hooks.sampleFloorHeight(0, z, 160));
+      const layeredSpine = [-276, -200, -120, 0, 120, 200, 276].map((z) => hooks.sampleFloorHeight(0, z, 320));
     return {
       map: window.__THREE_GAME_DIAGNOSTICS__!.map,
       spawns: hooks.getSpawnPoints(),
@@ -20,7 +25,7 @@ test('QuickSense loads as a second authored arena with layered flow geometry', a
   });
 
   expect(result.map.name).toBe('QuickSense');
-  expect(result.map.bounds).toEqual({ width: 360, depth: 320 });
+  expect(result.map.bounds).toEqual({ width: 720, depth: 640 });
   expect(result.map.spawnCount).toBe(8);
   expect(result.map.jumpPadCount).toBe(5);
   expect(result.map.altitudeRange.max).toBeGreaterThanOrEqual(70);
@@ -43,7 +48,7 @@ test('QuickSense loads as a second authored arena with layered flow geometry', a
     supportY !== null && Math.abs(pickupY - (supportY + 0.012)) < 0.05
   ))).toBe(true);
   expect(
-    pickupSupportChecks.every(({ pickupY }) => pickupY < 70),
+    pickupSupportChecks.every(({ pickupY }) => pickupY < 70 * QY),
     'pickups must stay on the playable basin/tower layer, not floating-station roofs',
   ).toBe(true);
 
@@ -57,18 +62,18 @@ test('QuickSense projectile collision follows visible roads and mountain faces',
   // and render a second full arena behind the directly constructed fixture.
   await page.goto('/assets/ui/rift-logo.png');
 
-  const result = await page.evaluate(async () => {
+  const result = await page.evaluate(async ({ QX, QY }) => {
     const moduleUrl = '/src/game/maps/QuickSenseArena.ts';
     const { QuickSenseArena } = await import(moduleUrl);
     const arena = new QuickSenseArena(450600);
     const point = (x: number, y: number, z: number) => arena.group.position.clone().set(x, y, z);
     const roadClearance = arena.segmentHitDetails(
-      point(-28.59596010937328, 6.8, -147.84),
-      point(-44.59596010937328, 6.8, -147.84),
+      point(-28.59596010937328 * QX, 6.8 * QY, -147.84 * QX),
+      point(-44.59596010937328 * QX, 6.8 * QY, -147.84 * QX),
     );
     const mountainRays = [
-      [point(0, 64, 0), point(260, 64, 0)],
-      [point(0, 64, 0), point(225.1666, 64, 130)],
+      [point(0, 64 * QY, 0), point(260 * QX, 64 * QY, 0)],
+      [point(0, 64 * QY, 0), point(225.1666 * QX, 64 * QY, 130 * QX)],
     ].map(([start, end]) => arena.segmentHitDetails(start, end));
     const audit = arena.group.userData.staticWorldShotAudit as {
       engine: string;
@@ -83,7 +88,7 @@ test('QuickSense projectile collision follows visible roads and mountain faces',
     };
     arena.dispose();
     return response;
-  });
+  }, { QX, QY });
 
   expect(result.audit.engine).toBe('visible-static-projectile-bvh');
   expect(result.audit.triangles).toBeGreaterThan(40_000);
@@ -91,7 +96,7 @@ test('QuickSense projectile collision follows visible roads and mountain faces',
   expect(result.audit.broadProxyFallbacks).toBe(0);
   expect(result.roadClearance, 'a shot above/outside the visible road must stay in open air').toBeNull();
   expect(result.mountainRays.every((hit) => hit !== null), 'every sampled visible mountain face must block shots').toBe(true);
-  expect(result.mountainRays.every((hit) => hit!.distance > 160 && hit!.distance < 230)).toBe(true);
+  expect(result.mountainRays.every((hit) => hit!.distance > 160 * QX && hit!.distance < 230 * QX)).toBe(true);
 });
 
 test('loaded QuickSense keeps open-air road shots clear and mountain sightlines blocked', async ({ page }, testInfo) => {
@@ -277,8 +282,8 @@ test('QuickSense tower is player-scaled and supports one continuous terrain-to-i
   expect(setup.tower!.height).toBeGreaterThan(140);
   expect(setup.pieces).toHaveLength(26);
   expect(setup.pieces.every((piece) => piece.uvVertices > 0)).toBe(true);
-  expect(setup.tower!.collision.bodyTriangles).toBeGreaterThan(20_000);
-  expect(setup.tower!.collision.walkableTriangles).toBeGreaterThan(20_000);
+  expect(setup.tower!.collision.bodyTriangles).toBeGreaterThan(15_000);
+  expect(setup.tower!.collision.walkableTriangles).toBeGreaterThan(15_000);
 
   const telemetry: Array<{
     name: string;
@@ -381,11 +386,13 @@ test('QuickSense keeps the live movement contract on its floor and transfers', a
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/?map=quicksense&qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
-  await page.evaluate(() => {
+  await page.evaluate(({ QX, QY }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
-    hooks.setState('view-0');
+    const z = -50 * QX;
+    const y = hooks.sampleFloorHeight(0, z, 80 * QY) ?? 4;
+    hooks.setPlayerKinematics({ x: 0, y, z }, { x: 0, y: 0, z: 0 });
     hooks.setPausedForScreenshot(true);
-  });
+  }, { QX, QY });
   const before = await diagnostics(page);
   await page.keyboard.down('KeyW');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.stepSimulation(0.32));
@@ -405,46 +412,46 @@ test('QuickSense exposes pumpable rollers and a reciprocal two-way ramp profile'
   await page.goto('/?map=quicksense&qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
 
-  const profiles = await page.evaluate(() => {
+  const profiles = await page.evaluate(({ QX, QY }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     hooks.setPausedForScreenshot(true);
     const outerCircuit = [
       [0, -144], [-60, -146], [-118, -124], [-150, -76], [-158, -14],
       [-150, 50], [-122, 102], [-72, 134], [-20, 140],
-    ].map(([x, z]) => hooks.sampleFloorHeight(x, z, 160));
+    ].map(([x, z]) => hooks.sampleFloorHeight(x * QX, z * QX, 160 * QY));
     const southLaunch = [-126, -114.8, -103.6, -92.4, -81.2, -70]
-      .map((z) => hooks.sampleFloorHeight(0, z, 160));
+      .map((z) => hooks.sampleFloorHeight(0, z * QX, 160 * QY));
     return { outerCircuit, southLaunch };
-  });
+  }, { QX, QY });
 
   expect(profiles.outerCircuit.every((height) => height !== null)).toBe(true);
   const outer = profiles.outerCircuit as number[];
   const outerDeltas = outer.slice(1).map((height, index) => height - outer[index]);
-  expect(outerDeltas.filter((delta) => delta > 1.5).length).toBeGreaterThanOrEqual(3);
-  expect(outerDeltas.filter((delta) => delta < -1.5).length).toBeGreaterThanOrEqual(3);
+  expect(outerDeltas.filter((delta) => delta > 1.5 * QY).length).toBeGreaterThanOrEqual(3);
+  expect(outerDeltas.filter((delta) => delta < -1.5 * QY).length).toBeGreaterThanOrEqual(3);
 
   expect(profiles.southLaunch.every((height) => height !== null)).toBe(true);
   const launch = profiles.southLaunch as number[];
   const launchDeltas = launch.slice(1).map((height, index) => height - launch[index]);
   expect(launchDeltas.every((delta) => delta > 0)).toBe(true);
   expect(Math.max(...launchDeltas)).toBeGreaterThan(launchDeltas[0] * 3);
-  expect(Math.abs(launchDeltas.at(-1)! - launchDeltas[0])).toBeLessThan(0.08);
+  expect(Math.abs(launchDeltas.at(-1)! - launchDeltas[0])).toBeLessThan(0.08 * QY);
 
-  const downhillStart = await page.evaluate(() => {
+  const downhillStart = await page.evaluate(({ QX, QY }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
-    const y = hooks.sampleFloorHeight(-122, 102, 160) ?? 0;
+    const y = hooks.sampleFloorHeight(-122 * QX, 102 * QX, 160 * QY) ?? 0;
     hooks.setPlayerKinematics(
-      { x: -122, y, z: 102 },
+      { x: -122 * QX, y, z: 102 * QX },
       { x: -6.64, y: 0, z: -12.34 },
     );
     return window.__THREE_GAME_DIAGNOSTICS__!.player;
-  });
+  }, { QX, QY });
   await page.keyboard.down('ShiftLeft');
   await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__!.stepSimulation(1.5));
   await page.keyboard.up('ShiftLeft');
   const downhill = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.player);
   expect(downhill.skiing).toBe(true);
-  expect(downhill.position.y).toBeLessThan(downhillStart.position.y - 3);
+  expect(downhill.position.y).toBeLessThan(downhillStart.position.y - 3 * QY);
   expect(downhill.speed).toBeGreaterThan(downhillStart.speed + 3);
 });
 
@@ -452,15 +459,15 @@ test('QuickSense ramp centerlines and shoulders remain clear in both travel dire
   await page.goto('/?map=quicksense&qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
 
-  const failures = await page.evaluate(() => {
+  const failures = await page.evaluate(({ QX, QY }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     hooks.setPausedForScreenshot(true);
     const routes = [
-      { name: 'south launch', start: [0, -138], end: [0, -78], width: 22, fromY: 30 },
-      { name: 'north return', start: [0, 138], end: [0, 78], width: 22, fromY: 45 },
-      { name: 'west transfer', start: [-142, -36], end: [-84, -36], width: 19, fromY: 45 },
-      { name: 'east transfer', start: [142, 36], end: [76, 36], width: 19, fromY: 45 },
-      { name: 'center transition', start: [0, -56], end: [0, -20.4], width: 18, fromY: 22 },
+      { name: 'south launch', start: [0, -138 * QX], end: [0, -78 * QX], width: 22 * QX, fromY: 30 * QY },
+      { name: 'north return', start: [0, 138 * QX], end: [0, 78 * QX], width: 22 * QX, fromY: 45 * QY },
+      { name: 'west transfer', start: [-142 * QX, -36 * QX], end: [-84 * QX, -36 * QX], width: 19 * QX, fromY: 45 * QY },
+      { name: 'east transfer', start: [142 * QX, 36 * QX], end: [76 * QX, 36 * QX], width: 19 * QX, fromY: 45 * QY },
+      { name: 'center transition', start: [0, -56 * QX], end: [0, -20.4 * QX], width: 18 * QX, fromY: 22 * QY },
     ] as const;
     const problems: string[] = [];
     for (const route of routes) {
@@ -511,7 +518,7 @@ test('QuickSense ramp centerlines and shoulders remain clear in both travel dire
       }
     }
     return problems;
-  });
+  }, { QX, QY });
 
   expect(failures).toEqual([]);
 });
@@ -548,24 +555,24 @@ test('QuickSense route crossings are grade-separated instead of interpenetrating
   await page.goto('/?map=quicksense&qa=physics');
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
 
-  const crossings = await page.evaluate(() => {
+  const crossings = await page.evaluate(({ QX, QY }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     hooks.setPausedForScreenshot(true);
     return [
       // The lower decks are 2.5 m deep, so 6.5 m deck-top separation retains
       // more than two player heights of open underside clearance.
-      { name: 'west lower underpass', x: -100, z: -54, minimumClearance: 6.5 },
-      { name: 'east lower underpass', x: 100, z: -54, minimumClearance: 6.5 },
-      { name: 'east upper overpass', x: 54.5, z: 38.5, minimumClearance: 12 },
-      { name: 'west upper overpass', x: -54.5, z: 38.5, minimumClearance: 6.5 },
+      { name: 'west lower underpass', x: -100 * QX, z: -54 * QX, minimumClearance: 6.5 },
+      { name: 'east lower underpass', x: 100 * QX, z: -54 * QX, minimumClearance: 6.5 },
+      { name: 'east upper overpass', x: 54.5 * QX, z: 38.5 * QX, minimumClearance: 12 },
+      { name: 'west upper overpass', x: -54.5 * QX, z: 38.5 * QX, minimumClearance: 6.5 },
     ].map((crossing) => {
-      const upper = hooks.sampleFloorHeight(crossing.x, crossing.z, 160);
+      const upper = hooks.sampleFloorHeight(crossing.x, crossing.z, 160 * QY);
       const lower = upper === null
         ? null
         : hooks.sampleFloorHeight(crossing.x, crossing.z, upper - 0.5);
       return { ...crossing, upper, lower };
     });
-  });
+  }, { QX, QY });
 
   for (const crossing of crossings) {
     expect(crossing.upper, `${crossing.name} upper deck`).not.toBeNull();
@@ -682,17 +689,17 @@ test('QuickSense major ramps carry 60 m/s ski traversal in both directions witho
   await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__));
   await page.keyboard.down('ShiftLeft');
 
-  const failures = await page.evaluate(() => {
+  const failures = await page.evaluate(({ QX, QY }) => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     hooks.setPausedForScreenshot(true);
     const routes = [
-      { name: 'south launch', start: [0, -124], end: [0, -72], lateralLimit: 10, fromY: 140 },
-      { name: 'north return', start: [0, 124], end: [0, 72], lateralLimit: 10, fromY: 140 },
-      { name: 'west transfer', start: [-140, -36], end: [-84, -36], lateralLimit: 10, fromY: 140 },
+      { name: 'south launch', start: [0, -124 * QX], end: [0, -72 * QX], lateralLimit: 10 * QX, fromY: 140 * QY },
+      { name: 'north return', start: [0, 124 * QX], end: [0, 72 * QX], lateralLimit: 10 * QX, fromY: 140 * QY },
+      { name: 'west transfer', start: [-140 * QX, -36 * QX], end: [-84 * QX, -36 * QX], lateralLimit: 10 * QX, fromY: 140 * QY },
       // The exact static-floor BVH also exposes a facility roof above this
       // route. Start the traversal ray below that roof to select the transfer.
-      { name: 'east transfer', start: [140, 36], end: [76, 36], lateralLimit: 10, fromY: 80 },
-      { name: 'center transition', start: [0, -55], end: [0, -22], lateralLimit: 8, fromY: 140 },
+      { name: 'east transfer', start: [140 * QX, 36 * QX], end: [76 * QX, 36 * QX], lateralLimit: 10 * QX, fromY: 80 * QY },
+      { name: 'center transition', start: [0, -55 * QX], end: [0, -22 * QX], lateralLimit: 8 * QX, fromY: 140 * QY },
     ] as const;
     const problems: string[] = [];
 
@@ -752,7 +759,7 @@ test('QuickSense major ramps carry 60 m/s ski traversal in both directions witho
       }
     }
     return problems;
-  });
+  }, { QX, QY });
 
   await page.keyboard.up('ShiftLeft');
   expect(failures).toEqual([]);

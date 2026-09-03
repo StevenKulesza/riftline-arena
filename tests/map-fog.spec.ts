@@ -5,15 +5,15 @@ const MAPS = [
     name: 'Monsoon Divide',
     query: '',
     color: '#86a2aa',
-    near: 130,
-    far: 650,
+    near: 260,
+    far: 1300,
   },
   {
     name: 'QuickSense',
     query: '&map=quicksense',
     color: '#c9b99d',
-    near: 105,
-    far: 560,
+    near: 210,
+    far: 1120,
   },
 ] as const;
 

@@ -30,10 +30,10 @@ import {
 export const QUICKSENSE = {
   id: 'quicksense',
   name: 'QuickSense',
-  generationVersion: 6,
-  width: 360,
-  depth: 320,
-  killY: -24,
+  generationVersion: 7,
+  width: 720,
+  depth: 640,
+  killY: -48,
 } as const;
 
 type PathPoint = { x: number; y: number; z: number };
@@ -193,8 +193,8 @@ function habitatPortalOffset(signature: HabitatSignature): number {
 const EPSILON = 0.0001;
 const QUICK_LOCAL_WIDTH = 180;
 const QUICK_LOCAL_DEPTH = 160;
-const QUICK_HORIZONTAL_SCALE = 2;
-const QUICK_VERTICAL_SCALE = 1.6;
+export const QUICK_HORIZONTAL_SCALE = 4;
+export const QUICK_VERTICAL_SCALE = 3.2;
 const QUICK_WEATHER_DIRECTION = new THREE.Vector2(0.82, 0.28).normalize();
 const RAMP_POINT_VISUAL_LIFT = 0.2;
 const SUPPORT_CONTACT_EPSILON = 0.002;
@@ -216,9 +216,12 @@ const OUTPOST_TOWER_MODEL_SCALE_Y = 1 / QUICK_VERTICAL_SCALE;
 // smooth collision route from the rendered treads.
 const OUTPOST_TOWER_SOURCE_SMOOTH_ROUTES = [
   { name: 'east lower stair', start: [13.28125, 0.00496, 12.10938], end: [18.75, 3.08274, 11.71875], width: 3.51563 },
+  { name: 'east lower landing', start: [18.75, 3.08274, 11.71875], end: [18.75, 3.08274, 11.32813], width: 3.51563 },
   { name: 'east mid stair', start: [18.75, 3.08274, 11.32813], end: [18.75, 5.88274, 5.85938], width: 3.51563 },
   { name: 'east upper stair', start: [18.75, 5.88274, 5.85938], end: [18.75, 7.13829, -4.29688], width: 3.51563 },
+  { name: 'east deck landing', start: [18.75, 7.13829, -4.29688], end: [17.96875, 7.56051, -4.6875], width: 3.51563 },
   { name: 'east deck stair', start: [17.96875, 7.56051, -4.6875], end: [11.25, 10.12718, -5.07813], width: 4.375 },
+  { name: 'interior stair entry', start: [11.25, 10.12718, -5.07813], end: [11.32813, 10.12718, -4.29688], width: 2.96875 },
   { name: 'interior stair one', start: [11.32813, 10.12718, -4.29688], end: [11.32813, 11.07162, -2.34375], width: 2.96875 },
   { name: 'interior stair two', start: [11.32813, 11.07162, -2.34375], end: [9.375, 12.00496, -0.39063], width: 2.96875 },
   { name: 'interior stair three', start: [9.375, 12.00496, -0.39063], end: [7.42188, 13.06051, 0], width: 2.96875 },
@@ -983,9 +986,9 @@ export class QuickSenseArena implements ArenaRuntime {
       ready: true,
       topologyHash: `quicksense-${seed.toString(16)}-habitat-flow-v12`,
       bounds: { width: QUICKSENSE.width, depth: QUICKSENSE.depth },
-      // Keep the authored sky volume 20% above the fighter's hard 300 m
-      // ceiling, matching the former 150/180 safety and visual headroom.
-      altitudeRange: { min: 0, max: 360 },
+      // Keep the authored sky volume 20% above the fighter's hard 600 m
+      // ceiling, matching the former 150/180 then 300/360 safety headroom.
+      altitudeRange: { min: 0, max: 720 },
       renderTriangles: Math.round(renderTriangles),
       collisionTriangles: this.collisionTriangles,
       spawnCount: this.spawnPoints.length,
@@ -2474,7 +2477,7 @@ export class QuickSenseArena implements ArenaRuntime {
         const doubledArea = ab.length();
         // Ignore micro-bevels and cable facets smaller than the movement skin.
         // They remain fully rendered, but cannot catch a running player.
-        if (doubledArea < 0.008) continue;
+        if (doubledArea < 0.008 * (2 / QUICK_HORIZONTAL_SCALE) ** 2) continue;
         surfacePositions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
         // Build a second, much smaller BVH containing only authored upward
         // walkable faces. This avoids a downward floor probe stopping on a
@@ -2484,7 +2487,7 @@ export class QuickSenseArena implements ArenaRuntime {
         } else if (
           Math.max(a.y, b.y, c.y) - Math.min(a.y, b.y, c.y)
             > MOVEMENT.stepHeight / QUICK_VERTICAL_SCALE + 0.32
-          && doubledArea >= 0.045
+          && doubledArea >= 0.045 * (2 / QUICK_HORIZONTAL_SCALE) ** 2
         ) {
           const centroidX = (a.x + b.x + c.x) / 3;
           const centroidY = (a.y + b.y + c.y) / 3;
@@ -2676,6 +2679,10 @@ export class QuickSenseArena implements ArenaRuntime {
         end: end.clone(),
         width: route.width,
       });
+      // Landings close the centimetre-scale gaps between authored flights.
+      // Keep them off the climb waypoint list so screenshot cameras and the
+      // terrain-to-interior seeker still follow the visible stair chain.
+      if (route.name.includes('landing') || route.name.includes('entry')) continue;
       accessStairs.push({ start, end, width: route.width });
     }
     this.addInstancedMeshes(
@@ -6286,7 +6293,9 @@ export class QuickSenseArena implements ArenaRuntime {
     const lengthSquared = dx * dx + dz * dz;
     if (lengthSquared < EPSILON) return null;
     const t = ((x - ramp.start.x) * dx + (z - ramp.start.z) * dz) / lengthSquared;
-    if (t < 0 || t > 1) return null;
+    // A few centimetres of endpoint overlap keeps a capsule from falling
+    // through the authored landings between consecutive stair flights.
+    if (t < -0.05 || t > 1.05) return null;
     const nearestX = ramp.start.x + dx * t;
     const nearestZ = ramp.start.z + dz * t;
     if (Math.hypot(x - nearestX, z - nearestZ) > ramp.width * 0.5) return null;
@@ -6867,17 +6876,19 @@ export class QuickSenseArena implements ArenaRuntime {
     const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.55, 0.24, 8), shellMaterial);
     pad.name = 'QuickSense jump pad';
     pad.position.copy(position);
+    pad.scale.set(1 / QUICK_HORIZONTAL_SCALE, 1 / QUICK_VERTICAL_SCALE, 1 / QUICK_HORIZONTAL_SCALE);
     this.geometries.push(pad.geometry);
     this.group.add(pad);
     const inner = new THREE.Mesh(new THREE.CylinderGeometry(0.68, 0.68, 0.28, 8), accentMaterial);
     inner.name = 'QuickSense jump pad core';
-    inner.position.copy(position).add(new THREE.Vector3(0, 0.2, 0));
+    inner.position.copy(position).add(new THREE.Vector3(0, 0.2 / QUICK_VERTICAL_SCALE, 0));
+    inner.scale.set(1 / QUICK_HORIZONTAL_SCALE, 1 / QUICK_VERTICAL_SCALE, 1 / QUICK_HORIZONTAL_SCALE);
     this.geometries.push(inner.geometry);
     this.group.add(inner);
     return {
       position: this.localToWorld(position),
       direction: this.localVectorToWorld(direction.clone()).normalize(),
-      radius: 1.7 * QUICK_HORIZONTAL_SCALE,
+      radius: 1.7,
       launchSpeed: 27,
     };
   }

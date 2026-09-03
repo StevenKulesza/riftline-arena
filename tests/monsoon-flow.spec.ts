@@ -1,4 +1,5 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import { MONSOON_WORLD_SCALE } from '../src/game/maps/MonsoonDivide';
 
 const MAP_SEED = 450_600;
 const FIXED_SAMPLE_SECONDS = 0.16;
@@ -142,10 +143,10 @@ test('four broad Monsoon ski lanes preserve forward flow without softlock window
   test.setTimeout(120_000);
   const errors = await openDeterministicMap(page);
   const routes = [
-    { name: 'northwest descent', start: { x: -148, z: 76 }, end: { x: -119, z: 58 } },
-    { name: 'northeast descent', start: { x: 150, z: 65 }, end: { x: 88, z: 42 } },
-    { name: 'southwest descent', start: { x: -150, z: -100 }, end: { x: -78, z: -58 } },
-    { name: 'southeast descent', start: { x: 150, z: -108 }, end: { x: 76, z: -61 } },
+    { name: 'northwest descent', start: { x: -148 * MONSOON_WORLD_SCALE, z: 76 * MONSOON_WORLD_SCALE }, end: { x: -119 * MONSOON_WORLD_SCALE, z: 58 * MONSOON_WORLD_SCALE } },
+    { name: 'northeast descent', start: { x: 150 * MONSOON_WORLD_SCALE, z: 65 * MONSOON_WORLD_SCALE }, end: { x: 88 * MONSOON_WORLD_SCALE, z: 42 * MONSOON_WORLD_SCALE } },
+    { name: 'southwest descent', start: { x: -150 * MONSOON_WORLD_SCALE, z: -100 * MONSOON_WORLD_SCALE }, end: { x: -78 * MONSOON_WORLD_SCALE, z: -58 * MONSOON_WORLD_SCALE } },
+    { name: 'southeast descent', start: { x: 150 * MONSOON_WORLD_SCALE, z: -108 * MONSOON_WORLD_SCALE }, end: { x: 76 * MONSOON_WORLD_SCALE, z: -61 * MONSOON_WORLD_SCALE } },
   ];
   const report: Array<Record<string, number | string>> = [];
 
@@ -241,13 +242,13 @@ test('southwest concrete launch ramp is traversable at race speed and produces a
   desktopOnly(testInfo);
   test.setTimeout(90_000);
   const errors = await openDeterministicMap(page);
-  const rampStart = { x: -118, z: -82 };
-  const endPoint = { x: -84, z: -58 };
+  const rampStart = { x: -118 * MONSOON_WORLD_SCALE, z: -82 * MONSOON_WORLD_SCALE };
+  const endPoint = { x: -84 * MONSOON_WORLD_SCALE, z: -58 * MONSOON_WORLD_SCALE };
   const direction = { x: endPoint.x - rampStart.x, z: endPoint.z - rampStart.z };
   const unit = normalized(direction);
   // The jump is intentionally not reachable from a short flat sprint. Start
   // from the authored shoulder and bank the downhill energy the route promises.
-  const startPoint = { x: -150, z: -100 };
+  const startPoint = { x: -150 * MONSOON_WORLD_SCALE, z: -100 * MONSOON_WORLD_SCALE };
   const rampLength = Math.hypot(direction.x, direction.z);
   const runupDistance = (
     (rampStart.x - startPoint.x) * unit.x
@@ -299,7 +300,7 @@ test('southwest concrete launch ramp is traversable at race speed and produces a
   });
   expect(entrySpeed, 'terrain velocity must cross 70 km/h before the jump').toBeGreaterThan(70 / 3.6);
   expect(progress.at(-1)!, 'the route must carry through and beyond the ramp lip').toBeGreaterThan(lipDistance + 3);
-  expect(peakRampRise, 'the controller must climb the authored ramp rise').toBeGreaterThan(7.2);
+  expect(peakRampRise, 'the controller must climb the authored ramp rise').toBeGreaterThan(14.4);
   expect(crossedLip, 'the raised lip must launch the player, not end in a sticky step').toBeGreaterThanOrEqual(0);
   expect(airborneAfterLip, 'the launch must produce readable multi-sample airtime').toBeGreaterThanOrEqual(2);
   expect(Math.min(...raceSpeedOnRamp), 'ski speed must survive the concrete transition').toBeGreaterThan(10);
@@ -313,7 +314,7 @@ test('enterable bunker walls contain dash-speed movement and release cleanly', a
   const errors = await openDeterministicMap(page);
   // z=116 stays inside the bunker while clearing the roof service cabin and
   // parapets added by the structural-detail pass.
-  const interior = { x: -138, z: 116 };
+  const interior = { x: -138 * MONSOON_WORLD_SCALE, z: 116 * MONSOON_WORLD_SCALE };
   const roof = await floorHeight(page, interior.x, interior.z);
   const buildingFloor = await floorHeight(page, interior.x, interior.z, roof - 0.9);
   const start = await placePlayer(page, interior.x, interior.z, buildingFloor, { x: -1, z: 0 });
@@ -322,7 +323,7 @@ test('enterable bunker walls contain dash-speed movement and release cleanly', a
       { x: inside.x, y: eyeY, z: inside.z },
       { x: outside.x, y: eyeY, z: outside.z },
     ) ?? true
-  ), { inside: interior, outside: { x: -151, z: 111 }, eyeY: buildingFloor + 1.4 });
+  ), { inside: interior, outside: { x: -151 * MONSOON_WORLD_SCALE, z: 111 * MONSOON_WORLD_SCALE }, eyeY: buildingFloor + 1.4 });
 
   await page.keyboard.down('KeyW');
   await page.keyboard.press('KeyE');
@@ -331,7 +332,7 @@ test('enterable bunker walls contain dash-speed movement and release cleanly', a
   const minimumX = Math.min(...impactSamples.map((sample) => sample.x));
   expectFiniteRunning([start, ...impactSamples], 'west bunker wall impact');
   expect(wallOccludes, 'the authored bunker back wall must exist in the static collision BVH').toBe(false);
-  expect(minimumX, 'capsule center must remain inside the west bunker back wall').toBeGreaterThan(-143.82);
+  expect(minimumX, 'capsule center must remain inside the west bunker back wall').toBeGreaterThan(-287.64);
 
   await setAimAlong(page, { x: 1, z: 0 });
   const blocked = await samplePlayer(page);

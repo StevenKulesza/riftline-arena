@@ -1,17 +1,32 @@
 import * as THREE from 'three';
 
+/** Authored layout lives in this design space; public sampling is world metres. */
+export const MONSOON_WORLD_SCALE = 2;
+const MONSOON_DESIGN_WIDTH = 480;
+const MONSOON_DESIGN_DEPTH = 400;
+const MONSOON_DESIGN_WATER_Y = -9.5;
+const MONSOON_DESIGN_KILL_Y = -13.5;
+
 export const MONSOON_DIVIDE = {
   id: 'monsoon-divide',
   name: 'Monsoon Divide',
-  generationVersion: 5,
+  generationVersion: 6,
   seed: 0x4d4f4e53,
-  width: 480,
-  depth: 400,
+  width: MONSOON_DESIGN_WIDTH * MONSOON_WORLD_SCALE,
+  depth: MONSOON_DESIGN_DEPTH * MONSOON_WORLD_SCALE,
   segmentsX: 120,
   segmentsZ: 100,
-  waterY: -9.5,
-  killY: -13.5,
+  waterY: MONSOON_DESIGN_WATER_Y * MONSOON_WORLD_SCALE,
+  killY: MONSOON_DESIGN_KILL_Y * MONSOON_WORLD_SCALE,
 } as const;
+
+export function toMonsoonWorld(x: number, z: number): { x: number; z: number } {
+  return { x: x * MONSOON_WORLD_SCALE, z: z * MONSOON_WORLD_SCALE };
+}
+
+function toMonsoonDesign(x: number, z: number): { x: number; z: number } {
+  return { x: x / MONSOON_WORLD_SCALE, z: z / MONSOON_WORLD_SCALE };
+}
 
 export type MonsoonTerrainMasks = {
   island: number;
@@ -290,7 +305,7 @@ function islandRadius(x: number, z: number): number {
   return base * shorelineVariation * (1 + baysAndHeadlands);
 }
 
-export function sampleMonsoonMasks(x: number, z: number): MonsoonTerrainMasks {
+function sampleMonsoonMasksDesign(x: number, z: number): MonsoonTerrainMasks {
   const radius = islandRadius(x, z);
   const island = 1 - smoothstep(0.82, 1.035, radius);
   let routeDistanceSquared = Number.POSITIVE_INFINITY;
@@ -309,13 +324,18 @@ export function sampleMonsoonMasks(x: number, z: number): MonsoonTerrainMasks {
   return { island, route: route * island, crater: crater * island, coast };
 }
 
-export function sampleMonsoonHeight(
+export function sampleMonsoonMasks(x: number, z: number): MonsoonTerrainMasks {
+  const design = toMonsoonDesign(x, z);
+  return sampleMonsoonMasksDesign(design.x, design.z);
+}
+
+function sampleMonsoonHeightDesign(
   x: number,
   z: number,
   seed: number = MONSOON_DIVIDE.seed,
 ): number {
   const radius = islandRadius(x, z);
-  const masks = sampleMonsoonMasks(x, z);
+  const masks = sampleMonsoonMasksDesign(x, z);
   const land = masks.island;
 
   let height = -19 + land * (39 - radius * 2.2);
@@ -419,6 +439,15 @@ export function sampleMonsoonHeight(
   return height;
 }
 
+export function sampleMonsoonHeight(
+  x: number,
+  z: number,
+  seed: number = MONSOON_DIVIDE.seed,
+): number {
+  const design = toMonsoonDesign(x, z);
+  return sampleMonsoonHeightDesign(design.x, design.z, seed) * MONSOON_WORLD_SCALE;
+}
+
 /**
  * Samples the exact piecewise-linear surface drawn by the low-poly terrain
  * mesh. Decorative ribbons use this instead of the analytic height function,
@@ -478,14 +507,16 @@ export function sampleMonsoonNormal(
 }
 
 function paletteColor(x: number, z: number, y: number, normalY: number, seed: number): THREE.Color {
-  const masks = sampleMonsoonMasks(x, z);
+  const design = toMonsoonDesign(x, z);
+  const designY = y / MONSOON_WORLD_SCALE;
+  const masks = sampleMonsoonMasksDesign(design.x, design.z);
   // Key the ground to the authored Monsoon panoramas: wet blue-slate cliffs,
   // mossy highland greens, pale storm-washed stone, and warm compacted soil.
   // The tiled PBR detail map supplies the small scale breakup; vertex color
   // owns the large, readable terrain regions.
   const color = new THREE.Color(0x233832).lerp(
     new THREE.Color(0x46573f),
-    smoothstep(24, 43, y),
+    smoothstep(24, 43, designY),
   );
   // Route masks are intentionally broad for terrain shaping and ski flow;
   // expose soil gradually only near their centers so the surrounding shoulders
@@ -495,10 +526,10 @@ function paletteColor(x: number, z: number, y: number, normalY: number, seed: nu
   const slopeRock = 1 - smoothstep(0.46, 0.73, normalY);
   const coastRock = smoothstep(0.7, 0.96, masks.coast) * 0.88;
   color.lerp(new THREE.Color(0x2c424f), Math.max(slopeRock, coastRock));
-  const shoreSoil = 1 - smoothstep(MONSOON_DIVIDE.waterY + 0.5, MONSOON_DIVIDE.waterY + 3.4, y);
+  const shoreSoil = 1 - smoothstep(MONSOON_DESIGN_WATER_Y + 0.5, MONSOON_DESIGN_WATER_Y + 3.4, designY);
   color.lerp(new THREE.Color(0x484337), shoreSoil * 0.76);
 
-  const variation = 0.84 + hash2(Math.round(x * 0.5), Math.round(z * 0.5), seed) * 0.18;
+  const variation = 0.84 + hash2(Math.round(design.x * 0.5), Math.round(design.z * 0.5), seed) * 0.18;
   color.multiplyScalar(variation);
   return color;
 }

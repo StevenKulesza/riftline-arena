@@ -67,11 +67,24 @@ const pad = (
 ): FighterPadDefinition => ({ id, label, position: new THREE.Vector3(x, y, z), yaw, accent });
 
 /**
- * Four authored aircraft pads on QuickSense's central Outpost Tower. The two
- * source deck meshes each contain a left/right vehicle bay; their measured
- * tops sit at y=40.595. These values are the measured centroids of the four
- * chamfered upper-deck vehicle bays, so physics, boarding, and AI all share
- * the real pad centers. Presentation recentering belongs in FighterVisual.
+ * Ventral housing sits this far below the flight-state root. Matching
+ * FIGHTER_FLIGHT_TUNING.supportOffsetY + probe + contact gap keeps the hull
+ * flush on the live deck instead of clipping through it.
+ */
+export const FIGHTER_PAD_HOUSING_OFFSET = 3.05245;
+
+/**
+ * Sample well above the bay so floorHeightAt returns the open deck, not the
+ * basin or an interior ceiling the root used to sit under.
+ */
+const FIGHTER_PAD_DECK_SAMPLE_Y = 80;
+
+/**
+ * Four authored aircraft pads on QuickSense's central Outpost Tower. XZ are
+ * the measured centroids of the four chamfered upper-deck vehicle bays. Y is
+ * a fallback that `seatQuickSenseFighterPads` replaces with live deck height
+ * plus FIGHTER_PAD_HOUSING_OFFSET after the tower is seated, so vertical
+ * arena scale cannot bury the hull under a raised slab.
  */
 export const QUICKSENSE_FIGHTER_PADS: readonly FighterPadDefinition[] = Object.freeze([
   pad('sparrow-north-west', 'NEXUS PAD N-W', -27.3785, 43.6478, 20.5484, 0.8051, 0x38e5ff),
@@ -79,6 +92,20 @@ export const QUICKSENSE_FIGHTER_PADS: readonly FighterPadDefinition[] = Object.f
   pad('sparrow-south-west', 'NEXUS PAD S-W', -27.4356, 43.6478, -32.176, -0.8099, 0xffb33d),
   pad('sparrow-south-east', 'NEXUS PAD S-E', 27.3218, 43.6478, -32.1761, 0.8052, 0x8dffdc),
 ]);
+
+export function seatQuickSenseFighterPads(
+  floorHeightAt: (x: number, z: number, fromY: number) => number | null,
+): void {
+  for (const definition of QUICKSENSE_FIGHTER_PADS) {
+    const deckY = floorHeightAt(
+      definition.position.x,
+      definition.position.z,
+      FIGHTER_PAD_DECK_SAMPLE_Y,
+    );
+    if (deckY === null) continue;
+    definition.position.y = deckY + FIGHTER_PAD_HOUSING_OFFSET;
+  }
+}
 
 const orientationForPad = (definition: FighterPadDefinition): THREE.Quaternion => (
   new THREE.Quaternion().setFromEuler(new THREE.Euler(0, definition.yaw, 0))

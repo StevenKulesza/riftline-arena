@@ -1,10 +1,12 @@
 import { expect, test } from '@playwright/test';
 import {
   MONSOON_DIVIDE,
+  MONSOON_WORLD_SCALE,
   buildMonsoonTerrainGeometry,
   sampleMonsoonHeight,
   sampleMonsoonMasks,
   sampleMonsoonNormal,
+  toMonsoonWorld,
 } from '../src/game/maps/MonsoonDivide';
 
 test('Monsoon Divide is deterministic, bounded, and low-poly', () => {
@@ -17,8 +19,11 @@ test('Monsoon Divide is deterministic, bounded, and low-poly', () => {
   expect(positions.count).toBe(72_000);
   expect(canonical.topologyHash).toBe(repeated.topologyHash);
   expect(alternate.topologyHash).not.toBe(canonical.topologyHash);
+  expect(MONSOON_DIVIDE.width).toBe(960);
+  expect(MONSOON_DIVIDE.depth).toBe(800);
+  expect(MONSOON_WORLD_SCALE).toBe(2);
   expect(canonical.altitudeRange.min).toBeLessThan(MONSOON_DIVIDE.waterY - 7);
-  expect(canonical.altitudeRange.max).toBeGreaterThan(80);
+  expect(canonical.altitudeRange.max).toBeGreaterThan(160);
 
   canonical.geometry.computeBoundingBox();
   expect(canonical.geometry.boundingBox?.min.x).toBeCloseTo(-MONSOON_DIVIDE.width / 2, 4);
@@ -55,40 +60,48 @@ test('Monsoon Divide is deterministic, bounded, and low-poly', () => {
 });
 
 test('Monsoon Divide has layered mountain descents, recovery bowls, broad ski routes, and walkable dry land', () => {
-  const center = sampleMonsoonHeight(0, 0);
+  const heightAt = (x: number, z: number): number => {
+    const world = toMonsoonWorld(x, z);
+    return sampleMonsoonHeight(world.x, world.z);
+  };
+  const masksAt = (x: number, z: number) => {
+    const world = toMonsoonWorld(x, z);
+    return sampleMonsoonMasks(world.x, world.z);
+  };
+  const center = heightAt(0, 0);
   const mountainRuns = [
     [[-148, 76], [-119, 58], [-88, 39]],
     [[150, 65], [116, 45], [88, 42]],
     [[-150, -100], [-118, -82], [-78, -58]],
     [[150, -108], [103, -77], [76, -61]],
-  ].map((run) => run.map(([x, z]) => sampleMonsoonHeight(x, z)));
+  ].map((run) => run.map(([x, z]) => heightAt(x, z)));
   const peaks = [
     ...mountainRuns.map((run) => run[0]),
-    sampleMonsoonHeight(-43, 148),
-    sampleMonsoonHeight(47, -146),
+    heightAt(-43, 148),
+    heightAt(47, -146),
   ];
-  expect(Math.min(...peaks) - center, 'every mountain range needs meaningful relief above the central bowl').toBeGreaterThan(19);
-  expect(Math.max(...peaks) - Math.min(...peaks), 'massifs should remain asymmetric rather than cloned cones').toBeGreaterThan(14);
+  expect(Math.min(...peaks) - center, 'every mountain range needs meaningful relief above the central bowl').toBeGreaterThan(38);
+  expect(Math.max(...peaks) - Math.min(...peaks), 'massifs should remain asymmetric rather than cloned cones').toBeGreaterThan(28);
   for (const [peak, shoulder, recovery] of mountainRuns) {
-    expect(peak, 'the outer crown must stand above its secondary shoulder').toBeGreaterThan(shoulder + 5);
-    expect(shoulder, 'the secondary shoulder must retain depth above the recovery lane').toBeGreaterThan(recovery + 5);
-    expect(peak - recovery, 'each primary ski descent needs a substantial vertical run').toBeGreaterThan(15);
+    expect(peak, 'the outer crown must stand above its secondary shoulder').toBeGreaterThan(shoulder + 10);
+    expect(shoulder, 'the secondary shoulder must retain depth above the recovery lane').toBeGreaterThan(recovery + 10);
+    expect(peak - recovery, 'each primary ski descent needs a substantial vertical run').toBeGreaterThan(30);
   }
 
   const routeSamples = [
-    sampleMonsoonMasks(-88, 39).route,
-    sampleMonsoonMasks(88, 42).route,
-    sampleMonsoonMasks(-78, -58).route,
-    sampleMonsoonMasks(76, -61).route,
+    masksAt(-88, 39).route,
+    masksAt(88, 42).route,
+    masksAt(-78, -58).route,
+    masksAt(76, -61).route,
   ];
   expect(Math.min(...routeSamples)).toBeGreaterThan(0.85);
 
   let drySamples = 0;
   let walkableSamples = 0;
-  for (let z = -176; z <= 176; z += 8) {
-    for (let x = -216; x <= 216; x += 8) {
+  for (let z = -352; z <= 352; z += 16) {
+    for (let x = -432; x <= 432; x += 16) {
       const height = sampleMonsoonHeight(x, z);
-      if (height <= MONSOON_DIVIDE.waterY + 1) continue;
+      if (height <= MONSOON_DIVIDE.waterY + 2) continue;
       drySamples += 1;
       if (sampleMonsoonNormal(x, z).y >= 0.574) walkableSamples += 1;
     }

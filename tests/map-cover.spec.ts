@@ -57,10 +57,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const west = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-158), spawn.z - 90) < Math.hypot(best.x - (-158), best.z - 90) ? spawn : best
+      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
     ));
     const east = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 153, spawn.z - 79) < Math.hypot(best.x - 153, best.z - 79) ? spawn : best
+      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
     ));
     return {
       span: Math.hypot(east.x - west.x, east.z - west.z),
@@ -76,10 +76,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const west = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-158), spawn.z - 90) < Math.hypot(best.x - (-158), best.z - 90) ? spawn : best
+      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
     ));
     const east = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 160, spawn.z - (-40)) < Math.hypot(best.x - 160, spawn.z - (-40)) ? spawn : best
+      Math.hypot(spawn.x - 320, spawn.z - (-80)) < Math.hypot(best.x - 320, spawn.z - (-80)) ? spawn : best
     ));
     const skiLinePad = spawns.find((spawn) => Math.hypot(spawn.x - 125, spawn.z - (-104)) < 12);
     return {
@@ -100,10 +100,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const northEast = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 153, spawn.z - 79) < Math.hypot(best.x - 153, best.z - 79) ? spawn : best
+      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
     ));
     const southWest = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-130), spawn.z - (-101)) < Math.hypot(best.x - (-130), best.z - (-101)) ? spawn : best
+      Math.hypot(spawn.x - (-260), spawn.z - (-202)) < Math.hypot(best.x - (-260), best.z - (-202)) ? spawn : best
     ));
     return {
       span: Math.hypot(southWest.x - northEast.x, southWest.z - northEast.z),
@@ -119,10 +119,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const north = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 75, spawn.z - 130) < Math.hypot(best.x - 75, best.z - 130) ? spawn : best
+      Math.hypot(spawn.x - 150, spawn.z - 260) < Math.hypot(best.x - 150, best.z - 260) ? spawn : best
     ));
     const southWest = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-130), spawn.z - (-101)) < Math.hypot(best.x - (-130), best.z - (-101)) ? spawn : best
+      Math.hypot(spawn.x - (-260), spawn.z - (-202)) < Math.hypot(best.x - (-260), best.z - (-202)) ? spawn : best
     ));
     return {
       span: Math.hypot(southWest.x - north.x, southWest.z - north.z),
@@ -138,10 +138,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const northEast = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 153, spawn.z - 79) < Math.hypot(best.x - 153, best.z - 79) ? spawn : best
+      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
     ));
     const inner = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-109), spawn.z - (-22)) < Math.hypot(best.x - (-109), best.z - (-22)) ? spawn : best
+      Math.hypot(spawn.x - (-218), spawn.z - (-44)) < Math.hypot(best.x - (-218), best.z - (-44)) ? spawn : best
     ));
     const start = { x: northEast.x, y: northEast.y + 1.5, z: northEast.z };
     const end = { x: inner.x, y: inner.y + 1.5, z: inner.z };
@@ -156,10 +156,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const inner = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 89, spawn.z - 68) < Math.hypot(best.x - 89, best.z - 68) ? spawn : best
+      Math.hypot(spawn.x - 178, spawn.z - 136) < Math.hypot(best.x - 178, best.z - 136) ? spawn : best
     ));
     const southWest = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-130), spawn.z - (-101)) < Math.hypot(best.x - (-130), best.z - (-101)) ? spawn : best
+      Math.hypot(spawn.x - (-260), spawn.z - (-202)) < Math.hypot(best.x - (-260), best.z - (-202)) ? spawn : best
     ));
     const onGradePad = spawns.find((spawn) => Math.hypot(spawn.x - 89, spawn.z - 55) < 12);
     return {
@@ -180,10 +180,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const south = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 51, spawn.z - (-73)) < Math.hypot(best.x - 51, best.z - (-73)) ? spawn : best
+      Math.hypot(spawn.x - 102, spawn.z - (-146)) < Math.hypot(best.x - 102, best.z - (-146)) ? spawn : best
     ));
     const westRidge = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-158), spawn.z - 90) < Math.hypot(best.x - (-158), best.z - 90) ? spawn : best
+      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
     ));
     return {
       span: Math.hypot(westRidge.x - south.x, westRidge.z - south.z),
@@ -199,10 +199,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const west = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-99), spawn.z - 64) < Math.hypot(best.x - (-99), best.z - 64) ? spawn : best
+      Math.hypot(spawn.x - (-198), spawn.z - 128) < Math.hypot(best.x - (-198), best.z - 128) ? spawn : best
     ));
     const east = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 153, spawn.z - 79) < Math.hypot(best.x - 153, best.z - 79) ? spawn : best
+      Math.hypot(spawn.x - 306, spawn.z - 158) < Math.hypot(best.x - 306, best.z - 158) ? spawn : best
     ));
     return {
       span: Math.hypot(east.x - west.x, east.z - west.z),
@@ -218,10 +218,10 @@ test('Monsoon spawn pairs break long rail sightlines behind cover', async ({ pag
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const inner = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 89, spawn.z - 68) < Math.hypot(best.x - 89, best.z - 68) ? spawn : best
+      Math.hypot(spawn.x - 178, spawn.z - 136) < Math.hypot(best.x - 178, best.z - 136) ? spawn : best
     ));
     const westRidge = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-158), spawn.z - 90) < Math.hypot(best.x - (-158), best.z - 90) ? spawn : best
+      Math.hypot(spawn.x - (-316), spawn.z - 180) < Math.hypot(best.x - (-316), best.z - 180) ? spawn : best
     ));
     return {
       span: Math.hypot(westRidge.x - inner.x, westRidge.z - inner.z),
@@ -345,18 +345,18 @@ test('QuickSense spawns sit above killY with broken spawn-to-spawn lanes', async
   }, QUICKSENSE.killY);
   expect(result.spawnCount).toBeGreaterThanOrEqual(8);
   expect(result.lowestY).toBeGreaterThan(QUICKSENSE.killY + 1);
-  expect(result.highestY, 'spawns must stay on the basin layer, not floating-station roofs').toBeLessThan(70);
+  expect(result.highestY, 'spawns must stay on the basin layer, not floating-station roofs').toBeLessThan(140);
   expect(result.blocked, 'at least 4 QuickSense spawn pairs must lack LOS').toBeGreaterThanOrEqual(4);
-  expect(result.railY, 'rail must sit on the north road, not the Command Ark roof').toBeLessThan(70);
+  expect(result.railY, 'rail must sit on the north road, not the Command Ark roof').toBeLessThan(140);
   expect(Math.max(...result.healthHeights) - Math.min(...result.healthHeights), 'mirrored health packs must share a playable height band').toBeLessThan(24);
   const westRail = await page.evaluate(() => {
     const hooks = window.__THREE_GAME_TEST_HOOKS__!;
     const spawns = hooks.getSpawnPoints();
     const west = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - (-144), spawn.z - 5) < Math.hypot(best.x - (-144), best.z - 5) ? spawn : best
+      Math.hypot(spawn.x - (-288), spawn.z - 10) < Math.hypot(best.x - (-288), best.z - 10) ? spawn : best
     ));
     const southEast = spawns.reduce((best, spawn) => (
-      Math.hypot(spawn.x - 89, spawn.z - (-101)) < Math.hypot(best.x - 89, best.z - (-101)) ? spawn : best
+      Math.hypot(spawn.x - 178, spawn.z - (-202)) < Math.hypot(best.x - 178, best.z - (-202)) ? spawn : best
     ));
     return {
       span: Math.hypot(southEast.x - west.x, southEast.z - west.z),
@@ -378,61 +378,36 @@ test('QuickSense spawns sit above killY with broken spawn-to-spawn lanes', async
 test('jump pads launch from a 0.05 s kinematic step on both maps', async ({ page }, testInfo) => {
   desktopOnly(testInfo);
   test.setTimeout(300_000);
-  const maps: Array<{
-    id: 'monsoon' | 'quicksense';
-    killY: number;
-    pads: Array<{ x: number; z: number }>;
-  }> = [
-    {
-      id: 'quicksense',
-      killY: QUICKSENSE.killY,
-      pads: [
-        { x: -84, z: -108 },
-        { x: 84, z: 108 },
-        { x: 60, z: -8 },
-        { x: -124, z: 0 },
-        { x: 124, z: 0 },
-      ],
-    },
-    {
-      id: 'monsoon',
-      killY: MONSOON_DIVIDE.killY,
-      pads: [
-        { x: -43, z: 14 },
-        { x: 44, z: 16 },
-        { x: -27, z: -46 },
-        { x: 34, z: -48 },
-        { x: -123, z: 8 },
-        { x: 122, z: -8 },
-      ],
-    },
+  const maps: Array<{ id: 'monsoon' | 'quicksense'; killY: number }> = [
+    { id: 'quicksense', killY: QUICKSENSE.killY },
+    { id: 'monsoon', killY: MONSOON_DIVIDE.killY },
   ];
 
   for (const map of maps) {
     await openMap(page, map.id);
-    const samples = await page.evaluate(({ pads }) => {
+    const samples = await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
+      const pads = hooks.getJumpPads();
       return pads.map((pad) => {
-        const park = hooks.getSpawnPoints()[0];
         hooks.setPlayerKinematics(
-          { x: park.x, y: park.y + 2, z: park.z },
+          { x: pad.x, y: pad.y + 0.16, z: pad.z },
           { x: 0, y: 0, z: 0 },
         );
-        hooks.stepSimulation(0.8);
-        const floor = hooks.sampleFloorHeight(pad.x, pad.z, Number.POSITIVE_INFINITY);
-        if (floor === null) throw new Error(`No floor at jump pad (${pad.x}, ${pad.z}).`);
-        hooks.setPlayerKinematics({ x: pad.x, y: floor + 0.16, z: pad.z }, { x: 0, y: 0, z: 0 });
         hooks.stepSimulation(0.05);
         const player = window.__THREE_GAME_DIAGNOSTICS__!.player;
-        return { x: pad.x, z: pad.z, vy: player.velocity.y, y: player.position.y };
+        return { x: pad.x, y: player.position.y, z: pad.z, vy: player.velocity.y };
       });
-    }, { pads: map.pads });
+    });
+    expect(samples.length, `${map.id} must expose live jump pads`).toBeGreaterThan(0);
     for (const sample of samples) {
       expect(
         sample.y,
-        `${map.id} pad (${sample.x}, ${sample.z}) must stay above killY`,
+        `${map.id} pad (${sample.x.toFixed(1)}, ${sample.z.toFixed(1)}) must stay above killY`,
       ).toBeGreaterThan(map.killY + 1);
-      expect(sample.vy, `${map.id} pad (${sample.x}, ${sample.z}) must launch`).toBeGreaterThan(2);
+      expect(
+        sample.vy,
+        `${map.id} pad (${sample.x.toFixed(1)}, ${sample.z.toFixed(1)}) must launch`,
+      ).toBeGreaterThan(2);
     }
   }
 });

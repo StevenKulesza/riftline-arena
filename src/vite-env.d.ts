@@ -387,6 +387,7 @@ interface ThreeGameDiagnostics {
     /** A fresh airborne Space press has armed thrust for as long as Space stays held. */
     jetpackArmed: boolean;
     dashCooldown: number;
+    jumpPadCooldown: number;
     wallJumpCount: number;
     wallJumpCooldown: number;
     /** PMF_WALLJUMPING: air accel/control disabled until the post-wall-jump rise ends. */
@@ -595,6 +596,15 @@ interface ThreeGameTestHooks {
   } | null;
   /** Return the grounded procedural arena spawn points. */
   getSpawnPoints(): Array<{ x: number; y: number; z: number }>;
+  /** Return live jump-pad world positions so QA can stand on the trigger, not a roof. */
+  getJumpPads(): Array<{
+    x: number;
+    y: number;
+    z: number;
+    radius: number;
+    launchSpeed: number;
+    direction: { x: number; y: number; z: number };
+  }>;
   /** Test world-space static terrain visibility between two points. */
   sampleLineOfSight(start: { x: number; y: number; z: number }, end: { x: number; y: number; z: number }): boolean;
   /** Place player/bot zero for deterministic FOV and occlusion checks. */

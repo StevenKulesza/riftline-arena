@@ -9,8 +9,8 @@ import * as THREE from 'three';
  */
 
 export const FIGHTER_FIXED_STEP = 1 / 120;
-/** QuickSense's hard flight ceiling, doubled from the original 150 m limit. */
-export const QUICKSENSE_FIGHTER_CEILING_Y = 300;
+/** QuickSense's hard flight ceiling, doubled from the 300 m 2×-map limit. */
+export const QUICKSENSE_FIGHTER_CEILING_Y = 600;
 
 export type FighterControlIntent = Readonly<{
   /** Forward throttle in [-1, 1]. Negative values request reverse thrust. */
@@ -222,12 +222,14 @@ export const FIGHTER_FLIGHT_TUNING = {
   collisionDamageThreshold: 9,
   collisionDamageScale: 0.2,
   bounds: {
-    minX: -176,
-    maxX: 176,
-    minY: -20,
+    // QuickSense playable half-extents are 360 × 320. Keep the same 4 m
+    // inset the 180 × 160 2×-map used, plus a floor just below killY (-48).
+    minX: -356,
+    maxX: 356,
+    minY: -52,
     maxY: QUICKSENSE_FIGHTER_CEILING_Y,
-    minZ: -156,
-    maxZ: 156,
+    minZ: -316,
+    maxZ: 316,
   },
   collisionProxies: [
     { x: 0, y: 0, z: -10.83, radius: 1.25 },

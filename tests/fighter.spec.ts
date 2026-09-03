@@ -12,14 +12,14 @@ test.describe('QuickSense Star Sparrow fighters', () => {
 
     await page.goto('/?map=quicksense&qa=visual', { waitUntil: 'commit' });
     await page.waitForFunction(() => Boolean(window.__THREE_GAME_TEST_HOOKS__), null, { timeout: 240_000 });
-    await page.evaluate(() => {
+    const pad = await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
       hooks.setReducedMotion(true);
       hooks.setState('active-play');
-      hooks.setPlayerKinematics(
-        { x: -27.3785, y: 43.6478, z: 20.5484 },
-        { x: 0, y: 0, z: 0 },
-      );
+      const fighter = window.__THREE_GAME_DIAGNOSTICS__!.fighters[0];
+      const position = { x: fighter.position.x, y: fighter.position.y, z: fighter.position.z };
+      hooks.setPlayerKinematics(position, { x: 0, y: 0, z: 0 });
+      return position;
     });
 
     await page.keyboard.press('r');
@@ -85,7 +85,7 @@ test.describe('QuickSense Star Sparrow fighters', () => {
     const rebuilt = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!);
     expect(rebuilt.fighters[2]).toMatchObject({ destroyed: false, hull: 900, visible: true, explosions: 1 });
     expect(rebuilt.fighters[2].shield).toBeGreaterThan(0);
-    expect(rebuilt.fighters[2].position.y).toBeCloseTo(43.6478, 1);
+    expect(rebuilt.fighters[2].position.y).toBeCloseTo(pad.y, 1);
 
     const aiBoarded = await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
@@ -112,10 +112,10 @@ test.describe('QuickSense Star Sparrow fighters', () => {
 
     const doubledCeiling = await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
-      hooks.setFighterKinematics('sparrow-north-west', { x: 0, y: 225, z: 0 }, { x: 0, y: 0, z: 0 });
+      hooks.setFighterKinematics('sparrow-north-west', { x: 0, y: 450, z: 0 }, { x: 0, y: 0, z: 0 });
       hooks.stepSimulation(0.02);
       const aboveOldCeiling = window.__THREE_GAME_DIAGNOSTICS__!.fighters[0].position.y;
-      hooks.setFighterKinematics('sparrow-north-west', { x: 0, y: 350, z: 0 }, { x: 0, y: 20, z: 0 });
+      hooks.setFighterKinematics('sparrow-north-west', { x: 0, y: 700, z: 0 }, { x: 0, y: 20, z: 0 });
       hooks.stepSimulation(0.02);
       const diagnostics = window.__THREE_GAME_DIAGNOSTICS__!;
       return {
@@ -125,14 +125,14 @@ test.describe('QuickSense Star Sparrow fighters', () => {
         mapAltitudeMax: diagnostics.map.altitudeRange.max,
       };
     });
-    expect(doubledCeiling.aboveOldCeiling).toBeGreaterThan(220);
-    expect(doubledCeiling.ceilingY).toBe(300);
-    // The boundary contact clamps to 300, then its inward response advances a
+    expect(doubledCeiling.aboveOldCeiling).toBeGreaterThan(440);
+    expect(doubledCeiling.ceilingY).toBe(600);
+    // The boundary contact clamps to 600, then its inward response advances a
     // few centimeters during the remaining fixed ticks. Assert containment
     // and proximity rather than requiring an unstable exact surface point.
-    expect(doubledCeiling.clampedY).toBeLessThanOrEqual(300);
-    expect(doubledCeiling.clampedY).toBeGreaterThan(299.8);
-    expect(doubledCeiling.mapAltitudeMax).toBe(360);
+    expect(doubledCeiling.clampedY).toBeLessThanOrEqual(600);
+    expect(doubledCeiling.clampedY).toBeGreaterThan(599.8);
+    expect(doubledCeiling.mapAltitudeMax).toBe(720);
 
     const terrainCollision = await page.evaluate(() => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
@@ -144,17 +144,17 @@ test.describe('QuickSense Star Sparrow fighters', () => {
     expect(terrainCollision.diagnostics.fighters[0].physics.collisionHits).toBeGreaterThan(0);
     expect(terrainCollision.diagnostics.fighters[0].position.y).toBeGreaterThan(terrainCollision.floor + 0.5);
 
-    const infantryCollision = await page.evaluate(() => {
+    const infantryCollision = await page.evaluate((padPosition) => {
       const hooks = window.__THREE_GAME_TEST_HOOKS__!;
       hooks.setState('quicksense-fighter-pads');
-      const x = -27.3785;
-      const z = 20.5484;
+      const x = padPosition.x;
+      const z = padPosition.z;
       const floor = hooks.sampleFloorHeight(x, z, 60)!;
       hooks.setPlayerKinematics({ x, y: floor, z }, { x: 0, y: 0, z: 0 });
       hooks.stepSimulation(0.05);
       const position = window.__THREE_GAME_DIAGNOSTICS__!.player.position;
       return Math.hypot(position.x - x, position.z - z);
-    });
+    }, pad);
     expect(infantryCollision).toBeGreaterThan(0.25);
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);

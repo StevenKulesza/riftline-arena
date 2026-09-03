@@ -9,6 +9,7 @@ import {
   MONSOON_DIVIDE,
   MONSOON_INNER_LOOP_SAMPLES,
   MONSOON_ROUTE_SEGMENTS,
+  MONSOON_WORLD_SCALE,
   buildMonsoonTerrainGeometry,
   mapSeedFromLocation,
   sampleMonsoonHeight,
@@ -230,6 +231,10 @@ const VEGETATION_CHUNK_COLUMNS = 6;
 const VEGETATION_CHUNK_ROWS = 5;
 const VEGETATION_CHUNK_COUNT = VEGETATION_CHUNK_COLUMNS * VEGETATION_CHUNK_ROWS;
 
+function mw(value: number): number {
+  return value * MONSOON_WORLD_SCALE;
+}
+
 function randomFactory(seed: number): () => number {
   let state = seed >>> 0;
   return () => {
@@ -242,7 +247,9 @@ function randomFactory(seed: number): () => number {
 }
 
 function placedPoint(x: number, z: number, seed: number, offset = 0.02): THREE.Vector3 {
-  return new THREE.Vector3(x, sampleMonsoonHeight(x, z, seed) + offset, z);
+  const worldX = mw(x);
+  const worldZ = mw(z);
+  return new THREE.Vector3(worldX, sampleMonsoonHeight(worldX, worldZ, seed) + offset, worldZ);
 }
 
 function ballisticPad(
@@ -255,15 +262,16 @@ function ballisticPad(
 ): JumpPad {
   const position = placedPoint(x, z, seed, 0.12);
   const target = placedPoint(targetX, targetZ, seed, 1.1);
+  const scaledFlightTime = flightTime * MONSOON_WORLD_SCALE;
   const velocity = new THREE.Vector3(
-    (target.x - position.x) / flightTime,
-    (target.y - position.y + 0.5 * MOVEMENT.gravity * flightTime * flightTime) / flightTime,
-    (target.z - position.z) / flightTime,
+    (target.x - position.x) / scaledFlightTime,
+    (target.y - position.y + 0.5 * MOVEMENT.gravity * scaledFlightTime * scaledFlightTime) / scaledFlightTime,
+    (target.z - position.z) / scaledFlightTime,
   );
   return {
     position,
     direction: velocity.clone().normalize(),
-    radius: 4.2,
+    radius: mw(4.2),
     launchSpeed: velocity.length(),
   };
 }
@@ -1161,12 +1169,14 @@ export class Arena implements ArenaRuntime {
 
   private registerGameplayColliders(): void {
     const add = (name: string, x: number, z: number, halfX: number, height: number, halfZ: number): void => {
-      const y = sampleMonsoonHeight(x, z, this.seed);
+      const worldX = mw(x);
+      const worldZ = mw(z);
+      const y = sampleMonsoonHeight(worldX, worldZ, this.seed);
       this.colliders.push({
         name,
         box: new THREE.Box3(
-          new THREE.Vector3(x - halfX, y, z - halfZ),
-          new THREE.Vector3(x + halfX, y + height, z + halfZ),
+          new THREE.Vector3(worldX - mw(halfX), y, worldZ - mw(halfZ)),
+          new THREE.Vector3(worldX + mw(halfX), y + mw(height), worldZ + mw(halfZ)),
         ),
       });
     };
@@ -1195,8 +1205,8 @@ export class Arena implements ArenaRuntime {
     const random = randomFactory(this.seed ^ 0x71a55eed);
     const findPlacement = (): THREE.Vector3 => {
       for (let attempt = 0; attempt < 80; attempt += 1) {
-        const x = (random() - 0.5) * 430;
-        const z = (random() - 0.5) * 350;
+        const x = (random() - 0.5) * mw(430);
+        const z = (random() - 0.5) * mw(350);
         const y = sampleMonsoonHeight(x, z, this.seed);
         const masks = sampleMonsoonMasks(x, z);
         if (
@@ -1326,9 +1336,11 @@ export class Arena implements ArenaRuntime {
       centerZ: number,
       openSide: 'east' | 'west',
     ): void => {
-      const width = 25;
-      const depth = 18;
-      const height = 7.6;
+      centerX = mw(centerX);
+      centerZ = mw(centerZ);
+      const width = mw(25);
+      const depth = mw(18);
+      const height = mw(7.6);
       const cornerHeights = [
         sampleMonsoonHeight(centerX - width * 0.5, centerZ - depth * 0.5, this.seed),
         sampleMonsoonHeight(centerX + width * 0.5, centerZ - depth * 0.5, this.seed),
@@ -1368,12 +1380,12 @@ export class Arena implements ArenaRuntime {
       }
 
       const backX = centerX + (openSide === 'east' ? -width * 0.5 : width * 0.5);
-      addConcreteBox(`${name}-back`, makeBox(backX, baseY + height * 0.5, centerZ, 1.1, height, depth));
-      addConcreteBox(`${name}-north`, makeBox(centerX, baseY + height * 0.5, centerZ - depth * 0.5, width, height, 1.1));
-      addConcreteBox(`${name}-south`, makeBox(centerX, baseY + height * 0.5, centerZ + depth * 0.5, width, height, 1.1));
+      addConcreteBox(`${name}-back`, makeBox(backX, baseY + height * 0.5, centerZ, mw(1.1), height, depth));
+      addConcreteBox(`${name}-north`, makeBox(centerX, baseY + height * 0.5, centerZ - depth * 0.5, width, height, mw(1.1)));
+      addConcreteBox(`${name}-south`, makeBox(centerX, baseY + height * 0.5, centerZ + depth * 0.5, width, height, mw(1.1)));
 
       const entranceX = centerX + (openSide === 'east' ? width * 0.5 : -width * 0.5);
-      const openingWidth = 7.2;
+      const openingWidth = mw(7.2);
       const wingDepth = (depth - openingWidth) * 0.5;
       for (const side of [-1, 1]) {
         addConcreteBox(
@@ -1382,33 +1394,33 @@ export class Arena implements ArenaRuntime {
             entranceX,
             baseY + height * 0.5,
             centerZ + side * (openingWidth * 0.5 + wingDepth * 0.5),
-            1.1,
+            mw(1.1),
             height,
             wingDepth,
           ),
         );
       }
 
-      const parapetY = roof.max.y + 0.38;
-      addConcreteBox(`${name}-roof-back-parapet`, makeBox(backX, parapetY, centerZ, 0.72, 0.76, depth));
-      addConcreteBox(`${name}-roof-north-parapet`, makeBox(centerX, parapetY, centerZ - depth * 0.5, width, 0.76, 0.72));
-      addConcreteBox(`${name}-roof-south-parapet`, makeBox(centerX, parapetY, centerZ + depth * 0.5, width, 0.76, 0.72));
+      const parapetY = roof.max.y + mw(0.38);
+      addConcreteBox(`${name}-roof-back-parapet`, makeBox(backX, parapetY, centerZ, mw(0.72), mw(0.76), depth));
+      addConcreteBox(`${name}-roof-north-parapet`, makeBox(centerX, parapetY, centerZ - depth * 0.5, width, mw(0.76), mw(0.72)));
+      addConcreteBox(`${name}-roof-south-parapet`, makeBox(centerX, parapetY, centerZ + depth * 0.5, width, mw(0.76), mw(0.72)));
 
-      const serviceX = centerX + (openSide === 'east' ? -5.2 : 5.2);
-      const serviceCabin = makeBox(serviceX, roof.max.y + 1.25, centerZ - 1.2, 7.2, 2.5, 6.4);
+      const serviceX = centerX + (openSide === 'east' ? -mw(5.2) : mw(5.2));
+      const serviceCabin = makeBox(serviceX, roof.max.y + mw(1.25), centerZ - mw(1.2), mw(7.2), mw(2.5), mw(6.4));
       addConcreteBox(`${name}-roof-service-cabin`, serviceCabin);
       addPlatform(`${name}-roof-service-cabin`, serviceCabin);
 
       const outward = openSide === 'east' ? 1 : -1;
-      const approachX = entranceX + outward * 32;
-      const landingX = entranceX - outward * 1.8;
+      const approachX = entranceX + outward * mw(32);
+      const landingX = entranceX - outward * mw(1.8);
       addRamp(
         `${name}-roof-access`,
         approachX,
         centerZ + depth * 0.28,
         landingX,
         centerZ + depth * 0.28,
-        16,
+        mw(16),
         0,
         undefined,
         roof.max.y + 0.025,
@@ -1417,28 +1429,28 @@ export class Arena implements ArenaRuntime {
 
     // Six wide launch ramps cross the main valleys. Their low ends meet the
     // terrain and their raised lips create predictable race jumps at speed.
-    addRamp('west-core-launch', -119, 58, -88, 39, 13, 7.2);
-    addRamp('east-core-launch', 121, 53, 90, 37, 13, 7.4);
-    addRamp('southwest-launch', -118, -82, -84, -58, 14, 8.2);
-    addRamp('southeast-launch', 119, -86, 84, -60, 14, 8.4);
-    addRamp('north-divide-launch', 0, 127, 0, 94, 16, 8.8);
-    addRamp('south-divide-launch', 0, -137, 0, -102, 16, 9.2);
+    addRamp('west-core-launch', mw(-119), mw(58), mw(-88), mw(39), mw(13), mw(7.2));
+    addRamp('east-core-launch', mw(121), mw(53), mw(90), mw(37), mw(13), mw(7.4));
+    addRamp('southwest-launch', mw(-118), mw(-82), mw(-84), mw(-58), mw(14), mw(8.2));
+    addRamp('southeast-launch', mw(119), mw(-86), mw(84), mw(-60), mw(14), mw(8.4));
+    addRamp('north-divide-launch', mw(0), mw(127), mw(0), mw(94), mw(16), mw(8.8));
+    addRamp('south-divide-launch', mw(0), mw(-137), mw(0), mw(-102), mw(16), mw(9.2));
 
     addBuilding('west-relay-bunker', -132, 111, 'east');
     addBuilding('east-weather-station', 132, 96, 'west');
 
     // A broad two-way underpass adds a real interior route without breaking
     // the north/south ski line; the roof is another playable platform.
-    const tunnelX = 42;
-    const tunnelZ = -96;
-    const tunnelWidth = 30;
-    const tunnelDepth = 32;
+    const tunnelX = mw(42);
+    const tunnelZ = mw(-96);
+    const tunnelWidth = mw(30);
+    const tunnelDepth = mw(32);
     const tunnelBase = Math.max(
-      sampleMonsoonHeight(tunnelX - 10, tunnelZ, this.seed),
-      sampleMonsoonHeight(tunnelX + 10, tunnelZ, this.seed),
+      sampleMonsoonHeight(tunnelX - mw(10), tunnelZ, this.seed),
+      sampleMonsoonHeight(tunnelX + mw(10), tunnelZ, this.seed),
     ) + 0.2;
-    const tunnelFloor = makeBox(tunnelX, tunnelBase, tunnelZ, tunnelWidth, 0.44, tunnelDepth);
-    const tunnelRoof = makeBox(tunnelX, tunnelBase + 7.2, tunnelZ, tunnelWidth, 0.62, tunnelDepth);
+    const tunnelFloor = makeBox(tunnelX, tunnelBase, tunnelZ, tunnelWidth, mw(0.44), tunnelDepth);
+    const tunnelRoof = makeBox(tunnelX, tunnelBase + mw(7.2), tunnelZ, tunnelWidth, mw(0.62), tunnelDepth);
     addConcreteBox('south-underpass-floor', tunnelFloor);
     addConcreteBox('south-underpass-roof', tunnelRoof);
     addPlatform('south-underpass-floor', tunnelFloor);
@@ -1458,24 +1470,24 @@ export class Arena implements ArenaRuntime {
           tunnelX,
           (tunnelFoundationBottom + tunnelFoundationTop) * 0.5,
           tunnelZ,
-          tunnelWidth - 0.5,
+          tunnelWidth - mw(0.5),
           tunnelFoundationTop - tunnelFoundationBottom,
-          tunnelDepth - 0.5,
+          tunnelDepth - mw(0.5),
         ),
       );
     }
-    addConcreteBox('south-underpass-west-wall', makeBox(tunnelX - tunnelWidth * 0.5, tunnelBase + 3.6, tunnelZ, 1.1, 7.2, tunnelDepth));
-    addConcreteBox('south-underpass-east-wall', makeBox(tunnelX + tunnelWidth * 0.5, tunnelBase + 3.6, tunnelZ, 1.1, 7.2, tunnelDepth));
-    addConcreteBox('south-underpass-roof-west-parapet', makeBox(tunnelX - tunnelWidth * 0.5, tunnelRoof.max.y + 0.4, tunnelZ, 0.72, 0.8, tunnelDepth));
-    addConcreteBox('south-underpass-roof-north-parapet', makeBox(tunnelX, tunnelRoof.max.y + 0.4, tunnelZ - tunnelDepth * 0.5, tunnelWidth, 0.8, 0.72));
-    addConcreteBox('south-underpass-roof-south-parapet', makeBox(tunnelX, tunnelRoof.max.y + 0.4, tunnelZ + tunnelDepth * 0.5, tunnelWidth, 0.8, 0.72));
+    addConcreteBox('south-underpass-west-wall', makeBox(tunnelX - tunnelWidth * 0.5, tunnelBase + mw(3.6), tunnelZ, mw(1.1), mw(7.2), tunnelDepth));
+    addConcreteBox('south-underpass-east-wall', makeBox(tunnelX + tunnelWidth * 0.5, tunnelBase + mw(3.6), tunnelZ, mw(1.1), mw(7.2), tunnelDepth));
+    addConcreteBox('south-underpass-roof-west-parapet', makeBox(tunnelX - tunnelWidth * 0.5, tunnelRoof.max.y + mw(0.4), tunnelZ, mw(0.72), mw(0.8), tunnelDepth));
+    addConcreteBox('south-underpass-roof-north-parapet', makeBox(tunnelX, tunnelRoof.max.y + mw(0.4), tunnelZ - tunnelDepth * 0.5, tunnelWidth, mw(0.8), mw(0.72)));
+    addConcreteBox('south-underpass-roof-south-parapet', makeBox(tunnelX, tunnelRoof.max.y + mw(0.4), tunnelZ + tunnelDepth * 0.5, tunnelWidth, mw(0.8), mw(0.72)));
     addRamp(
       'south-underpass-roof-access',
-      tunnelX + tunnelWidth * 0.5 + 30,
-      tunnelZ + 8,
-      tunnelX + tunnelWidth * 0.5 - 1.8,
-      tunnelZ + 8,
-      16,
+      tunnelX + tunnelWidth * 0.5 + mw(30),
+      tunnelZ + mw(8),
+      tunnelX + tunnelWidth * 0.5 - mw(1.8),
+      tunnelZ + mw(8),
+      mw(16),
       0,
       undefined,
       tunnelRoof.max.y + 0.025,
@@ -1488,7 +1500,7 @@ export class Arena implements ArenaRuntime {
    * Collision is registered here so the merged BVH matches the concrete mesh.
    */
   private registerCoverLayout(): void {
-    const addBox = (
+    const addWorldBox = (
       name: string,
       x: number,
       z: number,
@@ -1504,6 +1516,17 @@ export class Arena implements ArenaRuntime {
       this.concreteBoxes.push(box);
       this.colliders.push({ name, box });
     };
+    const addBox = (
+      name: string,
+      x: number,
+      z: number,
+      width: number,
+      minY: number,
+      maxY: number,
+      depth: number,
+    ): void => {
+      addWorldBox(name, mw(x), mw(z), mw(width), minY, maxY, mw(depth));
+    };
     const addGroundedBox = (
       name: string,
       x: number,
@@ -1512,24 +1535,46 @@ export class Arena implements ArenaRuntime {
       height: number,
       depth: number,
     ): void => {
-      const y = sampleMonsoonHeight(x, z, this.seed);
-      addBox(name, x, z, width, y, y + height, depth);
+      const y = sampleMonsoonHeight(mw(x), mw(z), this.seed);
+      addBox(name, x, z, width, y, y + mw(height), depth);
     };
-    const supportYAt = (x: number, z: number): number => {
-      let supportY = sampleMonsoonHeight(x, z, this.seed);
+    const supportYWorld = (worldX: number, worldZ: number): number => {
+      let supportY = sampleMonsoonHeight(worldX, worldZ, this.seed);
       for (const platform of this.platformSurfaces) {
         if (
-          x >= platform.minX && x <= platform.maxX
-          && z >= platform.minZ && z <= platform.maxZ
+          worldX >= platform.minX && worldX <= platform.maxX
+          && worldZ >= platform.minZ && worldZ <= platform.maxZ
         ) {
           supportY = Math.max(supportY, platform.y);
         }
       }
       for (const ramp of this.rampSurfaces) {
-        const rampY = this.rampHeightAt(ramp, x, z);
+        const rampY = this.rampHeightAt(ramp, worldX, worldZ);
         if (rampY !== null) supportY = Math.max(supportY, rampY);
       }
       return supportY;
+    };
+    const supportYAt = (x: number, z: number): number => supportYWorld(mw(x), mw(z));
+    const addWorldPickupCover = (
+      name: string,
+      worldX: number,
+      worldZ: number,
+      offsetX: number,
+      offsetZ: number,
+      width: number,
+      depth: number,
+    ): void => {
+      const x = worldX + offsetX;
+      const z = worldZ + offsetZ;
+      const pickupY = supportYWorld(worldX, worldZ);
+      const localY = supportYWorld(x, z);
+      const wallHeight = 2.2;
+      const wallBase = pickupY;
+      const wallTop = pickupY + wallHeight;
+      if (wallBase - localY > 0.28) {
+        addWorldBox(`${name}-footing`, x, z, width * 0.78, localY, wallBase, depth * 0.78);
+      }
+      addWorldBox(name, x, z, width, wallBase, wallTop, depth);
     };
     const addPickupCover = (
       name: string,
@@ -1540,22 +1585,14 @@ export class Arena implements ArenaRuntime {
       width: number,
       depth: number,
     ): void => {
-      const x = pickupX + offsetX;
-      const z = pickupZ + offsetZ;
-      const pickupY = supportYAt(pickupX, pickupZ);
-      const localY = supportYAt(x, z);
-      const wallHeight = 1.48;
-      const wallBase = pickupY;
-      const wallTop = pickupY + wallHeight;
-      if (wallBase - localY > 0.28) {
-        addBox(`${name}-footing`, x, z, width * 0.78, localY, wallBase, depth * 0.78);
-      }
-      addBox(name, x, z, width, wallBase, wallTop, depth);
+      addWorldPickupCover(name, mw(pickupX), mw(pickupZ), offsetX, offsetZ, width, depth);
     };
 
     addPickupCover('rail-cover-west', -158, 96, -5, 0, 0.9, 3.1);
+    addPickupCover('rail-cover-east', -158, 96, 5, 0, 0.85, 2.8);
     addPickupCover('rocket-cover-north', -148, -86, 0, 5, 2.8, 0.85);
-    addPickupCover('disc-cover-north', -144.8, -87.8, 0, 5, 2.8, 0.85);
+    addWorldPickupCover('disc-cover-north', mw(-148) + 3.2, mw(-86) - 1.8, 0, 5, 2.8, 0.85);
+    addWorldPickupCover('disc-cover-east', mw(-148) + 3.2, mw(-86) - 1.8, 5, 0, 0.85, 2.8);
     addPickupCover('sniper-cover-south', 139, 93, 0, -5, 3.2, 0.9);
     addPickupCover('damage-cover-east', 0, -31, 5, 0, 0.85, 2.8);
     addPickupCover('damage-cover-north', 0, -31, 0, 5, 2.8, 0.85);
@@ -1588,7 +1625,7 @@ export class Arena implements ArenaRuntime {
       const cubbyZ = -19.1;
       const padY = supportYAt(-109, -22);
       const localY = supportYAt(cubbyX, cubbyZ);
-      addBox('spawn-inner-west-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+      addBox('spawn-inner-west-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + mw(5.8), 3.2);
     }
     // Old pad (89, 55) sat 13 m off ski corridor 2 (inside halfWidth 20); the
     // 269 m rail to (−130, −101) ran 3–13 m off the grade. Nudge north to
@@ -1599,7 +1636,7 @@ export class Arena implements ArenaRuntime {
       const cubbyZ = 63.1;
       const padY = supportYAt(89, 68);
       const localY = supportYAt(cubbyX, cubbyZ);
-      addBox('spawn-inner-east-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+      addBox('spawn-inner-east-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + mw(5.8), 3.2);
     }
     // Leftover after maps B: (89, 68) → (−158, 90) is 248 m CLEAR. The SW
     // cubby at (82.7, 63.1) misses this chord. 8 m along it is (81.0, 68.7),
@@ -1609,7 +1646,7 @@ export class Arena implements ArenaRuntime {
       const cubbyZ = 68.7;
       const padY = supportYAt(89, 68);
       const localY = supportYAt(cubbyX, cubbyZ);
-      addBox('spawn-inner-east-ridge-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+      addBox('spawn-inner-east-ridge-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + mw(5.8), 3.2);
     }
     // SPAWN (51, −73) → (−158, 90) is a 265 m rail along ski corridor 1.
     // 8 m along that chord is (44.7, −68.1), 25.8 m off the grade (outside
@@ -1620,7 +1657,7 @@ export class Arena implements ArenaRuntime {
       const cubbyZ = -68.1;
       const padY = supportYAt(51, -73);
       const localY = supportYAt(cubbyX, cubbyZ);
-      addBox('spawn-inner-south-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+      addBox('spawn-inner-south-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + mw(5.8), 3.2);
     }
     // SPAWN (−99, 64) → (153, 79) is a 252 m rail. 8 m along that chord sits
     // 17.6 m off ski corridor 1 (inside halfWidth 20). 24 m lands at
@@ -1631,7 +1668,7 @@ export class Arena implements ArenaRuntime {
       const cubbyZ = 65.4;
       const padY = supportYAt(-99, 64);
       const localY = supportYAt(cubbyX, cubbyZ);
-      addBox('spawn-northwest-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + 5.8, 3.2);
+      addBox('spawn-northwest-cubby', cubbyX, cubbyZ, 4.6, Math.min(localY, padY), padY + mw(5.8), 3.2);
     }
 
     const midfieldBreakers: Array<{
@@ -1647,21 +1684,21 @@ export class Arena implements ArenaRuntime {
       { name: 'midfield-southeast-breaker', x: 32, z: -28, width: 4.2, height: 5.4, depth: 3.6 },
       // On the rocket (−148, −86) → sniper (139, 93) chord, past the ski
       // corridor. A bowl-floor 6 m box cannot reach that 38 m LOS.
-      { name: 'midfield-rocket-sniper-breaker', x: 110, z: 75, width: 8.4, height: 18, depth: 6.2 },
+      { name: 'midfield-rocket-sniper-breaker', x: 110, z: 75, width: 8.4, height: 48, depth: 6.2 },
       // Rail (−158, 96) → sniper (139, 93) is a 297 m east-west chord at z≈94.
       // The rocket-sniper box at z=75 misses it by ~15 m. Sniper sits inside
       // east-weather-station; a roof/cabin eye is ~52 m, so 16 m from terrain
       // 28 leaves the lid at 44 and the ray flies over.
-      { name: 'midfield-rail-sniper-breaker', x: 109, z: 93, width: 8.4, height: 28, depth: 6.2 },
+      { name: 'midfield-rail-sniper-breaker', x: 109, z: 93, width: 8.4, height: 36, depth: 6.2 },
       // SPAWN (−158, 90) → (153, 79) is a 311 m shelf chord at z≈81, 2.4 m
       // north of the rocket box and 9.3 m south of the rail box. Eye ~60 m
       // over terrain ~23 m, so a 18 m lid cannot reach it.
-      { name: 'midfield-spawn-shelf-breaker', x: 109, z: 81, width: 8.4, height: 40, depth: 6.2 },
+      { name: 'midfield-spawn-shelf-breaker', x: 109, z: 81, width: 8.4, height: 52, depth: 6.2 },
       // SPAWN (153, 79) → (−130, −101) is a 335 m rail along ski corridor 2.
       // At x=110 the ray is z≈52, ~7.5 m north of the grade centerline
       // (halfWidth 20). A 5.2 m nunatak sits in that offset so the ski still
       // runs south of it; do not span the 40 m run with a wall.
-      { name: 'ski-corridor-2-nunatak', x: 110.5, z: 52, width: 5.2, height: 28, depth: 5.2 },
+      { name: 'ski-corridor-2-nunatak', x: 110.5, z: 52, width: 5.2, height: 36, depth: 5.2 },
     ];
     for (const breaker of midfieldBreakers) {
       addGroundedBox(breaker.name, breaker.x, breaker.z, breaker.width, breaker.height, breaker.depth);
@@ -1672,10 +1709,10 @@ export class Arena implements ArenaRuntime {
     const bermThickness = 3.2;
     const bermBottom = MONSOON_DIVIDE.waterY - 1.2;
     const bermTop = MONSOON_DIVIDE.waterY + 2.4;
-    addBox('perimeter-berm-north', 0, halfDepth - bermThickness * 0.5, halfWidth * 2, bermBottom, bermTop, bermThickness);
-    addBox('perimeter-berm-south', 0, -(halfDepth - bermThickness * 0.5), halfWidth * 2, bermBottom, bermTop, bermThickness);
-    addBox('perimeter-berm-east', halfWidth - bermThickness * 0.5, 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
-    addBox('perimeter-berm-west', -(halfWidth - bermThickness * 0.5), 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
+    addWorldBox('perimeter-berm-north', 0, halfDepth - bermThickness * 0.5, halfWidth * 2, bermBottom, bermTop, bermThickness);
+    addWorldBox('perimeter-berm-south', 0, -(halfDepth - bermThickness * 0.5), halfWidth * 2, bermBottom, bermTop, bermThickness);
+    addWorldBox('perimeter-berm-east', halfWidth - bermThickness * 0.5, 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
+    addWorldBox('perimeter-berm-west', -(halfWidth - bermThickness * 0.5), 0, bermThickness, bermBottom, bermTop, halfDepth * 2);
   }
 
   private rampHeightAt(ramp: RampSurface, x: number, z: number): number | null {
@@ -1755,20 +1792,20 @@ export class Arena implements ArenaRuntime {
       const endX = start.x + forwardX * ramp.length;
       const endZ = start.z + forwardZ * ramp.length;
       apronParts.push(buildTerrainRibbonGeometry({
-        start: { x: start.x - forwardX * 8.5, z: start.z - forwardZ * 8.5 },
-        end: { x: start.x + forwardX * 1.6, z: start.z + forwardZ * 1.6 },
-        startWidth: ramp.width + 5.2,
-        endWidth: ramp.width + 0.8,
+        start: { x: start.x - forwardX * mw(8.5), z: start.z - forwardZ * mw(8.5) },
+        end: { x: start.x + forwardX * mw(1.6), z: start.z + forwardZ * mw(1.6) },
+        startWidth: ramp.width + mw(5.2),
+        endWidth: ramp.width + mw(0.8),
         longitudinalSegments: 12,
         lateralSegments: 5,
         heightAt: (x, z) => sampleMonsoonMeshHeight(x, z, this.seed),
         lift: 0.045,
       }));
       apronParts.push(buildTerrainRibbonGeometry({
-        start: { x: endX + forwardX * 5.5, z: endZ + forwardZ * 5.5 },
-        end: { x: endX + forwardX * 20, z: endZ + forwardZ * 20 },
-        startWidth: ramp.width + 1.2,
-        endWidth: ramp.width + 7.5,
+        start: { x: endX + forwardX * mw(5.5), z: endZ + forwardZ * mw(5.5) },
+        end: { x: endX + forwardX * mw(20), z: endZ + forwardZ * mw(20) },
+        startWidth: ramp.width + mw(1.2),
+        endWidth: ramp.width + mw(7.5),
         longitudinalSegments: 12,
         lateralSegments: 5,
         heightAt: (x, z) => sampleMonsoonMeshHeight(x, z, this.seed),
@@ -1787,9 +1824,9 @@ export class Arena implements ArenaRuntime {
     this.geometries.push(signGeometry);
     const signs = new THREE.InstancedMesh(signGeometry, signal, 3);
     const signPositions = [
-      new THREE.Vector3(-119.5, sampleMonsoonHeight(-132, 111, this.seed) + 7.1, 102),
-      new THREE.Vector3(119.5, sampleMonsoonHeight(132, 96, this.seed) + 7.1, 87),
-      new THREE.Vector3(42, sampleMonsoonHeight(42, -96, this.seed) + 7.4, -109.8),
+      new THREE.Vector3(mw(-119.5), sampleMonsoonHeight(mw(-132), mw(111), this.seed) + mw(7.1), mw(102)),
+      new THREE.Vector3(mw(119.5), sampleMonsoonHeight(mw(132), mw(96), this.seed) + mw(7.1), mw(87)),
+      new THREE.Vector3(mw(42), sampleMonsoonHeight(mw(42), mw(-96), this.seed) + mw(7.4), mw(-109.8)),
     ];
     signPositions.forEach((position, index) => {
       matrix.compose(position, identity, new THREE.Vector3(1, 1, 1));
@@ -2146,7 +2183,7 @@ export class Arena implements ArenaRuntime {
   }
 
   private createOcean(): void {
-    const geometry = new THREE.PlaneGeometry(1800, 1800, 72, 72);
+    const geometry = new THREE.PlaneGeometry(3600, 3600, 72, 72);
     const material = new THREE.ShaderMaterial({
       name: 'MonsoonCelOcean',
       transparent: true,
@@ -2176,7 +2213,7 @@ export class Arena implements ArenaRuntime {
         varying vec3 vWorld;
         void main() {
           float band = floor(clamp(vWave * 1.8 + 2.0, 0.0, 3.0)) / 3.0;
-          float horizon = smoothstep(180.0, 720.0, length(vWorld.xz));
+          float horizon = smoothstep(360.0, 1440.0, length(vWorld.xz));
           vec3 color = mix(uDeep, uShallow, 0.34 + band * 0.38);
           color = mix(color, uSun, horizon * 0.12);
           gl_FragColor = vec4(color, 0.94);
@@ -2207,14 +2244,14 @@ export class Arena implements ArenaRuntime {
     const random = randomFactory(this.seed ^ 0xd157a17d);
     for (let index = 0; index < count; index += 1) {
       const angle = (index / count) * Math.PI * 2 + random() * 0.22;
-      const radius = 560 + random() * 190;
+      const radius = mw(560) + random() * mw(190);
       const position = new THREE.Vector3(
         Math.cos(angle) * radius,
         MONSOON_DIVIDE.waterY - 2 + random() * 4,
         Math.sin(angle) * radius,
       );
       quaternion.setFromEuler(new THREE.Euler(0, random() * Math.PI, 0));
-      matrix.compose(position, quaternion, new THREE.Vector3(24 + random() * 30, 10 + random() * 19, 22 + random() * 34));
+      matrix.compose(position, quaternion, new THREE.Vector3(mw(24) + random() * mw(30), mw(10) + random() * mw(19), mw(22) + random() * mw(34)));
       islands.setMatrixAt(index, matrix);
     }
     islands.instanceMatrix.needsUpdate = true;
@@ -2247,37 +2284,40 @@ export class Arena implements ArenaRuntime {
     let frameIndex = 0;
     let insetIndex = 0;
     let braceIndex = 0;
-    GATE_XZ.forEach(([x, z], gateIndex) => {
+    GATE_XZ.forEach(([designX, designZ], gateIndex) => {
+      const x = mw(designX);
+      const z = mw(designZ);
       const y = sampleMonsoonHeight(x, z, this.seed);
       const yaw = Math.atan2(-x, -z);
       quaternion.setFromEuler(new THREE.Euler(0, yaw, 0));
       const cross = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      const gateHalfWidth = mw(ROUTE_GATE_HALF_WIDTH);
       for (const side of [-1, 1]) {
-        const post = new THREE.Vector3(x, y + 2.8, z).addScaledVector(cross, side * ROUTE_GATE_HALF_WIDTH);
-        matrix.compose(post, quaternion, new THREE.Vector3(0.82, 5.6, 1.05));
+        const post = new THREE.Vector3(x, y + mw(2.8), z).addScaledVector(cross, side * gateHalfWidth);
+        matrix.compose(post, quaternion, new THREE.Vector3(mw(0.82), mw(5.6), mw(1.05)));
         frames.setMatrixAt(frameIndex++, matrix);
-        matrix.compose(post.clone().addScaledVector(cross, -side * 0.08), quaternion, new THREE.Vector3(0.28, 3.8, 1.12));
+        matrix.compose(post.clone().addScaledVector(cross, -side * mw(0.08)), quaternion, new THREE.Vector3(mw(0.28), mw(3.8), mw(1.12)));
         insets.setMatrixAt(insetIndex++, matrix);
       }
       matrix.compose(
-        new THREE.Vector3(x, y + 5.58, z),
+        new THREE.Vector3(x, y + mw(5.58), z),
         quaternion,
-        new THREE.Vector3(ROUTE_GATE_HALF_WIDTH * 2 + 0.8, 0.72, 1.05),
+        new THREE.Vector3(gateHalfWidth * 2 + mw(0.8), mw(0.72), mw(1.05)),
       );
       frames.setMatrixAt(frameIndex++, matrix);
       matrix.compose(
-        new THREE.Vector3(x, y + 5.52, z),
+        new THREE.Vector3(x, y + mw(5.52), z),
         quaternion,
-        new THREE.Vector3(ROUTE_GATE_HALF_WIDTH * 2 - 2.4, 0.12, 1.12),
+        new THREE.Vector3(gateHalfWidth * 2 - mw(2.4), mw(0.12), mw(1.12)),
       );
       strips.setMatrixAt(gateIndex, matrix);
       for (const side of [-1, 1]) {
-        const bracePosition = new THREE.Vector3(x, y + 4.35, z)
-          .addScaledVector(cross, side * (ROUTE_GATE_HALF_WIDTH - 1.38));
+        const bracePosition = new THREE.Vector3(x, y + mw(4.35), z)
+          .addScaledVector(cross, side * (gateHalfWidth - mw(1.38)));
         const localBrace = new THREE.Quaternion().setFromEuler(
           new THREE.Euler(0, yaw, side * -0.7),
         );
-        matrix.compose(bracePosition, localBrace, new THREE.Vector3(0.34, 3.3, 0.68));
+        matrix.compose(bracePosition, localBrace, new THREE.Vector3(mw(0.34), mw(3.3), mw(0.68)));
         braces.setMatrixAt(braceIndex++, matrix);
       }
     });
@@ -2311,9 +2351,17 @@ export class Arena implements ArenaRuntime {
     const identity = new THREE.Quaternion();
     const horizontal = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI * 0.5, 0, 0));
     this.jumpPads.forEach((pad, index) => {
-      matrix.compose(pad.position.clone().add(new THREE.Vector3(0, 0.08, 0)), identity, new THREE.Vector3(1, 1, 1));
+      matrix.compose(
+        pad.position.clone().add(new THREE.Vector3(0, 0.08, 0)),
+        identity,
+        new THREE.Vector3(MONSOON_WORLD_SCALE, 1, MONSOON_WORLD_SCALE),
+      );
       bases.setMatrixAt(index, matrix);
-      matrix.compose(pad.position.clone().add(new THREE.Vector3(0, 0.33, 0)), horizontal, new THREE.Vector3(1, 1, 1));
+      matrix.compose(
+        pad.position.clone().add(new THREE.Vector3(0, 0.33, 0)),
+        horizontal,
+        new THREE.Vector3(MONSOON_WORLD_SCALE, MONSOON_WORLD_SCALE, MONSOON_WORLD_SCALE),
+      );
       rings.setMatrixAt(index, matrix);
     });
     bases.instanceMatrix.needsUpdate = true;
@@ -2513,17 +2561,21 @@ export class Arena implements ArenaRuntime {
       for (let index = 0; index <= subdivisions; index += 1) {
         const t = index / subdivisions;
         samples.push([
-          THREE.MathUtils.lerp(startX, endX, t),
-          THREE.MathUtils.lerp(startZ, endZ, t),
+          THREE.MathUtils.lerp(startX, endX, t) * MONSOON_WORLD_SCALE,
+          THREE.MathUtils.lerp(startZ, endZ, t) * MONSOON_WORLD_SCALE,
         ]);
       }
-      appendRibbon(samples, 9.6, false);
+      appendRibbon(samples, mw(9.6), false);
     }
     // The terrain itself defines the broad outer ski loop. Keeping its old
     // full-width decal produced a debug-red ring around the whole island and
     // sent ribbon triangles down the coastal cliffs. Only the compact inner
     // race line receives a subtle packed-earth surface treatment.
-    appendRibbon(MONSOON_INNER_LOOP_SAMPLES, 9.2, true);
+    appendRibbon(
+      MONSOON_INNER_LOOP_SAMPLES.map(([x, z]) => [mw(x), mw(z)] as const),
+      mw(9.2),
+      true,
+    );
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
@@ -2933,8 +2985,8 @@ export class Arena implements ArenaRuntime {
     };
     const findPlacement = (avoidRoute: number): THREE.Vector3 => {
       for (let attempt = 0; attempt < 80; attempt += 1) {
-        const x = (random() - 0.5) * 430;
-        const z = (random() - 0.5) * 350;
+        const x = (random() - 0.5) * mw(430);
+        const z = (random() - 0.5) * mw(350);
         const y = sampleMonsoonHeight(x, z, this.seed);
         const masks = sampleMonsoonMasks(x, z);
         if (

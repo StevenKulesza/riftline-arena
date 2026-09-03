@@ -191,7 +191,7 @@ export class MapLightingRig {
     const shadowMapSize = mobileQuality ? 1024 : 2048;
     this.key.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     this.key.shadow.camera.near = 8;
-    this.key.shadow.camera.far = this.profileName === 'quicksense' ? 570 : 610;
+    this.key.shadow.camera.far = this.profileName === 'quicksense' ? 1140 : 1220;
     // Cover the full authored play bounds with only a small guard band. The
     // previous oversized frustum diluted texel density and hid contact detail.
     this.shadowExtent = Math.max(bounds.width, bounds.depth) * 0.52;
