@@ -10,6 +10,7 @@ export default defineConfig({
     'loop-cadence.spec.ts',
     'performance-contract.spec.ts',
     'monsoon-rock-field.spec.ts',
+    'ctf-flag-physics.spec.ts',
   ],
   workers: 1,
   reporter: 'list',

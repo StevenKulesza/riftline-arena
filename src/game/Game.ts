@@ -10,6 +10,7 @@ import { loadGrenadeAsset } from '../assets/GrenadeAsset';
 import { createWeaponViewModel, updateWeaponViewModel, type WeaponViewModel } from '../assets/WeaponViewModel';
 import { JetpackRig } from '../assets/JetpackRig';
 import { PlayerAvatar } from '../assets/PlayerAvatar';
+import { CtfFlagVisual } from '../assets/CtfFlagVisual';
 import { InputController } from '../core/InputController';
 import { Loop } from '../core/Loop';
 import { createRenderer, getRenderDpr, resizeRenderer } from '../core/Renderer';
@@ -72,6 +73,7 @@ import {
 import { createSeededRandom } from '../utils/random';
 import { Arena, type ArenaRuntime, type ArenaSurface, type CapsuleContact, type SurfaceHit } from './Arena';
 import { MONSOON_WORLD_SCALE } from './maps/MonsoonDivide';
+import { QUICK_HORIZONTAL_SCALE } from './maps/QuickSenseArena';
 import {
   MonsoonRewardVisualKit,
   type MonsoonRewardVisual,
@@ -223,6 +225,7 @@ type PickupState = {
 
 type FlagState = {
   team: TeamId;
+  visual: CtfFlagVisual;
   group: THREE.Group;
   baseGroup: THREE.Group;
   basePosition: THREE.Vector3;
@@ -1093,8 +1096,7 @@ export class Game {
       else this.disposeObject(pickup.group);
     }
     for (const flag of this.flags) {
-      this.disposeObject(flag.group);
-      this.disposeObject(flag.baseGroup);
+      flag.visual.dispose();
     }
     this.monsoonRewardVisuals?.dispose();
     this.disposeObject(this.coreGroup);
@@ -3787,7 +3789,7 @@ export class Game {
       flag.carrier = null;
       flag.atBase = true;
       flag.droppedSeconds = 0;
-      flag.group.position.copy(flag.basePosition);
+      flag.visual.resetAt(flag.basePosition);
       flag.group.visible = this.matchMode === 'ctf';
     }
   }
@@ -3802,7 +3804,7 @@ export class Game {
     flag.carrier = null;
     flag.atBase = false;
     flag.droppedSeconds = CTF_FLAG_RETURN_SECONDS;
-    flag.group.position.copy(position);
+    flag.visual.dropAt(position, this.ownerVelocity(owner));
     flag.group.visible = this.matchMode === 'ctf';
     this.hud.message(`${TEAM_LABELS[flag.team]} FLAG DROPPED`);
   }
@@ -3811,7 +3813,7 @@ export class Game {
     flag.carrier = null;
     flag.atBase = true;
     flag.droppedSeconds = 0;
-    flag.group.position.copy(flag.basePosition);
+    flag.visual.resetAt(flag.basePosition);
     flag.group.visible = this.matchMode === 'ctf';
     this.hud.message(actor === 'player' ? `${TEAM_LABELS[flag.team]} FLAG RETURNED` : `${TEAM_LABELS[flag.team]} FLAG RECOVERED`);
   }
@@ -3824,9 +3826,14 @@ export class Game {
         if (!this.ownerAlive(flag.carrier)) {
           this.dropCarriedFlag(flag.carrier, flag.group.position.clone());
         } else {
-          flag.group.position.copy(this.ownerPosition(flag.carrier, CTF_FLAG_CARRY_HEIGHT));
+          flag.visual.stepCarried(
+            delta,
+            this.ownerPosition(flag.carrier, CTF_FLAG_CARRY_HEIGHT),
+            this.ownerVelocity(flag.carrier),
+          );
         }
       } else if (!flag.atBase) {
+        flag.visual.stepDropped(delta, (x, z, fromY) => this.arena.floorHeightAt(x, z, fromY));
         flag.droppedSeconds = Math.max(0, flag.droppedSeconds - delta);
         if (flag.droppedSeconds <= 0) {
           this.returnFlag(flag, 'player');
@@ -3849,6 +3856,10 @@ export class Game {
         flag.carrier = actor;
         flag.atBase = false;
         flag.droppedSeconds = 0;
+        flag.visual.beginCarry(
+          this.ownerPosition(actor, CTF_FLAG_CARRY_HEIGHT),
+          this.ownerVelocity(actor),
+        );
         this.hud.message(actor === 'player' ? `ENEMY FLAG SECURED · RETURN TO ${TEAM_LABELS[team]}` : `${this.bots[actor]?.displayName ?? 'ALLY'} HAS ENEMY FLAG`);
       }
     }
@@ -3862,7 +3873,7 @@ export class Game {
       carried.carrier = null;
       carried.atBase = true;
       carried.droppedSeconds = 0;
-      carried.group.position.copy(carried.basePosition);
+      carried.visual.resetAt(carried.basePosition);
       this.ctfCaptures[team] += 1;
       this.awardScore(actor, 1);
       this.hud.message(team === 'azure' ? 'AZURE CAPTURE · +1' : 'CRIMSON CAPTURE · +1');
@@ -5641,26 +5652,14 @@ export class Game {
 
   private updateEffects(delta: number): void {
     this.weaponVfx.update(delta);
-    if (this.matchMode === 'ctf' && !this.reducedMotion) {
+    if (this.matchMode === 'ctf') {
       for (const flag of this.flags) {
-        const ring = flag.group.getObjectByName('ctf-flag-ring');
-        if (ring) ring.rotation.z += delta * 2.2;
-        const beaconRing = flag.group.getObjectByName('ctf-beacon-ring');
-        if (beaconRing) beaconRing.rotation.z -= delta * 1.45;
-        const baseRing = flag.baseGroup.getObjectByName('ctf-base-ring');
-        if (baseRing) baseRing.rotation.z += delta * 0.35;
-        const beacon = flag.group.getObjectByName('ctf-signal-beacon');
-        if (beacon) {
-          const phase = Number(flag.group.userData.phase ?? 0);
-          beacon.position.y = 0.88 + Math.sin(this.elapsed * 2.4 + phase) * 0.035;
-          beacon.rotation.y += delta * 0.9;
-        }
-        const signalCore = flag.group.getObjectByName('ctf-signal-core');
-        if (signalCore) {
-          const phase = Number(flag.group.userData.phase ?? 0);
-          const pulse = 1 + Math.sin(this.elapsed * 3.1 + phase) * 0.11;
-          signalCore.scale.setScalar(pulse);
-        }
+        flag.visual.updatePresentation(
+          delta,
+          this.weatherSnapshot.windDirection,
+          this.weatherSnapshot.windStrength,
+          this.reducedMotion,
+        );
       }
     }
   }
@@ -7240,116 +7239,19 @@ export class Game {
       // raw terrain, so sample the highest walkable support at the exact point.
       const floor = this.arena.floorHeightAt(authored.x, authored.z, Number.POSITIVE_INFINITY);
       const basePosition = new THREE.Vector3(authored.x, floor ?? authored.y, authored.z);
-      const group = new THREE.Group();
-      group.name = `ctf-${team}-flag`;
-      const baseGroup = new THREE.Group();
-      baseGroup.name = `ctf-${team}-flag-base`;
-
-      const color = TEAM_COLORS[team];
-      const poleMaterial = new THREE.MeshStandardMaterial({
-        color: 0x283b56,
-        metalness: 0.75,
-        roughness: 0.28,
-      });
-      const flagMaterial = new THREE.MeshStandardMaterial({
-        color,
-        emissive: color,
-        emissiveIntensity: 0.42,
-        roughness: 0.32,
-        metalness: 0.18,
-        side: THREE.DoubleSide,
-      });
-      const baseMaterial = new THREE.MeshStandardMaterial({
-        color: 0x111c2c,
-        metalness: 0.8,
-        roughness: 0.3,
-      });
-      const basePlate = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.92, 1.05, 0.12, 8),
-        baseMaterial,
-      );
-      basePlate.name = 'ctf-base-plate';
-      basePlate.position.y = 0.06;
-      basePlate.receiveShadow = true;
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.055, 2.4, 8), poleMaterial);
-      pole.position.y = 1.2;
-      pole.castShadow = true;
-      const pennantShape = new THREE.Shape()
-        .moveTo(0, 0.24)
-        .lineTo(0.72, 0.24)
-        .lineTo(0.56, 0)
-        .lineTo(0.72, -0.24)
-        .lineTo(0, -0.24)
-        .closePath();
-      const pennant = new THREE.Mesh(
-        new THREE.ExtrudeGeometry(pennantShape, {
-          depth: 0.055,
-          bevelEnabled: true,
-          bevelSegments: 2,
-          bevelSize: 0.012,
-          bevelThickness: 0.01,
-        }),
-        flagMaterial,
-      );
-      pennant.name = 'ctf-faction-pennant';
-      pennant.position.set(0.34, 2.05, 0);
-      pennant.castShadow = true;
-      const baseRing = new THREE.Mesh(
-        new THREE.TorusGeometry(0.78, 0.045, 6, 24),
-        flagMaterial,
-      );
-      baseRing.name = 'ctf-base-ring';
-      baseRing.rotation.x = Math.PI * 0.5;
-      baseRing.position.y = 0.14;
-      const baseInset = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.57, 0.68, 0.045, 8),
-        baseMaterial,
-      );
-      baseInset.name = 'ctf-base-inset';
-      baseInset.position.y = 0.15;
-      baseInset.receiveShadow = true;
-      const signal = new THREE.Group();
-      signal.name = 'ctf-signal-beacon';
-      signal.position.set(0, 0.88, 0);
-      const signalCage = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(0.25, 1),
-        baseMaterial,
-      );
-      signalCage.name = 'ctf-signal-cage';
-      signalCage.scale.set(1, 1.15, 1);
-      const signalCore = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(0.14, 1),
-        flagMaterial,
-      );
-      signalCore.name = 'ctf-signal-core';
-      signalCore.userData.ctfSignal = true;
-      signal.add(signalCage, signalCore);
-      const beaconRing = new THREE.Mesh(
-        new THREE.TorusGeometry(0.32, 0.025, 6, 18),
-        flagMaterial,
-      );
-      beaconRing.name = 'ctf-beacon-ring';
-      beaconRing.rotation.x = Math.PI * 0.5;
-      signal.add(beaconRing);
-      const flagRing = new THREE.Mesh(
-        new THREE.TorusGeometry(0.42, 0.035, 6, 20),
-        flagMaterial,
-      );
-      flagRing.name = 'ctf-flag-ring';
-      flagRing.rotation.x = Math.PI * 0.5;
-      flagRing.position.y = 0.05;
-      baseGroup.add(basePlate, baseInset, baseRing);
-      group.add(pole, pennant, signal, flagRing);
-      group.position.copy(basePosition);
+      const visual = new CtfFlagVisual(team, TEAM_COLORS[team]);
+      const group = visual.root;
+      const baseGroup = visual.baseRoot;
+      visual.resetAt(basePosition);
       baseGroup.position.copy(basePosition);
       group.userData.basePosition = basePosition.clone();
-      group.userData.phase = team === 'azure' ? 0 : Math.PI;
       group.visible = this.matchMode === 'ctf';
       baseGroup.visible = this.matchMode === 'ctf';
       this.scene.add(group);
       this.scene.add(baseGroup);
       this.flags.push({
         team,
+        visual,
         group,
         baseGroup,
         basePosition,
@@ -7371,9 +7273,19 @@ export class Game {
         ['crimson', new THREE.Vector3(95 * MONSOON_WORLD_SCALE, 0, -120 * MONSOON_WORLD_SCALE + 114)],
       ];
     }
-    // Bipbeta2's diagonal hall entries preserve a readable center crossing;
-    // QuickSense's terminal spawns frame the outpost's long north/south run.
-    const baseIndices = this.arena.mapInfo.name === 'Bipbeta2' ? [0, 3] : [0, 7];
+    if (this.arena.mapInfo.name === 'QuickSense') {
+      // Seat both bases on the authored west/east junction decks. The old
+      // north/south terminal spawns share X/Z with the outer mountain shell,
+      // so a highest-support probe could legitimately put the marker on a
+      // steep cliff above the route. These broad junctions are flat, readable
+      // from the main ski lines, and still preserve a full-map diagonal run.
+      return [
+        ['azure', new THREE.Vector3(-77 * QUICK_HORIZONTAL_SCALE, 0, -18 * QUICK_HORIZONTAL_SCALE)],
+        ['crimson', new THREE.Vector3(77 * QUICK_HORIZONTAL_SCALE, 0, 18 * QUICK_HORIZONTAL_SCALE)],
+      ];
+    }
+    // Bipbeta2's diagonal hall entries preserve a readable center crossing.
+    const baseIndices = [0, 3];
     return [
       ['azure', spawnPoints[Math.min(baseIndices[0], spawnPoints.length - 1)].clone()],
       ['crimson', spawnPoints[Math.min(baseIndices[1], spawnPoints.length - 1)].clone()],
@@ -7937,6 +7849,73 @@ export class Game {
           const contact = this.arena.resolvePlayerCapsule(this.playerPosition, this.playerVelocity);
           this.grounded = contact.grounded;
           this.terrainNormal.copy(contact.contactNormal);
+        } else if (name === 'ctf-flag-comparison' && this.matchMode === 'ctf' && this.flags.length === 2) {
+          this.mode = 'running';
+          this.audio.setPaused(true);
+          this.hud.hideStart();
+          this.pausedForScreenshot = true;
+          this.screenshotCameraFov = 42;
+          this.weaponModel.visible = false;
+          this.playerAvatar.root.visible = false;
+          this.playerJetpack.root.visible = false;
+          this.thirdPersonWeaponModel.visible = false;
+          for (const bot of this.bots) bot.group.visible = false;
+          for (const drone of this.droneSwarm.drones) drone.visual.root.visible = false;
+          for (const drone of this.droneSwarm.busterDrones) drone.visual.root.visible = false;
+          for (const drone of this.flamethrowerDrones.drones) drone.visual.root.visible = false;
+          for (const fighter of this.fighters) fighter.visual.root.visible = false;
+          for (const pickup of this.pickups) pickup.group.visible = false;
+          this.coreGroup.visible = false;
+
+          // Deterministic proof frame: the live Azure and Crimson objective
+          // instances are placed under the same camera, wind, simulation
+          // phase, scale, and lighting. Team color is the only variation.
+          const comparisonCenter = this.arena.mapInfo.name === 'QuickSense'
+            ? new THREE.Vector3(0, 0, -116)
+            : this.arena.mapInfo.name === 'Monsoon Divide'
+              ? new THREE.Vector3(-100 * MONSOON_WORLD_SCALE, 0, 132 * MONSOON_WORLD_SCALE)
+              : this.arena.corePosition.clone().add(new THREE.Vector3(0, 0, -18));
+          const comparisonFloor = this.arena.floorHeightAt(
+            comparisonCenter.x,
+            comparisonCenter.z,
+            Number.POSITIVE_INFINITY,
+          );
+          if (comparisonFloor !== null) comparisonCenter.y = comparisonFloor;
+          const stagedPositions = [-1.7, 1.7].map((offset) => {
+            const position = comparisonCenter.clone();
+            position.x += offset;
+            return position;
+          });
+          this.flags.forEach((flag, index) => {
+            const position = stagedPositions[index];
+            flag.visual.resetAt(position);
+            flag.baseGroup.position.copy(position);
+            flag.group.visible = true;
+            flag.baseGroup.visible = true;
+            flag.carrier = null;
+            flag.atBase = true;
+            flag.droppedSeconds = 0;
+            for (let frame = 0; frame < 48; frame += 1) {
+              flag.visual.updatePresentation(1 / 60, { x: 0.28, z: 0.96 }, 0.58, false);
+            }
+          });
+
+          const comparisonY = Math.max(stagedPositions[0].y, stagedPositions[1].y);
+          this.playerPosition.set(comparisonCenter.x + 0.35, comparisonY + 0.18, comparisonCenter.z - 8.4);
+          this.playerVelocity.set(0, 0, 0);
+          this.screenshotLookTarget.set(comparisonCenter.x + 0.35, comparisonY + 1.55, comparisonCenter.z);
+          this.screenshotLookTargetActive = true;
+          const view = this.screenshotLookTarget.clone().sub(
+            this.playerPosition.clone().add(new THREE.Vector3(0, PLAYER_EYE, 0)),
+          ).normalize();
+          this.yaw = Math.atan2(-view.x, -view.z);
+          this.pitch = Math.asin(view.y);
+          this.grounded = false;
+          this.renderer.shadowMap.autoUpdate = false;
+          this.renderer.shadowMap.needsUpdate = true;
+          for (const selector of ['#hud', '#crosshair', '#touch-controls', '#view-mode-indicator', '#helmet-visor']) {
+            document.querySelector<HTMLElement>(selector)?.classList.add('hidden');
+          }
         } else if (name === 'bipbeta2-overlook' || name === 'bipbeta2-apron' || name === 'bipbeta2-gallery' || name === 'bipbeta2-wall' || name === 'bipbeta2-hero' || name === 'bipbeta2-facade' || name === 'bipbeta2-energy' || name === 'bipbeta2-stack' || name === 'bipbeta2-lights' || name === 'bipbeta2-catwalk' || name === 'bipbeta2-tubes' || name === 'bipbeta2-west-tube' || name === 'bipbeta2-east-tube' || name === 'bipbeta2-jumper' || name === 'bipbeta2-lower-drop' || name === 'bipbeta2-gallery-return') {
           this.mode = 'running';
           this.audio.setPaused(true);
@@ -9818,6 +9797,9 @@ export class Game {
         atBase: flag.atBase,
         droppedSeconds: flag.droppedSeconds,
         position: { x: flag.group.position.x, y: flag.group.position.y, z: flag.group.position.z },
+        modelId: flag.visual.modelId,
+        geometrySignature: flag.visual.geometrySignature,
+        physics: flag.visual.diagnostics(),
       })),
       coreProgress: this.coreProgress,
       core: {
