@@ -515,6 +515,39 @@ export function sampleMonsoonHeight(
 }
 
 /**
+ * Lazily memoized analytic heights at the terrain mesh's grid vertices.
+ *
+ * The analytic sampler walks every ridgeline, escarpment, loop mask, and fbm
+ * octave — hundreds of segment-distance evaluations per call — and the mesh
+ * samplers below need it at exactly (segmentsX+1)×(segmentsZ+1) fixed lattice
+ * points. Caching those vertices makes gameplay-critical floor queries (bot
+ * AI, grounding shadows, navigation) a table lookup plus one triangle lerp,
+ * with bit-identical results to direct evaluation.
+ */
+const meshVertexHeightCaches = new Map<number, Float64Array>();
+
+function meshVertexHeight(ix: number, iz: number, seed: number): number {
+  let cache = meshVertexHeightCaches.get(seed);
+  if (!cache) {
+    cache = new Float64Array((MONSOON_DIVIDE.segmentsX + 1) * (MONSOON_DIVIDE.segmentsZ + 1)).fill(Number.NaN);
+    meshVertexHeightCaches.set(seed, cache);
+  }
+  const index = iz * (MONSOON_DIVIDE.segmentsX + 1) + ix;
+  let height = cache[index];
+  if (Number.isNaN(height)) {
+    const stepX = MONSOON_DIVIDE.width / MONSOON_DIVIDE.segmentsX;
+    const stepZ = MONSOON_DIVIDE.depth / MONSOON_DIVIDE.segmentsZ;
+    height = sampleMonsoonHeight(
+      ix * stepX - MONSOON_DIVIDE.width * 0.5,
+      iz * stepZ - MONSOON_DIVIDE.depth * 0.5,
+      seed,
+    );
+    cache[index] = height;
+  }
+  return height;
+}
+
+/**
  * Samples the exact piecewise-linear surface drawn by the low-poly terrain
  * mesh. Decorative ribbons use this instead of the analytic height function,
  * whose sub-grid curvature can otherwise cross the rendered triangles and
@@ -541,12 +574,10 @@ export function sampleMonsoonMeshHeight(
   const iz = Math.min(MONSOON_DIVIDE.segmentsZ - 1, Math.floor(gridZ));
   const tx = gridX - ix;
   const tz = gridZ - iz;
-  const x0 = ix * stepX - MONSOON_DIVIDE.width * 0.5;
-  const z0 = iz * stepZ - MONSOON_DIVIDE.depth * 0.5;
-  const a = sampleMonsoonHeight(x0, z0, seed);
-  const b = sampleMonsoonHeight(x0 + stepX, z0, seed);
-  const d = sampleMonsoonHeight(x0, z0 + stepZ, seed);
-  const c = sampleMonsoonHeight(x0 + stepX, z0 + stepZ, seed);
+  const a = meshVertexHeight(ix, iz, seed);
+  const b = meshVertexHeight(ix + 1, iz, seed);
+  const d = meshVertexHeight(ix, iz + 1, seed);
+  const c = meshVertexHeight(ix + 1, iz + 1, seed);
 
   if ((ix + iz) % 2 === 0) {
     return tx + tz <= 1
@@ -585,12 +616,10 @@ export function sampleMonsoonMeshNormal(
   const iz = Math.min(MONSOON_DIVIDE.segmentsZ - 1, Math.floor(gridZ));
   const tx = gridX - ix;
   const tz = gridZ - iz;
-  const x0 = ix * stepX - MONSOON_DIVIDE.width * 0.5;
-  const z0 = iz * stepZ - MONSOON_DIVIDE.depth * 0.5;
-  const a = sampleMonsoonHeight(x0, z0, seed);
-  const b = sampleMonsoonHeight(x0 + stepX, z0, seed);
-  const d = sampleMonsoonHeight(x0, z0 + stepZ, seed);
-  const c = sampleMonsoonHeight(x0 + stepX, z0 + stepZ, seed);
+  const a = meshVertexHeight(ix, iz, seed);
+  const b = meshVertexHeight(ix + 1, iz, seed);
+  const d = meshVertexHeight(ix, iz + 1, seed);
+  const c = meshVertexHeight(ix + 1, iz + 1, seed);
 
   let slopeX: number;
   let slopeZ: number;

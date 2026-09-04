@@ -401,6 +401,7 @@ export class Arena implements ArenaRuntime {
   private lightningMaterial?: THREE.LineBasicMaterial;
   private distantWorldUpdate?: (deltaSeconds: number, weatherSeverity: number) => void;
   private lastDistantWorldTime = 0;
+  private lastAppliedShower = -1;
   private readonly animalRoutes: AmbientAnimalRoute[] = [];
   private ambientLife?: AmbientLifeMeshes;
   private footprintMesh?: THREE.InstancedMesh;
@@ -747,12 +748,17 @@ export class Arena implements ArenaRuntime {
     this.weatherVisualDiagnostics.visualWindStrength = wind;
     this.weatherVisualDiagnostics.windDirection.x = windDirectionX;
     this.weatherVisualDiagnostics.windDirection.z = windDirectionZ;
-    for (const responsive of this.weatherResponsiveMaterials) {
-      responsive.material.roughness = THREE.MathUtils.lerp(
-        responsive.dryRoughness,
-        responsive.wetRoughness,
-        shower,
-      );
+    // Shower intensity moves slowly; rewriting roughness across every
+    // weather-responsive material each frame is redundant material churn.
+    if (Math.abs(shower - this.lastAppliedShower) > 0.004) {
+      this.lastAppliedShower = shower;
+      for (const responsive of this.weatherResponsiveMaterials) {
+        responsive.material.roughness = THREE.MathUtils.lerp(
+          responsive.dryRoughness,
+          responsive.wetRoughness,
+          shower,
+        );
+      }
     }
     for (const prop of this.animatedProps) {
       prop.object.rotation.y = time * prop.spin + prop.phase;

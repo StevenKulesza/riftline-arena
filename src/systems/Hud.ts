@@ -153,6 +153,8 @@ export class Hud {
   private readonly fighterLock = this.element('#fighter-lock-state');
   private readonly countdownOverlay = this.element('#countdown-overlay');
   private readonly countdownValue = this.element('#countdown-value');
+  private countdownPulse: Animation | null = null;
+  private readonly prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   private readonly startOverlay = this.element('#start-overlay');
   private readonly respawnOverlay = this.element('#respawn-overlay');
   private readonly respawnText = this.element('#respawn-text');
@@ -292,14 +294,27 @@ export class Hud {
   showCountdown(label: 'READY' | '3' | '2' | '1'): void {
     this.countdownValue.textContent = label;
     this.countdownOverlay.dataset.cue = label === 'READY' ? 'ready' : 'number';
-    this.countdownOverlay.classList.remove('hidden', 'pulse');
-    void this.countdownValue.offsetWidth;
-    this.countdownOverlay.classList.add('pulse');
+    this.countdownOverlay.classList.remove('hidden');
+    // Restart the strike via the Web Animations API. The old CSS-class restart
+    // needed a forced offsetWidth reflow, and each countdown tick paid a
+    // synchronous whole-document style-and-layout pass inside the game frame.
+    this.countdownPulse?.cancel();
+    if (!this.prefersReducedMotion.matches) {
+      this.countdownPulse = this.countdownValue.animate(
+        [
+          { opacity: 0, transform: 'scale(1.65)' },
+          { opacity: 1, transform: 'scale(0.94)', offset: 0.42 },
+          { opacity: 1, transform: 'scale(1)' },
+        ],
+        { duration: 420, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'both' },
+      );
+    }
   }
 
   hideCountdown(): void {
     this.countdownOverlay.classList.add('hidden');
-    this.countdownOverlay.classList.remove('pulse');
+    this.countdownPulse?.cancel();
+    this.countdownPulse = null;
   }
 
   hitMarker(kill = false): void {

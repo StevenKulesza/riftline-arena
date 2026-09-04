@@ -75,8 +75,11 @@ const GROUP_VOLUMES: Record<AudioGroup, number> = {
 // decodeAudioData completion can occupy Chromium's main/render threads even
 // though it returns a Promise. Loading the whole combat bank in parallel made
 // the first held trigger hitch for several seconds. Keep background decoding
-// serial and yield between assets so gameplay always gets a frame opportunity.
-const BACKGROUND_AUDIO_DECODE_CONCURRENCY = 12;
+// near-serial and yield a rendered frame between assets so gameplay always
+// gets a frame opportunity. Bytes are prefetched separately (no decode), so
+// this bound applies only to the main-thread-visible decode completions.
+const BACKGROUND_AUDIO_DECODE_CONCURRENCY = 2;
+const AUDIO_PREFETCH_CONCURRENCY = 8;
 const LASER_BEAM_ATTACK_SECONDS = 0.14;
 const LASER_BEAM_RELEASE_SECONDS = 0.2;
 const LASER_BEAM_VOLUME = 0.24;
@@ -96,6 +99,8 @@ export class AudioSystem {
   private readonly playCounts = new Map<string, number>();
   private readonly assetPromises = new Map<string, Promise<void>>();
   private loadPromise: Promise<void> | null = null;
+  private prefetchStarted = false;
+  private readonly prefetchedBytes = new Map<string, ArrayBuffer>();
   private resumePromise: Promise<void> | null = null;
   private settleTimer = 0;
   private muted = false;
@@ -145,23 +150,48 @@ export class AudioSystem {
     await this.unlock();
     const context = this.context;
     if (!context) return;
+    // Arm the countdown on the four announcer clips alone (~48 KB). The arena
+    // music bed and drone beam loop used to gate this await, which held the
+    // ready state hostage to a 257 KB main-thread decode.
     await Promise.all(
-      [
-        ...Object.values(COUNTDOWN_AUDIO_POOLS).flatMap((pool) => pool.urls),
-        ...AMBIENCE_AUDIO_POOLS.flatMap((pool) => pool.urls),
-        ...DRONE_BEAM_AUDIO_POOL.urls,
-      ].map(
-        (url) => this.loadAsset(context, url),
-      ),
+      Object.values(COUNTDOWN_AUDIO_POOLS)
+        .flatMap((pool) => pool.urls)
+        .map((url) => this.loadAsset(context, url)),
     );
-    // The menu track hands off as soon as the countdown starts. Prioritize the
-    // arena bed so the player never enters a silent match while the combat bank
-    // is still decoding in the background.
-    if (this.unlocked) this.startAmbience();
-    // The match countdown is the safe loading window. Starting the full bank
-    // directly from the first fire key made combat and decoding contend for
-    // the same browser task queue in direct-entry/test states.
-    this.loadPromise ??= this.loadAssets(context).then(() => this.startAmbience());
+    // The menu track hands off as soon as the countdown starts. The ambience
+    // bed and drone beam loop lead the rate-limited background queue so the
+    // player never sits in a silent match, without their decode completions
+    // landing inside a countdown frame.
+    this.loadPromise ??= this.loadAssets(context, [
+      ...AMBIENCE_AUDIO_POOLS.flatMap((pool) => pool.urls),
+      ...DRONE_BEAM_AUDIO_POOL.urls,
+    ]).then(() => this.startAmbience());
+  }
+
+  /**
+   * Fetch every audio asset's bytes while the loading screen is up, without
+   * touching an AudioContext (autoplay policy allows plain fetches). Decoding
+   * stays rate-limited in loadAssets; this removes network latency from the
+   * countdown window entirely.
+   */
+  prefetch(): void {
+    if (this.prefetchStarted || this.disposed) return;
+    this.prefetchStarted = true;
+    let next = 0;
+    const pull = async (): Promise<void> => {
+      while (next < AUDIO_ASSET_URLS.length && !this.disposed) {
+        const url = AUDIO_ASSET_URLS[next++];
+        if (this.prefetchedBytes.has(url) || this.missingUrls.has(url)) continue;
+        try {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          this.prefetchedBytes.set(url, await response.arrayBuffer());
+        } catch {
+          // Leave the URL for loadAsset to retry and classify.
+        }
+      }
+    };
+    for (let i = 0; i < AUDIO_PREFETCH_CONCURRENCY; i += 1) void pull();
   }
 
   setMuted(muted: boolean): void {
@@ -532,31 +562,36 @@ export class AudioSystem {
     );
   }
 
-  private async loadAssets(context: AudioContext): Promise<void> {
+  private async loadAssets(context: AudioContext, priorityUrls: string[] = []): Promise<void> {
+    const queue = [
+      ...priorityUrls,
+      ...AUDIO_ASSET_URLS.filter((url) => !priorityUrls.includes(url)),
+    ];
     let nextAsset = 0;
     const loadNext = async (): Promise<void> => {
-      while (nextAsset < AUDIO_ASSET_URLS.length && !this.disposed) {
-        const url = AUDIO_ASSET_URLS[nextAsset++];
+      while (nextAsset < queue.length && !this.disposed) {
+        const url = queue[nextAsset++];
         await this.loadAsset(context, url);
         await this.yieldToGameplay();
       }
     };
     await Promise.all(Array.from(
-      { length: Math.min(BACKGROUND_AUDIO_DECODE_CONCURRENCY, AUDIO_ASSET_URLS.length) },
+      { length: Math.min(BACKGROUND_AUDIO_DECODE_CONCURRENCY, queue.length) },
       () => loadNext(),
     ));
   }
 
   private async yieldToGameplay(): Promise<void> {
+    // Wait for a fresh rendered frame, then land in a macrotask after it. This
+    // bounds decode completions to at most one per worker per displayed frame.
+    // requestIdleCallback with a timeout degenerated to a fixed 250 ms fuse
+    // under load and let 12 decode completions pile into a single frame.
     await new Promise<void>((resolve) => {
-      const requestIdle = (window as unknown as {
-        requestIdleCallback?: (callback: () => void, options: { timeout: number }) => number;
-      }).requestIdleCallback;
-      if (requestIdle) {
-        requestIdle.call(window, () => resolve(), { timeout: 250 });
-      } else {
-        setTimeout(resolve, 50);
+      if (document.hidden) {
+        setTimeout(resolve, 16);
+        return;
       }
+      requestAnimationFrame(() => setTimeout(resolve, 0));
     });
   }
 
@@ -566,9 +601,15 @@ export class AudioSystem {
     if (existing) return existing;
     const promise = (async () => {
       try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const buffer = await context.decodeAudioData((await response.arrayBuffer()).slice(0));
+        let bytes = this.prefetchedBytes.get(url);
+        if (bytes) {
+          this.prefetchedBytes.delete(url);
+        } else {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          bytes = await response.arrayBuffer();
+        }
+        const buffer = await context.decodeAudioData(bytes.slice(0));
         if (!this.disposed) this.buffers.set(url, buffer);
       } catch {
         if (!this.disposed) this.missingUrls.add(url);

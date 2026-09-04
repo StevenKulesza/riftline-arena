@@ -112,7 +112,11 @@ const selectMode = (choice: HTMLButtonElement): void => {
   const url = new URL(window.location.href);
   if (mode === 'arena') url.searchParams.delete('mode');
   else url.searchParams.set('mode', mode);
-  window.location.assign(url.toString());
+  // A gametype changes match rules, not arena geometry. Reloading the page
+  // here re-ran the entire multi-second asset/GPU bootstrap for a label swap.
+  window.history.replaceState(null, '', url.toString());
+  syncMapChoice();
+  document.dispatchEvent(new CustomEvent('rift:mode', { detail: { mode } }));
 };
 
 const refreshOptions = (): void => {

@@ -72,6 +72,7 @@ export class AdaptiveQualitySystem {
   private windowOverBudgetFrames = 0;
   private windowSevereFrames = 0;
   private healthyWindows = 0;
+  private pacingFloorMs = 0;
 
   constructor(options: AdaptiveQualityOptions = {}) {
     const requestedMax = finiteOption(options.maxDpr, 1.25);
@@ -101,6 +102,25 @@ export class AdaptiveQualitySystem {
     return this.dprCap;
   }
 
+  /**
+   * The game loop deliberately strides work on high-refresh displays (e.g.
+   * every 2nd rAF on 120 Hz), so presentation can never pace faster than
+   * stride × refresh interval. Without this floor the controller reads that
+   * cadence as permanent GPU overload and walks resolution to minimum for
+   * zero framerate gain. Pass 0 to clear.
+   */
+  setPacingFloorMs(floorMs: number): void {
+    this.pacingFloorMs = Number.isFinite(floorMs) && floorMs > 0 ? Math.min(floorMs, 50) : 0;
+  }
+
+  private effectiveTargetMs(): number {
+    return Math.max(this.targetFrameMs, this.pacingFloorMs);
+  }
+
+  private effectiveMaxMs(): number {
+    return Math.max(this.maxFrameMs, this.effectiveTargetMs() * 1.6);
+  }
+
   sampleFrame(frameTimeMs: number, presentationIntervalMs = frameTimeMs): AdaptiveQualityChange | null {
     if (!Number.isFinite(frameTimeMs) || frameTimeMs <= 0) return null;
     if (!Number.isFinite(presentationIntervalMs) || presentationIntervalMs <= 0) return null;
@@ -120,15 +140,15 @@ export class AdaptiveQualitySystem {
     this.windowWorkTotalMs += workMs;
     this.windowWorstFrameMs = Math.max(this.windowWorstFrameMs, sampleMs);
     this.windowSamples += 1;
-    if (sampleMs > this.targetFrameMs * 1.15) this.windowOverBudgetFrames += 1;
-    if (sampleMs > this.maxFrameMs) this.windowSevereFrames += 1;
+    if (sampleMs > this.effectiveTargetMs() * 1.15) this.windowOverBudgetFrames += 1;
+    if (sampleMs > this.effectiveMaxMs()) this.windowSevereFrames += 1;
 
     if (this.windowDurationMs < this.sampleWindowMs) return null;
 
     const window = this.finishWindow();
     // Tolerate 60 Hz presentation when targeting 65 FPS: a display's 16.67 ms
     // interval alone is not evidence that reducing resolution can help.
-    const sustainedOverload = window.meanFrameMs > this.targetFrameMs * 1.12
+    const sustainedOverload = window.meanFrameMs > this.effectiveTargetMs() * 1.12
       || window.overBudgetRatio >= 0.18;
     const burstOverload = window.severeFrameCount >= 2;
     const canDegrade = this.dprCap > this.minDpr
@@ -143,8 +163,8 @@ export class AdaptiveQualitySystem {
       );
     }
 
-    const hasHeadroom = window.meanWorkMs < this.targetFrameMs * 0.78
-      && window.meanFrameMs < this.targetFrameMs * 1.12
+    const hasHeadroom = window.meanWorkMs < this.effectiveTargetMs() * 0.78
+      && window.meanFrameMs < this.effectiveTargetMs() * 1.12
       && window.overBudgetRatio <= 0.02
       && window.severeFrameCount === 0;
     this.healthyWindows = hasHeadroom ? this.healthyWindows + 1 : 0;

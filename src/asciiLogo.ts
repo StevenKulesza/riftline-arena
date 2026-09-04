@@ -125,10 +125,14 @@ class RiftAsciiLogo {
   private cells: readonly LogoCell[] = [];
   private emblemCells: readonly LogoCell[] = [];
   private frameRequest = 0;
+  private frameTimer = 0;
   private lastRenderedAt = -Infinity;
   private logicalWidth = 0;
   private logicalHeight = 0;
   private deviceScale = 1;
+  private onScreen = true;
+  private storedReducedMotion = false;
+  private readonly intersectionObserver: IntersectionObserver | null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -137,6 +141,24 @@ class RiftAsciiLogo {
     this.resizeObserver.observe(canvas);
     this.reducedMotion.addEventListener('change', this.handleMotionChange);
     document.addEventListener('rift:settings', this.handleMotionChange);
+    this.readStoredReducedMotion();
+    // Visibility used to be polled with getClientRects() inside the animation
+    // callback — a forced synchronous layout on every browser frame, all match
+    // long. Observe it instead so the loop never touches layout.
+    this.intersectionObserver = typeof IntersectionObserver !== 'undefined'
+      ? new IntersectionObserver((entries) => {
+        for (const entry of entries) this.onScreen = entry.isIntersecting;
+      })
+      : null;
+    this.intersectionObserver?.observe(canvas);
+  }
+
+  private readStoredReducedMotion(): void {
+    try {
+      this.storedReducedMotion = localStorage.getItem('rift:reduced-motion') === 'true';
+    } catch {
+      this.storedReducedMotion = false;
+    }
   }
 
   async start(): Promise<void> {
@@ -153,26 +175,34 @@ class RiftAsciiLogo {
 
   dispose(): void {
     window.cancelAnimationFrame(this.frameRequest);
+    window.clearTimeout(this.frameTimer);
     this.resizeObserver.disconnect();
+    this.intersectionObserver?.disconnect();
     this.reducedMotion.removeEventListener('change', this.handleMotionChange);
     document.removeEventListener('rift:settings', this.handleMotionChange);
   }
 
   private readonly handleMotionChange = (): void => {
+    this.readStoredReducedMotion();
     this.lastRenderedAt = -Infinity;
     this.render(performance.now());
   };
 
   private readonly animate = (timestamp: number): void => {
-    const hidden = this.canvas.getClientRects().length === 0 || document.visibilityState !== 'visible';
-    const reduced = this.reducedMotion.matches || localStorage.getItem('rift:reduced-motion') === 'true';
+    const hidden = !this.onScreen || document.visibilityState !== 'visible';
+    const reduced = this.reducedMotion.matches || this.storedReducedMotion;
 
     if (!hidden && (!reduced || this.lastRenderedAt === -Infinity) && timestamp - this.lastRenderedAt >= FRAME_INTERVAL_MS) {
       this.lastRenderedAt = timestamp;
       this.render(reduced ? 0 : timestamp);
     }
 
-    this.frameRequest = window.requestAnimationFrame(this.animate);
+    // The logo animates at 18 fps; requesting a callback on every display
+    // refresh burned a rAF slot (and its scheduling overhead) 60-120 times a
+    // second. Sleep out most of the interval, then align on the next frame.
+    this.frameTimer = window.setTimeout(() => {
+      this.frameRequest = window.requestAnimationFrame(this.animate);
+    }, hidden ? 250 : Math.max(0, FRAME_INTERVAL_MS - 4));
   };
 
   private resize(): void {
@@ -399,9 +429,11 @@ class RiftAsciiLogo {
     drawEmblem('glow');
     context.restore();
 
-    for (let layer = 14; layer >= 1; layer -= 1) {
-      context.globalAlpha = 0.105 + (14 - layer) * 0.012;
-      drawWordmark(this.depthBuffer, layer * 1.02, layer * 0.66);
+    // Five stepped layers read as the same extrusion as the previous fourteen
+    // at a third of the composite cost per painted frame.
+    for (let layer = 5; layer >= 1; layer -= 1) {
+      context.globalAlpha = 0.14 + (5 - layer) * 0.028;
+      drawWordmark(this.depthBuffer, layer * 2.86, layer * 1.85);
     }
 
     drawEmblem('shadow', 7, 10);
@@ -465,7 +497,11 @@ class RiftAsciiLogo {
     context.globalAlpha = 1;
     context.filter = 'none';
 
-    this.canvas.style.transform = 'perspective(760px) rotateX(-2.8deg) rotateY(-5.6deg)';
+    // The perspective tilt is constant; rewriting it every painted frame
+    // dirtied style for no visual change.
+    if (this.canvas.style.transform === '') {
+      this.canvas.style.transform = 'perspective(760px) rotateX(-2.8deg) rotateY(-5.6deg)';
+    }
     this.canvas.dataset.frame = String(frame);
     this.canvas.dataset.emblemSpin = spinAngle.toFixed(3);
   }
