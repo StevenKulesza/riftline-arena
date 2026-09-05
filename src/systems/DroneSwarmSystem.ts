@@ -410,6 +410,7 @@ export class DroneSwarmSystem {
   readonly drones: CombatDroneRuntime[] = [];
   readonly busterDrones: CombatDroneRuntime[] = [];
   readonly combatDrones: CombatDroneRuntime[] = [];
+  private readonly liveTargetsByOwner = new Map<DroneTargetOwner, DroneTargetSnapshot>();
   readonly ready: Promise<void>;
   readonly shardPoolSize = 36;
   activeShardCount = 0;
@@ -512,6 +513,12 @@ export class DroneSwarmSystem {
     onShard: (event: BusterShardEvent) => void = () => undefined,
   ): void {
     this.updateShards(delta, targets, onShard);
+    // Owner lookup happens up to twice per drone per frame; index the snapshot
+    // once instead of re-scanning the target list with a fresh closure.
+    this.liveTargetsByOwner.clear();
+    for (const candidate of targets) {
+      if (candidate.alive) this.liveTargetsByOwner.set(candidate.owner, candidate);
+    }
     for (const drone of this.combatDrones) {
       if (!drone.alive) {
         drone.respawnSeconds = Math.max(0, drone.respawnSeconds - delta);
@@ -528,9 +535,7 @@ export class DroneSwarmSystem {
           drone.lastSeenPosition.copy(acquired.position);
           drone.targetLostSeconds = 0;
         } else if (drone.targetOwner !== null) {
-          const remembered = targets.find((candidate) => (
-            candidate.owner === drone.targetOwner && candidate.alive
-          ));
+          const remembered = this.liveTargetsByOwner.get(drone.targetOwner);
           drone.targetLostSeconds += 0.18 + drone.index * 0.025;
           if (!remembered || drone.targetLostSeconds > this.targetMemorySeconds(drone)) {
             drone.targetOwner = null;
@@ -541,7 +546,7 @@ export class DroneSwarmSystem {
       }
       const target = drone.targetOwner === null
         ? null
-        : targets.find((candidate) => candidate.owner === drone.targetOwner && candidate.alive) ?? null;
+        : this.liveTargetsByOwner.get(drone.targetOwner) ?? null;
       if (drone.kind === 'buster') {
         this.updateBusterFlight(drone, target, delta, elapsed);
         this.updateBusterWeapons(drone, target, delta, elapsed);

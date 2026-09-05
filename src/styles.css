@@ -2927,10 +2927,11 @@ body[data-piloting-fighter="true"] #crosshair { opacity: 0; }
   width: min(84vw, 1120px);
   opacity: 0.78;
   border-color: rgba(105, 227, 255, 0.11);
-  box-shadow:
-    0 0 0 54px rgba(105, 227, 255, 0.018),
-    0 0 0 108px rgba(105, 227, 255, 0.012),
-    0 0 0 162px rgba(105, 227, 255, 0.008);
+  /* One ring instead of three stacked 54/108/162px spreads: large-spread
+     box-shadows on a viewport-sized element are among the most expensive
+     paints the compositor can be asked for, and this layer repaints whenever
+     the overlay content above it changes. */
+  box-shadow: 0 0 0 80px rgba(105, 227, 255, 0.014);
   transform: translate(-50%, -50%);
 }
 
@@ -3033,10 +3034,10 @@ body[data-piloting-fighter="true"] #crosshair { opacity: 0; }
 }
 
 #start-overlay #rift-ascii-logo {
-  filter:
-    drop-shadow(12px 18px 0 rgba(0, 7, 20, 0.66))
-    drop-shadow(0 0 10px rgba(19, 187, 255, 0.3))
-    drop-shadow(0 0 34px rgba(28, 117, 255, 0.18));
+  /* Each drop-shadow() is a separate blur pass over the animated canvas, 18
+     times a second. The hard offset shadow and glow are already baked into the
+     canvas render; keep one soft accent pass. */
+  filter: drop-shadow(0 0 12px rgba(19, 187, 255, 0.28));
 }
 
 #start-overlay .arena-callout {
@@ -5468,7 +5469,11 @@ body[data-piloting-fighter="true"] #crosshair { opacity: 0; }
 }
 
 #countdown-overlay.hidden {
-  display: none;
+  /* Keep the overlay in the layout tree: toggling display on a full-viewport
+     grid forced a whole-document layout pass inside the game frame on every
+     countdown tick. Visibility flips are style-only. */
+  display: grid;
+  visibility: hidden;
 }
 
 .countdown-lockup {
@@ -5519,35 +5524,9 @@ body[data-piloting-fighter="true"] #crosshair { opacity: 0; }
   box-shadow: 0 0 10px rgba(72, 232, 255, 0.5);
 }
 
-#countdown-overlay.pulse .countdown-lockup > strong {
-  animation: countdown-strike 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-@keyframes countdown-strike {
-  0% {
-    opacity: 0;
-    scale: 1.65;
-    filter: blur(7px);
-  }
-
-  42% {
-    opacity: 1;
-    scale: 0.94;
-    filter: blur(0);
-  }
-
-  100% {
-    opacity: 1;
-    scale: 1;
-    filter: blur(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  #countdown-overlay.pulse .countdown-lockup > strong {
-    animation: none;
-  }
-}
+/* The strike animation is driven from Hud.showCountdown via the Web
+   Animations API (opacity + transform only — the old 7px blur keyframe
+   re-rasterized the 8rem glyph every animation frame). */
 
 @media (prefers-reduced-motion: reduce) {
   *,

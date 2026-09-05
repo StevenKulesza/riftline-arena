@@ -266,6 +266,11 @@ const PLAYER_EYE = 54 / 56;
 // navigation, and capsule work on every render frame.
 const BOT_FIXED_STEP = 1 / 60;
 const HUD_UPDATE_INTERVAL = 1 / 15;
+// Fixed ticks between fighter-AI decision rebuilds for bots on foot, and
+// between full target re-evaluations. Pilots and invalidated targets bypass
+// the stagger. 6 ticks at 120 Hz simulation keeps decisions at 20 Hz.
+const BOT_FIGHTER_AI_STRIDE = 6;
+const BOT_TARGET_CHOICE_STRIDE = 9;
 // The full diagnostics object is intentionally rich and allocation-heavy.
 // Publishing it at 4 Hz created a repeatable young-generation GC hitch about
 // every 2.5 seconds during otherwise 2-6 ms frames. Runtime telemetry and all
@@ -399,6 +404,9 @@ export class Game {
   private readonly fighters: FighterRuntime[];
   private readonly fighterCollision: FighterArenaCollisionAdapter;
   private readonly fighterAi = new Map<number, FighterAiPilotController>();
+  private readonly botFighterAiResults = new Map<number, { groundTarget: THREE.Vector3 | null; piloting: boolean }>();
+  private readonly botFighterAiStagger = new Map<number, number>();
+  private readonly botTargetChoiceStagger = new Map<number, number>();
   private readonly projectiles: Projectile[] = [];
   private readonly grenades: GrenadeEntity[] = [];
   private hostileGrenadeExplosions = 0;
@@ -425,6 +433,11 @@ export class Game {
     surface: 'metal',
   };
   private readonly pickups: PickupState[] = [];
+  private readonly pickupAnimationCache = new WeakMap<PickupState, {
+    rotor: THREE.Object3D | null;
+    glowMaterials: THREE.MeshStandardMaterial[];
+  }>();
+  private coreCrystalNode: THREE.Object3D | null = null;
   private readonly flags: FlagState[] = [];
   private readonly monsoonRewardVisuals: MonsoonRewardVisualKit | null;
   private readonly botTargets = new Map<number, Owner>();
@@ -569,6 +582,7 @@ export class Game {
   private readonly recentPlayerKills: number[] = [];
   private reducedMotion = false;
   private pausedForScreenshot = false;
+  private skipPresentationFrame = false;
   private screenshotArenaTime = 0;
   private screenshotCameraFov = BASE_GAME_FOV;
   private weaponInspectionMode = false;
@@ -722,6 +736,9 @@ export class Game {
     reportProgress({ fraction: 0.48, label: 'Building combat systems' });
     await yieldDuringLoad();
     const game = new Game(canvas, arena, grenadeAsset);
+    // Pull the audio bank's bytes down while the loading screen owns the main
+    // thread; decoding stays rate-limited behind the countdown's frame budget.
+    game.audio.prefetch();
     reportProgress({ fraction: 0.68, label: 'Loading combat frames' });
     await game.prepareVisualResources(reportProgress);
     reportProgress({ fraction: 1, label: 'Arena ready' });
@@ -914,6 +931,7 @@ export class Game {
     this.startButton.addEventListener('click', this.onStartClick);
     this.applyMenuSettings();
     document.addEventListener('rift:settings', this.onMenuSettings);
+    document.addEventListener('rift:mode', this.onMenuMode);
     // Keep the legacy in-canvas menu adapters addressable while the shared
     // settings event owns the active listener lifecycle.
     void this.installMenuControls;
@@ -1076,6 +1094,7 @@ export class Game {
     this.loop.stop();
     this.startButton.removeEventListener('click', this.onStartClick);
     document.removeEventListener('rift:settings', this.onMenuSettings);
+    document.removeEventListener('rift:mode', this.onMenuMode);
     this.input.dispose();
     this.audio.dispose();
     this.weaponVfx.dispose();
@@ -1129,6 +1148,21 @@ export class Game {
 
   private readonly onStartClick = (): void => {
     this.beginMatch();
+  };
+
+  private readonly onMenuMode = (event: Event): void => {
+    const detail = (event as CustomEvent<{ mode?: MatchModeId }>).detail;
+    const mode = detail?.mode;
+    // Only honor pre-match switches; changing rules mid-match through the DOM
+    // event would corrupt scores and team assignment.
+    if (!mode || this.mode !== 'ready' || mode === this.matchMode) return;
+    // Nothing has been scored yet in the ready state, so the switch only has
+    // to retarget the rules, flag props, and HUD labels.
+    this.matchMode = mode;
+    this.resetFlags();
+    const matchModeElement = document.querySelector<HTMLElement>('#match-mode-value');
+    if (matchModeElement) matchModeElement.textContent = matchModeDefinition(this.matchMode).label.toUpperCase();
+    this.updateHud();
   };
 
   private readonly onMenuSettings = (event: Event): void => {
@@ -1259,11 +1293,31 @@ export class Game {
     this.frame += 1;
     this.elapsed = elapsed;
     this.fps += ((1 / Math.max(delta, 0.001)) - this.fps) * Math.min(1, delta * 3);
+    // Behind the home-screen overlay the arena is decorative. Present it at
+    // half cadence so the menu UI (DOM) keeps the whole frame budget, and keep
+    // menu frames out of the adaptive-quality window so a busy load screen
+    // cannot drag live-play resolution down before the match starts.
+    const menuIdle = this.mode === 'ready'
+      && !this.pausedForScreenshot
+      && !this.visualCapture
+      && !this.physicsQaMode;
+    this.skipPresentationFrame = menuIdle && this.frame % 2 === 1;
+    if (this.skipPresentationFrame) return;
     // Submission time alone misses asynchronous GPU overload. Include delivery
     // pacing so fast CPU submission cannot trigger premature quality recovery.
     // The controller ignores isolated gaps and requires sustained headroom.
-    const measuredFrameMs = window.__THREE_FRAME_TIMING__?.totalMs ?? 0;
-    const qualityChange = this.softwareRenderer || measuredFrameMs <= 0
+    const frameTiming = window.__THREE_FRAME_TIMING__;
+    const measuredFrameMs = frameTiming?.totalMs ?? 0;
+    // On high-refresh displays the loop strides work (e.g. every 2nd rAF), so
+    // presentation cannot pace faster than stride × refresh interval. Teach
+    // the quality controller that floor, or it reads the cadence as permanent
+    // GPU overload and walks resolution to minimum for zero gain.
+    this.adaptiveQuality.setPacingFloorMs(
+      frameTiming && frameTiming.refreshHz > 0 && frameTiming.workStride > 1
+        ? (1_000 / frameTiming.refreshHz) * frameTiming.workStride * 1.06
+        : 0,
+    );
+    const qualityChange = this.softwareRenderer || measuredFrameMs <= 0 || menuIdle
       ? null
       : this.adaptiveQuality.sampleFrame(measuredFrameMs, delta * 1_000);
     if (qualityChange) this.renderDprCap = qualityChange.dprCap;
@@ -2971,6 +3025,19 @@ export class Game {
     const controller = this.fighterAi.get(bot.id);
     if (!controller || this.fighters.length === 0) return { groundTarget: null, piloting: false };
     const currentFighter = this.fighterForPilot(bot.id);
+    // Rebuilding the vehicle/target/threat/pad world model is the most
+    // allocation-heavy work in the whole simulation. A bot on foot only needs
+    // fresh boarding decisions a few times a second; an active pilot keeps the
+    // full-rate control loop. Stagger by bot id so decision ticks spread
+    // across frames instead of aligning into one spike.
+    if (!currentFighter) {
+      const cached = this.botFighterAiResults.get(bot.id);
+      this.botFighterAiStagger.set(bot.id, (this.botFighterAiStagger.get(bot.id) ?? bot.id) + 1);
+      if (cached && (this.botFighterAiStagger.get(bot.id) ?? 0) % BOT_FIGHTER_AI_STRIDE !== 0) {
+        return cached;
+      }
+      delta = delta * BOT_FIGHTER_AI_STRIDE;
+    }
     const vehicles = this.fighters.map((fighter) => this.fighterVehicleSnapshot(fighter));
     const targets = [
       {
@@ -3059,7 +3126,9 @@ export class Game {
       },
     });
     const groundTarget = this.applyBotFighterIntent(bot, intent);
-    return { groundTarget, piloting: Boolean(this.fighterForPilot(bot.id)) };
+    const result = { groundTarget, piloting: Boolean(this.fighterForPilot(bot.id)) };
+    this.botFighterAiResults.set(bot.id, result);
+    return result;
   }
 
   private applyBotFighterIntent(bot: Bot, intent: FighterAiIntent): THREE.Vector3 | null {
@@ -3173,7 +3242,7 @@ export class Game {
       // Preserve its assigned target instead of allowing nearby ambient bots to
       // steal aggro from the sightline being exercised.
       const lockedTarget = bot.movementLocked ? bot.targetOwner : null;
-      const targetOwner = droneTarget ? null : lockedTarget ?? this.chooseBotTarget(bot);
+      const targetOwner = droneTarget ? null : lockedTarget ?? this.chooseBotTargetThrottled(bot);
       bot.targetOwner = targetOwner;
       if (droneTarget) {
         this.botDroneTargets.set(bot.id, droneTarget.id);
@@ -3604,6 +3673,30 @@ export class Game {
     const velocity = launch.clone().addScaledVector(bot.velocity, 0.18);
     this.grenades.push({ root, velocity, owner: bot.id, fuse: GRENADE.fuse, trailDistance: 0, bounces: 0 });
     this.audio.weaponWorld('rocket', origin, `bot-${bot.id}-grenade`, (bot.id - 1) * 0.16);
+  }
+
+  private topScoringBot(): Bot | null {
+    let best: Bot | null = null;
+    for (const bot of this.bots) {
+      if (!best || bot.score > best.score) best = bot;
+    }
+    return best;
+  }
+
+  private chooseBotTargetThrottled(bot: Bot): Owner | null {
+    // Full target evaluation raycasts line of sight to every candidate. Doing
+    // that for all bots on every 60 Hz tick is ~225 BVH raycasts per tick in
+    // 15-bot modes. Keep the current target between staggered re-evaluations
+    // unless it has become invalid; the score function already biases toward
+    // target retention, so behavior is unchanged at 1/9th the cost.
+    const tick = (this.botTargetChoiceStagger.get(bot.id) ?? bot.id) + 1;
+    this.botTargetChoiceStagger.set(bot.id, tick);
+    const current = this.botTargets.get(bot.id) ?? null;
+    const currentValid = current !== null
+      && this.ownerAlive(current)
+      && !this.areFriendlyOwners(bot.id, current);
+    if (currentValid && tick % BOT_TARGET_CHOICE_STRIDE !== 0) return current;
+    return this.chooseBotTarget(bot);
   }
 
   private chooseBotTarget(bot: Bot): Owner | null {
@@ -5629,20 +5722,31 @@ export class Game {
         for (const pickup of this.pickups) {
           // Pickups are physical props seated on their floor racks. Only small
           // internal identification hardware animates; the item never hovers.
-          const rotor = pickup.group.getObjectByName('pickup-id-rotor');
-          if (rotor) rotor.rotation.y += delta * 0.65;
+          // Node lookups and glow-material lists are static per pickup, so
+          // resolve them once instead of walking every subtree every frame.
+          let animated = this.pickupAnimationCache.get(pickup);
+          if (!animated) {
+            const glowMaterials: THREE.MeshStandardMaterial[] = [];
+            pickup.group.traverse((object) => {
+              const mesh = object as THREE.Mesh;
+              if (!mesh.isMesh || !mesh.userData.pickupGlow) return;
+              glowMaterials.push(mesh.material as THREE.MeshStandardMaterial);
+            });
+            animated = {
+              rotor: pickup.group.getObjectByName('pickup-id-rotor') ?? null,
+              glowMaterials,
+            };
+            this.pickupAnimationCache.set(pickup, animated);
+          }
+          if (animated.rotor) animated.rotor.rotation.y += delta * 0.65;
           const pulse = 0.82 + Math.sin(elapsed * 2.4 + pickup.group.userData.phase) * 0.16;
-          pickup.group.traverse((object) => {
-            const mesh = object as THREE.Mesh;
-            if (!mesh.isMesh || !mesh.userData.pickupGlow) return;
-            const material = mesh.material as THREE.MeshStandardMaterial;
-            material.emissiveIntensity = pulse;
-          });
+          for (const material of animated.glowMaterials) material.emissiveIntensity = pulse;
         }
       }
       this.coreVisualGroup.rotation.y += delta * 1.1;
       this.coreVisualGroup.position.y = Math.sin(elapsed * 2.7) * 0.18;
-      const coreCrystal = this.coreVisualGroup.getObjectByName('flux-core-crystal');
+      const coreCrystal = this.coreCrystalNode
+        ??= this.coreVisualGroup.getObjectByName('flux-core-crystal') ?? null;
       if (coreCrystal) {
         const pulse = 1 + Math.sin(elapsed * 3.4) * 0.035;
         coreCrystal.scale.setScalar(pulse);
@@ -6159,8 +6263,8 @@ export class Game {
         },
         {
           rank: 4,
-          callsign: [...this.bots].sort((left, right) => right.score - left.score)[0]?.displayName ?? 'SQUAD LEAD',
-          score: [...this.bots].sort((left, right) => right.score - left.score)[0]?.score ?? 0,
+          callsign: this.topScoringBot()?.displayName ?? 'SQUAD LEAD',
+          score: this.topScoringBot()?.score ?? 0,
           team: TEAM_LABELS.crimson,
         },
       ];
@@ -10034,6 +10138,7 @@ export class Game {
   }
 
   private render(): void {
+    if (this.skipPresentationFrame) return;
     if (this.physicsQaMode && this.physicsQaFrameRendered) return;
     this.arena.prepareRender?.(this.camera);
     this.renderer.info.reset();

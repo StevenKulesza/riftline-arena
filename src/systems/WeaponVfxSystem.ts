@@ -199,6 +199,8 @@ function orientBetween(root: THREE.Object3D, start: THREE.Vector3, end: THREE.Ve
 
 export class WeaponVfxSystem {
   private readonly effects: Effect[] = [];
+  // Live tally per effect kind so budget checks avoid rescanning the list.
+  private readonly effectKindCounts: Partial<Record<NonNullable<Effect['kind']>, number>> = {};
   private readonly marks: ImpactMark[] = [];
   private readonly tempPosition = new THREE.Vector3();
   private readonly tempQuaternion = new THREE.Quaternion();
@@ -1545,9 +1547,17 @@ export class WeaponVfxSystem {
     const weaponMarkLimit = this.reducedEffects
       ? Math.min(3, MAX_MARKS_BY_WEAPON[weapon])
       : MAX_MARKS_BY_WEAPON[weapon];
-    while (this.marks.filter((entry) => entry.weapon === weapon).length > weaponMarkLimit) {
+    // Count once and trim oldest-first; re-filtering the whole list inside the
+    // loop condition allocated a fresh array per eviction during heavy fire.
+    let sameWeaponCount = 0;
+    for (const entry of this.marks) {
+      if (entry.weapon === weapon) sameWeaponCount += 1;
+    }
+    while (sameWeaponCount > weaponMarkLimit) {
       const sameWeaponIndex = this.marks.findIndex((entry) => entry.weapon === weapon);
+      if (sameWeaponIndex < 0) break;
       this.removeMark(sameWeaponIndex);
+      sameWeaponCount -= 1;
     }
     while (this.marks.length > (this.reducedEffects ? 8 : MAX_IMPACT_MARKS)) this.removeMark(0);
   }
@@ -2285,19 +2295,21 @@ export class WeaponVfxSystem {
       this.removeEffect(trailIndex >= 0 ? trailIndex : 0);
     }
     this.effects.push(effect);
+    if (effect.kind) {
+      this.effectKindCounts[effect.kind] = (this.effectKindCounts[effect.kind] ?? 0) + 1;
+    }
   }
 
   private countEffects(kind: NonNullable<Effect['kind']>): number {
-    let count = 0;
-    for (const effect of this.effects) {
-      if (effect.kind === kind) count += 1;
-    }
-    return count;
+    return this.effectKindCounts[kind] ?? 0;
   }
 
   private removeEffect(index: number): void {
     const effect = this.effects[index];
     if (!effect) return;
+    if (effect.kind) {
+      this.effectKindCounts[effect.kind] = Math.max(0, (this.effectKindCounts[effect.kind] ?? 0) - 1);
+    }
     if (effect.pooled) {
       effect.root.visible = false;
       this.effects.splice(index, 1);
